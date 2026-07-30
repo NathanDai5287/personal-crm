@@ -1,0 +1,8 @@
+{
+  "name": "personal-crm",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "description": "Standalone personal-CRM pipeline (contacts, groups, Signal ingestion).",
+  "dependencies": {}
+}

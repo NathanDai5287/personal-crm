@@ -1,0 +1,15 @@
+# Personal data — NEVER committed to this repo. Contains contacts' private
+# message content (crm.db archive, profiles, ledgers), the dashboard password
+# (web-password.txt), and the Signal DB cipher key (signal-key.txt). The data
+# tree has its own separate, local-only git history (.memory-history.git).
+data/
+
+# Run logs (contain message excerpts in step notes)
+logs/
+
+# Local-only snapshot history of data/
+.memory-history.git/
+
+node_modules/
+*.bak
+*.tmp-*
