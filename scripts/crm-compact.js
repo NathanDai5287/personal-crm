@@ -28,7 +28,7 @@ const fs = require("fs");
 const path = require("path");
 const { execFileSync } = require("child_process");
 const { openSignalDb, openCrmDb } = require("../lib/signal-db");
-const { mirrorMessages } = require("../lib/archive");
+const { runSweep } = require("./crm-archive");
 const { resolveSources, groupOthers } = require("../lib/sources");
 const {
   TRACKED,
@@ -212,59 +212,37 @@ function renderTimeline(rawLines, t, { includeGroup }) {
 
 // ---- DB access ---------------------------------------------------------------
 
-function buildNameMap(sdb, nicks) {
-  const m = new Map();
-  for (const r of sdb
-    .prepare(
-      "SELECT serviceId, COALESCE(name, profileFullName, profileName, e164) AS nm FROM conversations WHERE type='private' AND serviceId IS NOT NULL",
-    )
-    .all())
-    if (r.nm) m.set(r.serviceId, r.nm);
-  // Override Signal display names with Nathan's nicknames (use his names everywhere).
-  for (const [sid, info] of Object.entries(nicks)) if (info && info.name) m.set(sid, info.name);
-  return m;
-}
-// Multi-conversation message fetch. `convs` is a list of sources:
-//   { convId, labelFn, prefix, conversation, srcFilter }
-//     labelFn(row) -> speaker display label
+// (Speaker name attribution moved into the archive sweep — see crm-archive.js.)
+// Multi-conversation message fetch — FROM THE ARCHIVE (crm.db), not Signal.
+// The hourly sweep (crm-archive.js) is the only Signal reader; reading here
+// from the archive means timelines keep messages that have since disappeared
+// from Signal. `convs` is a list of sources:
+//   { convId, prefix, conversation, srcFilter }
 //     prefix       -> line prefix for group context, e.g. '(Nat & Kat) '
-//     conversation -> human label stored in the provenance archive
+//     conversation -> human label (informational)
 //     srcFilter    -> optional [serviceIds]: keep only these senders
+// Speaker labels were attributed once, at archive time (sender column).
 // Rows from all sources are merged in time order, so a contact's timeline
 // interleaves their DM and their group chats exactly like refresh ledgers do.
-// `archive` (optional): { cdb, slug } — every row read here is also mirrored
-// into crm.db's provenance archive, and each line carries its ⟨m<rowid>⟩ id.
-function messagesBetween(sdb, convs, fromMs, toMs, archive) {
+function messagesBetween(cdb, convs, fromMs, toMs) {
   const rows = [];
   for (const c of convs) {
-    let sql = `SELECT rowid AS rid, body, sent_at, type, sourceServiceId FROM messages
-       WHERE conversationId = ? AND body IS NOT NULL AND type IN ('incoming','outgoing')
-         AND sent_at >= ? AND sent_at < ?`;
+    let sql = `SELECT id AS rid, body, sent_at, type, src AS sourceServiceId, sender FROM messages
+       WHERE conv_id = ? AND sent_at >= ? AND sent_at < ?`;
     const params = [c.convId, fromMs, toMs];
     if (c.srcFilter && c.srcFilter.length) {
-      // Outgoing rows often carry a NULL sourceServiceId, so when the filter
-      // includes Nathan (bi-groups: both directions) match his messages by
-      // type too — mirrors the bi-group clause in crm-refresh.js.
-      const srcIn = `sourceServiceId IN (${c.srcFilter.map(() => "?").join(",")})`;
+      // Outgoing rows often carry a NULL src, so when the filter includes
+      // Nathan (bi-groups: both directions) match his messages by type too —
+      // mirrors the bi-group clause in lib/sources.js.
+      const srcIn = `src IN (${c.srcFilter.map(() => "?").join(",")})`;
       sql += c.srcFilter.includes(MY_SERVICE_ID) ? ` AND (type = 'outgoing' OR ${srcIn})` : ` AND ${srcIn}`;
       params.push(...c.srcFilter);
     }
-    for (const r of sdb.prepare(sql + " ORDER BY sent_at ASC").all(params)) rows.push({ ...r, _c: c });
+    for (const r of cdb.prepare(sql + " ORDER BY sent_at ASC").all(...params)) rows.push({ ...r, _c: c });
   }
   rows.sort((a, b) => a.sent_at - b.sent_at || a.rid - b.rid);
-  if (archive && rows.length) {
-    mirrorMessages(archive.cdb, rows.map((m) => ({
-      id: m.rid,
-      convId: m._c.convId,
-      conversation: m._c.conversation,
-      slug: archive.slug || null,
-      sentAt: m.sent_at,
-      sender: m._c.labelFn(m),
-      body: (m.body || "").replace(/\s+/g, " ").trim(),
-    })));
-  }
   return {
-    lines: rows.map((m) => `[${fmtTs(m.sent_at)}] ⟨m${m.rid}⟩ ${m._c.prefix || ""}${m._c.labelFn(m)}: ${(m.body || "").replace(/\s+/g, " ").trim()}`),
+    lines: rows.map((m) => `[${fmtTs(m.sent_at)}] ⟨m${m.rid}⟩ ${m._c.prefix || ""}${m.sender}: ${(m.body || "").replace(/\s+/g, " ").trim()}`),
     senders: new Set(rows.map((r) => r.sourceServiceId).filter(Boolean)),
   };
 }
@@ -272,12 +250,12 @@ function messagesBetween(sdb, convs, fromMs, toMs, archive) {
 // ---- shared tiering engine ---------------------------------------------------
 
 // Mutates `t` (daily/weekly/older maps). Returns { rawLines, summaries, newDailies }.
-function buildConvTiers(sdb, convs, who, since, now, t, archive) {
-  const all = messagesBetween(sdb, convs, now - RAW_DAYS * DAY, now, archive).lines;
+function buildConvTiers(cdb, convs, who, since, now, t) {
+  const all = messagesBetween(cdb, convs, now - RAW_DAYS * DAY, now).lines;
   const rawLines = all.slice(-RAW_MAX_MSGS);
   if (all.length > rawLines.length)
     rawLines.unshift(
-      `_(${all.length - rawLines.length} earlier messages this week omitted — full log in the Signal DB; fetch with crm-transcript.js)_`,
+      `_(${all.length - rawLines.length} earlier messages this week omitted — full log in the archive; fetch with crm-transcript.js)_`,
     );
 
   let summaries = 0;
@@ -288,7 +266,7 @@ function buildConvTiers(sdb, convs, who, since, now, t, archive) {
     if (dayStart < since) continue;
     const key = dayKey(dayStart + DAY / 2);
     if (t.daily.has(key) || t.weekly.has(isoWeekKey(dayStart + DAY / 2))) continue;
-    const lines = messagesBetween(sdb, convs, dayStart, dayStart + DAY, archive).lines;
+    const lines = messagesBetween(cdb, convs, dayStart, dayStart + DAY).lines;
     if (lines.length === 0) continue;
     const s = summarize(who, key, lines, "daily");
     t.daily.set(key, s);
@@ -301,7 +279,7 @@ function buildConvTiers(sdb, convs, who, since, now, t, archive) {
     if (weekStart < since) continue;
     const key = isoWeekKey(now - (wk * 7 + 3) * DAY);
     if (t.weekly.has(key)) continue;
-    const lines = messagesBetween(sdb, convs, weekStart, now - wk * 7 * DAY, archive).lines;
+    const lines = messagesBetween(cdb, convs, weekStart, now - wk * 7 * DAY).lines;
     if (lines.length === 0) continue;
     t.weekly.set(key, summarize(who, `the week of ${key}`, lines, "weekly"));
     summaries++;
@@ -320,7 +298,7 @@ function backupAndWrite(file, next) {
 
 // ---- contact + group compaction ----------------------------------------------
 
-function compactConversation({ sdb, convs, who, file, stateKey, state, now, includeGroup, foldLines, archive }) {
+function compactConversation({ cdb, convs, who, file, stateKey, state, now, includeGroup, foldLines }) {
   const ensured = fs.existsSync(file)
     ? fs.readFileSync(file, "utf8")
     : `# ${path.basename(file, ".md")}\n\n## What I know\n\n_(stub)_\n`;
@@ -328,7 +306,7 @@ function compactConversation({ sdb, convs, who, file, stateKey, state, now, incl
   const t = parseTiers(timelineExisting);
   const since = state[stateKey] && state[stateKey].since != null ? state[stateKey].since : now;
 
-  const { rawLines, summaries, newDailies } = buildConvTiers(sdb, convs, who, since, now, t, archive);
+  const { rawLines, summaries, newDailies } = buildConvTiers(cdb, convs, who, since, now, t);
 
   // Merge folded group-activity lines (newest first, capped).
   if (includeGroup && foldLines && foldLines.length) {
@@ -353,31 +331,29 @@ function compactContact(cdb, sdb, slug, state, now, foldLines, nicks) {
   const row = cdb.prepare("SELECT signal_id, name FROM contacts WHERE file_path = ?").get(rel);
   if (!row || !row.signal_id) return { slug, skipped: "no crm row" };
   const display = (nicks[row.signal_id] && nicks[row.signal_id].name) || row.name;
-  const first = display.split(" ")[0];
 
   // Same source universe as crm-refresh.js: DM (all messages), bi-groups
   // (both directions — effectively private channels), multi-groups (only the
   // contact's own messages). Timeline tiers interleave all of them by time.
+  // Speaker labels come from the archive's sender column (set at sweep time).
   const sources = resolveSources(sdb, row.signal_id);
-  const dmLabelFn = (m) => (m.type === "outgoing" ? "Nathan" : first);
-  const srcLabelFn = (m) => (m.sourceServiceId === MY_SERVICE_ID || m.type === "outgoing" ? "Nathan" : first);
   const convs = [
     ...sources.dmConvIds.map((id) => ({
-      convId: id, labelFn: dmLabelFn, prefix: "", conversation: `DM with ${display}`,
+      convId: id, prefix: "", conversation: `DM with ${display}`,
     })),
     ...sources.biGroupConvIds.map((id) => ({
-      convId: id, labelFn: srcLabelFn, prefix: `(${sources.labels[id]}) `, conversation: sources.labels[id],
+      convId: id, prefix: `(${sources.labels[id]}) `, conversation: sources.labels[id],
       srcFilter: [MY_SERVICE_ID, row.signal_id],
     })),
     ...sources.multiGroupConvIds.map((id) => ({
-      convId: id, labelFn: srcLabelFn, prefix: `(${sources.labels[id]}) `, conversation: sources.labels[id],
+      convId: id, prefix: `(${sources.labels[id]}) `, conversation: sources.labels[id],
       srcFilter: [row.signal_id],
     })),
   ];
   if (convs.length === 0) return { slug, skipped: "no conversations" };
 
   const r = compactConversation({
-    sdb,
+    cdb,
     convs,
     who: `between Nathan and ${display}`,
     file: `${CONTACTS_DIR}/${slug}.md`,
@@ -386,23 +362,18 @@ function compactContact(cdb, sdb, slug, state, now, foldLines, nicks) {
     now,
     includeGroup: true,
     foldLines,
-    archive: { cdb, slug },
   });
   return { slug, name: display, ...r };
 }
 
-function compactGroup(cdb, sdb, nameMap, group, state, now) {
+function compactGroup(cdb, sdb, group, state, now) {
   const conv = sdb.prepare("SELECT id, members FROM conversations WHERE groupId = ? LIMIT 1").get([group.groupId]);
   if (!conv) return { slug: group.slug, skipped: "no group conversation" };
-  const labelFn = (m) =>
-    m.type === "outgoing"
-      ? "Nathan"
-      : m.sourceServiceId === BOT_SERVICE_ID
-        ? "Janet"
-        : nameMap.get(m.sourceServiceId) || "Someone";
-  const convSpec = { convId: conv.id, labelFn, prefix: "", conversation: group.name };
+  // Speaker labels (incl. 'Janet' for the old bot) come from the archive's
+  // sender column, attributed by the sweep with the full group name map.
+  const convSpec = { convId: conv.id, prefix: "", conversation: group.name };
   const r = compactConversation({
-    sdb,
+    cdb,
     convs: [convSpec],
     who: `in the group "${group.name}"`,
     file: `${GROUPS_DIR}/${group.slug}.md`,
@@ -410,7 +381,6 @@ function compactGroup(cdb, sdb, nameMap, group, state, now) {
     state,
     now,
     includeGroup: false,
-    archive: { cdb, slug: null },
   });
   // Bi-groups (only other party besides me/bot is one person) are already
   // covered IN that person's own timeline via compactContact's sources — do
@@ -420,7 +390,7 @@ function compactGroup(cdb, sdb, nameMap, group, state, now) {
     return { slug: group.slug, name: group.name, participants: [], ...r };
   }
   // Map participants (tracked contacts who spoke recently) for folding.
-  const recent = messagesBetween(sdb, [convSpec], now - DAILY_UNTIL_DAYS * DAY, now, { cdb, slug: null }).senders;
+  const recent = messagesBetween(cdb, [convSpec], now - DAILY_UNTIL_DAYS * DAY, now).senders;
   const participants = [];
   for (const sid of recent) {
     if (sid === BOT_SERVICE_ID) continue;
@@ -451,7 +421,9 @@ function main() {
   })();
   const cdb = openCrmDb();
   const sdb = openSignalDb();
-  const nameMap = buildNameMap(sdb, nicks);
+  // ARCHIVE-FIRST: pull anything new into the archive, then read all message
+  // content from it (Signal is only consulted for conversation metadata).
+  runSweep(cdb, sdb);
 
   const allGroups = (() => {
     try {
@@ -468,7 +440,7 @@ function main() {
   // Phase 1: groups first, so their new day-summaries can fold into participant profiles.
   const foldByContact = new Map(); // slug -> [ "- YYYY-MM-DD [Group]: summary", ... ]
   for (const g of groups) {
-    const r = compactGroup(cdb, sdb, nameMap, g, state, now);
+    const r = compactGroup(cdb, sdb, g, state, now);
     if (r.skipped) {
       console.log(`- group ${g.slug}: skipped (${r.skipped})`);
       continue;

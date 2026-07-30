@@ -1,0 +1,34 @@
+<#
+Registers the "Personal CRM Archive Sweep" Windows Scheduled Task: runs
+scripts/crm-archive.js (via the hidden VBS launcher) once an hour, so messages
+with short disappearing-message timers get captured into crm.db's archive
+long before the nightly AI pipeline runs.
+
+    powershell -ExecutionPolicy Bypass -File tools\register-archive-task.ps1
+#>
+
+$ErrorActionPreference = 'Stop'
+
+$TaskName = 'Personal CRM Archive Sweep'
+$RootDir = 'C:\Users\natha\Programming\personal-crm'
+$Launcher = Join-Path $RootDir 'run-archive-hidden.vbs'
+
+$action = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument "`"$Launcher`"" -WorkingDirectory $RootDir
+# Hourly, starting now, indefinitely.
+$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Hours 1)
+$settings = New-ScheduledTaskSettingsSet `
+    -StartWhenAvailable `
+    -AllowStartIfOnBatteries `
+    -DontStopIfGoingOnBatteries `
+    -MultipleInstances IgnoreNew `
+    -ExecutionTimeLimit (New-TimeSpan -Minutes 15)
+
+Register-ScheduledTask `
+    -TaskName $TaskName `
+    -Action $action `
+    -Trigger $trigger `
+    -Settings $settings `
+    -Description 'Hourly Signal->crm.db archive sweep (scripts/crm-archive.js). No AI; captures disappearing messages.' `
+    -Force
+
+Write-Host "Registered scheduled task '$TaskName' (hourly, hidden)"

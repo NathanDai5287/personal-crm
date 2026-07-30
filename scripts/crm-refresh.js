@@ -49,10 +49,10 @@
 const fs = require('fs');
 const path = require('path');
 const { openSignalDb, openCrmDb } = require('../lib/signal-db');
-const { mirrorMessages } = require('../lib/archive');
-const { resolveSources, buildMessageQuery } = require('../lib/sources');
+const { runSweep } = require('./crm-archive');
+const { resolveSources, buildArchiveQuery } = require('../lib/sources');
 const {
-  TRACKED, NICKNAMES, REFRESH_STATE, REFRESH_DIR, MY_SERVICE_ID,
+  TRACKED, NICKNAMES, REFRESH_STATE, REFRESH_DIR,
 } = require('../lib/config');
 
 const DAY = 86_400_000;
@@ -101,6 +101,12 @@ function main() {
   const cdb = openCrmDb();
   const sdb = openSignalDb();
 
+  // ARCHIVE-FIRST: sweep anything new from Signal into crm.db's archive, then
+  // build every ledger FROM THE ARCHIVE. Signal is never read for message
+  // content here — so a disappearing message that the hourly sweep caught
+  // still reaches the merge even if it has since expired from Signal's DB.
+  runSweep(cdb, sdb);
+
   fs.mkdirSync(REFRESH_DIR, { recursive: true });
 
   const manifest = [];
@@ -114,38 +120,23 @@ function main() {
     const sources = resolveSources(sdb, row.signal_id);
     const hasCursor = Object.prototype.hasOwnProperty.call(cursors, slug);
     const bound = hasCursor
-      ? { clause: 'rowid > ?', param: cursors[slug] || 0 }
+      ? { clause: 'id > ?', param: cursors[slug] || 0 }
       : { clause: 'sent_at >= ?', param: now - BACKFILL_DAYS * DAY };
 
-    const q = buildMessageQuery(sources, row.signal_id, bound);
+    const q = buildArchiveQuery(sources, row.signal_id, bound);
     if (!q) continue;
-    const msgs = sdb.prepare(q.sql).all(q.params);
+    const msgs = cdb.prepare(q.sql).all(...q.params);
     if (msgs.length === 0) continue;
 
     const display = (nicks[row.signal_id] && nicks[row.signal_id].name) || row.name;
-    const first = display.split(' ')[0];
-    const speaker = (m) => {
-      if (m.src === MY_SERVICE_ID) return 'Nathan';
-      if (m.src === row.signal_id) return first;
-      return m.type === 'outgoing' ? 'Nathan' : first;
-    };
-    // PROVENANCE: every line carries the message's ⟨m<rowid>⟩ id, so the merge
-    // model can cite the exact source messages behind what it writes. The same
-    // messages are mirrored into crm.db's archive so the ids stay resolvable.
+    // PROVENANCE: every line carries the message's ⟨m<id>⟩ archive id, so the
+    // merge model can cite the exact source messages behind what it writes.
+    // Speaker labels were attributed once, at archive time.
     const lines = msgs.map((m) => {
       const label = sources.labels[m.cid]; // set only for group convs
       const ctx = label ? `(${label}) ` : '';
-      return `[${fmtTs(m.sent_at)}] ⟨m${m.rid}⟩ ${ctx}${speaker(m)}: ${(m.body || '').replace(/\s+/g, ' ').trim()}`;
+      return `[${fmtTs(m.sent_at)}] ⟨m${m.rid}⟩ ${ctx}${m.sender}: ${m.body}`;
     });
-    mirrorMessages(cdb, msgs.map((m) => ({
-      id: m.rid,
-      convId: m.cid,
-      conversation: sources.labels[m.cid] || `DM with ${display}`,
-      slug,
-      sentAt: m.sent_at,
-      sender: speaker(m),
-      body: (m.body || '').replace(/\s+/g, ' ').trim(),
-    })));
 
     // Describe which sources contributed, for the file header.
     const srcBits = [];
