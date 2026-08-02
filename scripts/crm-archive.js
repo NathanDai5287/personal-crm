@@ -22,7 +22,7 @@
 //
 // Usage:
 //   node scripts/crm-archive.js          # sweep everything new
-// Also exported as runSweep(cdb, sdb) so crm-refresh.js / crm-compact.js can
+// Also exported as runSweep(cdb, sdb, {deep}) so crm-refresh.js / crm-compact.js can
 // sweep inline at the start of a daily run (no dependency on the hourly task
 // having fired recently).
 'use strict';
@@ -30,12 +30,31 @@ const fs = require('fs');
 const { openSignalDb, openCrmDb } = require('../lib/signal-db');
 const { mirrorMessages, ensureMessagesTable } = require('../lib/archive');
 const { resolveSources, buildMessageQuery } = require('../lib/sources');
+const { loadAttachments, describeAttachments, composeBody } = require('../lib/attachments');
 const {
   TRACKED, TRACKED_GROUPS, NICKNAMES, ARCHIVE_STATE, MY_SERVICE_ID, BOT_SERVICE_ID,
 } = require('../lib/config');
 
 const DAY = 86_400_000;
-const BACKFILL_DAYS = 30; // first-sweep window per source, matches refresh
+// First-sweep window for a source with no cursor yet. The hourly sweep only ever
+// needs the recent past; `--deep` (below) is how you pull older history in.
+const BACKFILL_DAYS = Number(process.env.CRM_ARCHIVE_BACKFILL_DAYS) || 30;
+
+// DEEP SWEEP: ignore cursors entirely and re-sweep every source from the
+// beginning of Signal's history, copying anything the archive is missing.
+//
+// Why a flag rather than just raising BACKFILL_DAYS: cursors already exist, so
+// the incremental bound is `rowid > cursor` and a wider window would change
+// nothing. --deep drops to the sent_at bound instead. Mirroring is
+// INSERT OR IGNORE, so re-walking rows already archived is a no-op — the sweep
+// is idempotent and safe to re-run.
+//
+//   node scripts/crm-archive.js --deep
+//
+// This is the "widen the archive to full history" operation: it takes the
+// archive from ~30 days to everything Signal still holds (~78k messages for
+// tracked contacts). No AI, no cost, no profile changes.
+const DEEP = process.argv.includes('--deep');
 
 function loadJson(file, fallback) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; }
@@ -58,16 +77,16 @@ function buildNameMap(sdb, nicks) {
 }
 
 // Sweep one contact's sources. Returns the number of newly-seen rows.
-function sweepContact(cdb, sdb, slug, cursors, now, nicks) {
+function sweepContact(cdb, sdb, slug, cursors, now, nicks, deep) {
   const rel = `data/contacts/${slug}.md`;
   const row = cdb.prepare('SELECT signal_id, name FROM contacts WHERE file_path = ?').get(rel);
   if (!row || !row.signal_id) return 0;
 
   const sources = resolveSources(sdb, row.signal_id);
   const key = `contact:${slug}`;
-  const bound = Object.prototype.hasOwnProperty.call(cursors, key)
+  const bound = (!deep && Object.prototype.hasOwnProperty.call(cursors, key))
     ? { clause: 'rowid > ?', param: cursors[key] || 0 }
-    : { clause: 'sent_at >= ?', param: now - BACKFILL_DAYS * DAY };
+    : { clause: 'sent_at >= ?', param: deep ? 0 : now - BACKFILL_DAYS * DAY };
   const q = buildMessageQuery(sources, row.signal_id, bound);
   if (!q) return 0;
   const msgs = sdb.prepare(q.sql).all(q.params);
@@ -80,6 +99,9 @@ function sweepContact(cdb, sdb, slug, cursors, now, nicks) {
     if (m.src === row.signal_id) return first;
     return m.type === 'outgoing' ? 'Nathan' : first;
   };
+  // Media -> text, once, here. Everything downstream reads the archive, so a
+  // photo becomes "[photo]" for the ledger, the merge and the Timeline alike.
+  const att = loadAttachments(sdb, msgs.filter((m) => m.hasAttachments).map((m) => m.mid));
   mirrorMessages(cdb, msgs.map((m) => ({
     id: m.rid,
     convId: m.cid,
@@ -87,26 +109,28 @@ function sweepContact(cdb, sdb, slug, cursors, now, nicks) {
     slug,
     sentAt: m.sent_at,
     sender: speaker(m),
-    body: (m.body || '').replace(/\s+/g, ' ').trim(),
+    body: composeBody(m.body, describeAttachments(att.get(m.mid))),
     src: m.src,
     type: m.type,
+    hasMedia: Boolean(m.hasAttachments), // lets the archive upgrade an old caption-only row
   })));
   cursors[key] = msgs.reduce((mx, m) => Math.max(mx, m.rid), cursors[key] || 0);
   return msgs.length;
 }
 
 // Sweep one tracked group's FULL conversation (all speakers).
-function sweepGroup(cdb, sdb, group, cursors, now, nameMap) {
+function sweepGroup(cdb, sdb, group, cursors, now, nameMap, deep) {
   const conv = sdb.prepare('SELECT id FROM conversations WHERE groupId = ? LIMIT 1').get([group.groupId]);
   if (!conv) return 0;
   const key = `group:${group.slug}`;
-  const bound = Object.prototype.hasOwnProperty.call(cursors, key)
+  const bound = (!deep && Object.prototype.hasOwnProperty.call(cursors, key))
     ? { clause: 'rowid > ?', param: cursors[key] || 0 }
-    : { clause: 'sent_at >= ?', param: now - BACKFILL_DAYS * DAY };
+    : { clause: 'sent_at >= ?', param: deep ? 0 : now - BACKFILL_DAYS * DAY };
   const msgs = sdb.prepare(`
-    SELECT rowid AS rid, body, sent_at, type, sourceServiceId AS src
+    SELECT rowid AS rid, id AS mid, body, sent_at, type, sourceServiceId AS src, hasAttachments
     FROM messages
-    WHERE conversationId = ? AND body IS NOT NULL AND type IN ('incoming','outgoing')
+    WHERE conversationId = ? AND (body IS NOT NULL OR hasAttachments = 1)
+      AND type IN ('incoming','outgoing')
       AND ${bound.clause}
     ORDER BY rowid ASC`).all([conv.id, bound.param]);
   if (msgs.length === 0) return 0;
@@ -116,6 +140,7 @@ function sweepGroup(cdb, sdb, group, cursors, now, nameMap) {
     if (m.src === BOT_SERVICE_ID) return 'Janet';
     return nameMap.get(m.src) || 'Someone';
   };
+  const att = loadAttachments(sdb, msgs.filter((m) => m.hasAttachments).map((m) => m.mid));
   mirrorMessages(cdb, msgs.map((m) => ({
     id: m.rid,
     convId: conv.id,
@@ -123,9 +148,10 @@ function sweepGroup(cdb, sdb, group, cursors, now, nameMap) {
     slug: null,
     sentAt: m.sent_at,
     sender: speaker(m),
-    body: (m.body || '').replace(/\s+/g, ' ').trim(),
+    body: composeBody(m.body, describeAttachments(att.get(m.mid))),
     src: m.src,
     type: m.type,
+    hasMedia: Boolean(m.hasAttachments), // lets the archive upgrade an old caption-only row
   })));
   cursors[key] = msgs.reduce((mx, m) => Math.max(mx, m.rid), cursors[key] || 0);
   return msgs.length;
@@ -153,7 +179,8 @@ function backfillMeta(cdb, sdb) {
 
 // The whole sweep. Safe to call from other scripts (refresh/compact) before
 // they read the archive. Returns { seen, backfilledMeta }.
-function runSweep(cdb, sdb) {
+function runSweep(cdb, sdb, opts = {}) {
+  const deep = Boolean(opts.deep);
   const now = Date.now();
   const nicks = loadJson(NICKNAMES, {}).byServiceId || {};
   const state = loadJson(ARCHIVE_STATE, {});
@@ -164,12 +191,12 @@ function runSweep(cdb, sdb) {
 
   let seen = 0;
   const slugs = loadJson(TRACKED, {}).slugs || [];
-  for (const slug of slugs) seen += sweepContact(cdb, sdb, slug, cursors, now, nicks);
+  for (const slug of slugs) seen += sweepContact(cdb, sdb, slug, cursors, now, nicks, deep);
 
   const groups = loadJson(TRACKED_GROUPS, {}).groups || [];
   if (groups.length) {
     const nameMap = buildNameMap(sdb, nicks);
-    for (const g of groups) seen += sweepGroup(cdb, sdb, g, cursors, now, nameMap);
+    for (const g of groups) seen += sweepGroup(cdb, sdb, g, cursors, now, nameMap, deep);
   }
 
   atomicWriteJson(ARCHIVE_STATE, { cursors, ranAt: now });
@@ -180,8 +207,8 @@ function main() {
   const cdb = openCrmDb();
   const sdb = openSignalDb();
   try {
-    const r = runSweep(cdb, sdb);
-    console.log(`CRM_ARCHIVE: swept ${r.seen} new message(s)${r.backfilledMeta ? `, backfilled meta on ${r.backfilledMeta} old row(s)` : ''}.`);
+    const r = runSweep(cdb, sdb, { deep: DEEP });
+    console.log(`CRM_ARCHIVE:${DEEP ? ' [DEEP]' : ''} swept ${r.seen} message(s)${r.backfilledMeta ? `, backfilled meta on ${r.backfilledMeta} old row(s)` : ''}.`);
   } finally {
     sdb.close();
     cdb.close();
