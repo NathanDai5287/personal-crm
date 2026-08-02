@@ -42,10 +42,14 @@
 const fs = require('fs');
 const path = require('path');
 const { execFileSync, execSync } = require('child_process');
-const { ROOT, LOGS_DIR, REFRESH_STATE, CONTACTS_DIR, GITDIR } = require('../lib/config');
+const {
+  ROOT, LOGS_DIR, REFRESH_STATE, CONTACTS_DIR, GROUPS_DIR, GITDIR,
+  MERGE_MODEL, COMPACT_MODEL,
+} = require('../lib/config');
 const { mergeContact } = require('./crm-merge');
+const { planAll, writeChunkLedger, chunkSummary } = require('./crm-refresh');
 const { validateCitations } = require('../lib/archive');
-const { openCrmDb } = require('../lib/signal-db');
+const { openCrmDb, openSignalDb } = require('../lib/signal-db');
 
 const DRY_RUN = process.argv.includes('--dry-run');
 const ONLY_IDX = process.argv.indexOf('--only');
@@ -58,8 +62,9 @@ if (ONLY_IDX !== -1 && !ONLY) {
 const SCRIPTS = {
   memoryCommit: path.join(ROOT, 'scripts', 'memory-commit.js'),
   autopromote: path.join(ROOT, 'scripts', 'crm-autopromote.js'),
-  refresh: path.join(ROOT, 'scripts', 'crm-refresh.js'),
   compact: path.join(ROOT, 'scripts', 'crm-compact.js'),
+  // NOTE: refresh is no longer spawned as a subprocess — crm-daily calls
+  // planAll() from crm-refresh.js in-process so it gets real chunk objects.
 };
 
 function nowIso() {
@@ -138,22 +143,6 @@ function loadRefreshState() {
   return { cursors: {}, ranAt: null };
 }
 
-function parseRefreshManifest(output) {
-  const manifest = [];
-  if (!output) return manifest;
-  if (/^CRM_REFRESH: no new messages/m.test(output)) return manifest;
-  for (const line of output.split('\n')) {
-    const t = line.trim();
-    if (!t.startsWith('{')) continue;
-    try {
-      manifest.push(JSON.parse(t));
-    } catch {
-      // ignore unparsable line
-    }
-  }
-  return manifest;
-}
-
 function main() {
   const startedAt = Date.now();
   const warnings = [];
@@ -199,98 +188,172 @@ function main() {
     promoted = promotedMatch ? Number(promotedMatch[1]) : 0;
   }
 
-  // ---- 3. refresh ---------------------------------------------------------------
-  let manifest = [];
+  // ---- 3. refresh: plan week-aligned chunks --------------------------------------
+  // Run IN-PROCESS (not as a subprocess) so the merge loop below gets the actual
+  // chunk objects — messages included — instead of re-deriving them from parsed
+  // stdout. A plan is a list of contacts, each holding an ordered list of chunks;
+  // see crm-refresh.js / lib/weeks.js for how the boundaries are chosen.
+  let plans = [];
+  let totalChunks = 0;
   if (!fatal) {
-    const refresh = timed('refresh', () => runNode(SCRIPTS.refresh, ONLY ? ['--only', ONLY] : [], { timeout: 300_000 }));
-    logLines.push(`[3] refresh: ${refresh.ok ? 'ok' : 'FAILED'}`);
-    logLines.push(refresh.output || refresh.error || '');
-    if (!refresh.ok) {
-      warnings.push(`refresh failed: ${refresh.error}`);
+    const t0 = Date.now();
+    try {
+      const cdb = openCrmDb();
+      const sdb = openSignalDb();
+      try {
+        plans = planAll(cdb, sdb, {
+          onlySlug: ONLY,
+          // An on-demand single-contact run includes the in-progress week —
+          // you press that button because you are seeing someone today.
+          // Scheduled runs stop at the last complete Monday-04:00 week.
+          includePartialWeek: Boolean(ONLY),
+        });
+      } finally {
+        sdb.close();
+        cdb.close();
+      }
+      totalChunks = plans.reduce((n, p) => n + p.chunks.length, 0);
+      const note = plans.length === 0
+        ? 'no unmerged messages for any tracked contact'
+        : plans.map((p) => `${p.slug}: ${p.total} msgs / ${p.chunks.length} chunk(s)` +
+            `${p.hasCursor ? '' : ' [backfill]'}`).join('\n');
+      steps.push({ name: 'refresh (plan)', ok: true, ms: Date.now() - t0, note });
+      logLines.push(`[3] refresh: ok — ${plans.length} contact(s), ${totalChunks} chunk(s)`);
+      logLines.push(note);
+    } catch (e) {
+      const error = String((e && e.stack) || e).slice(0, 4000);
+      steps.push({ name: 'refresh (plan)', ok: false, ms: Date.now() - t0, note: error });
+      warnings.push(`refresh failed: ${error.slice(0, 300)}`);
+      logLines.push(`[3] refresh: FAILED\n${error}`);
       fatal = true;
-    } else {
-      manifest = parseRefreshManifest(refresh.output);
     }
   }
 
   // ---- health check: Signal Desktop running? -----------------------------------
-  if (manifest.length === 0) {
+  if (plans.length === 0) {
     const running = isSignalRunning();
     if (running === false) {
       warnings.push('Signal Desktop may be closed — no messages synced');
     }
   }
 
-  // ---- 4. merge + per-contact cursor commit ------------------------------------
+  // ---- 4. merge, chunk by chunk ---------------------------------------------------
+  // One chunk = one week-aligned slice of one contact's messages = one merge =
+  // one cursor advance = one git commit. Keeping those four things in lockstep is
+  // what makes the history debuggable: every commit in the memory history is
+  // exactly "these messages produced this profile change", and reverting one
+  // chunk's commit undoes precisely that chunk. It is also the crash-safety
+  // story — a failure stops that contact's remaining chunks (later chunks assume
+  // earlier ones landed) but costs at most one chunk of re-work.
   const merged = [];
   const mergeFailures = [];
-  if (!fatal && manifest.length > 0) {
+  if (!fatal && plans.length > 0) {
     if (DRY_RUN) {
-      logLines.push(`[4] merge/cursor PLANNING (--dry-run, pi not invoked):`);
+      logLines.push('[4] merge PLANNING (--dry-run, pi not invoked):');
       const state = loadRefreshState();
-      for (const m of manifest) {
-        const plan = mergeContact(m.slug, { dryRun: true });
-        logLines.push(`  - would merge ${m.slug} (${m.count} msgs); cursor ${state.cursors[m.slug] ?? '(none — backfill)'} -> ${m.proposedCursor}`);
-        logLines.push(`    argv: ${JSON.stringify(plan.argv)}`);
+      for (const p of plans) {
+        logLines.push(`  ${p.slug} (${p.name}): ${p.total} msgs, ${p.chunks.length} chunk(s), ` +
+          `cursor ${state.cursors[p.slug] ?? '(none — backfill)'}`);
+        p.chunks.forEach((c, i) => {
+          logLines.push(`    ${i + 1}/${p.chunks.length}  ${c.label}  ${c.count} msgs  ` +
+            `~${Math.round(c.tokens / 1000)}k tok  m${c.ridStart}–m${c.ridEnd}` +
+            `${c.partial ? '  [day-split]' : ''}  -> cursor ${c.ridEnd}`);
+        });
+        // Validate argv construction without dumping the whole system prompt.
+        const plan = mergeContact(p.slug, { dryRun: true, quiet: true });
+        const a = plan.argv;
+        logLines.push(`    argv ok: --model ${a[a.indexOf('--model') + 1]}, ` +
+          `--tools ${a[a.indexOf('--tools') + 1]}, ` +
+          `system-prompt ${a[a.indexOf('--system-prompt') + 1].length} chars, ` +
+          `attachments ${a.filter((x) => typeof x === 'string' && x.startsWith('@')).join(' ')}`);
       }
     } else {
       const state = loadRefreshState();
-      for (const m of manifest) {
-        const detail = {
-          slug: m.slug,
-          name: m.name,
-          count: m.count,
-          cursorBefore: Object.prototype.hasOwnProperty.call(state.cursors, m.slug) ? state.cursors[m.slug] : null,
-          cursorAfter: null,
-          ok: false,
-          ms: 0,
-          error: null,
-          citations: null,
-        };
-        const t0 = Date.now();
-        const result = mergeContact(m.slug, { dryRun: false });
-        detail.ms = Date.now() - t0;
-        if (result.ok) {
-          state.cursors[m.slug] = m.proposedCursor;
-          state.ranAt = Date.now();
-          atomicWriteJson(REFRESH_STATE, state); // commit THIS contact's cursor immediately
-          merged.push(m.slug);
-          detail.ok = true;
-          detail.cursorAfter = m.proposedCursor;
-          logLines.push(`[4] merge ${m.slug}: ok, cursor -> ${m.proposedCursor}`);
-          // PROVENANCE CHECK (non-fatal): every ⟨m…⟩ id the model cited in the
-          // profile must exist in the crm.db archive — a miss means the model
-          // hallucinated or mangled a citation.
-          try {
-            const cdb = openCrmDb();
-            const profileText = fs.readFileSync(path.join(CONTACTS_DIR, `${m.slug}.md`), 'utf8');
-            const v = validateCitations(cdb, profileText);
-            cdb.close();
-            detail.citations = { cited: v.cited, missing: v.missing };
-            if (v.missing.length > 0) {
-              const msg = `citation check ${m.slug}: ${v.missing.length}/${v.cited} cited ids NOT in archive: ${v.missing.slice(0, 10).join(', ')}`;
-              warnings.push(msg);
-              logLines.push(`[4] ${msg}`);
-            } else if (v.cited > 0) {
-              logLines.push(`[4] citation check ${m.slug}: ${v.cited} cited ids, all resolve`);
+      for (const p of plans) {
+        const total = p.chunks.length;
+        let contactFailed = false;
+        for (let i = 0; i < total && !contactFailed; i++) {
+          const chunk = p.chunks[i];
+          const detail = {
+            ...chunkSummary(p, chunk, i + 1, total),
+            cursorBefore: Object.prototype.hasOwnProperty.call(state.cursors, p.slug) ? state.cursors[p.slug] : null,
+            cursorAfter: null,
+            ok: false,
+            ms: 0,
+            error: null,
+            citations: null,
+            preSha: gitHeadSha(),
+            postSha: null,
+          };
+
+          // Write this chunk's ledger, overwriting the previous chunk's. The
+          // per-chunk commit below captures each version, so the memory history
+          // holds every ledger ever fed to a merge.
+          writeChunkLedger(p, chunk, i + 1, total);
+
+          const t0 = Date.now();
+          const result = mergeContact(p.slug, { dryRun: false });
+          detail.ms = Date.now() - t0;
+
+          if (result.ok) {
+            // Cursor advances to this chunk's last message id — NOT the
+            // contact's overall max — so an interrupted backfill resumes at the
+            // right week instead of skipping the chunks it never merged.
+            state.cursors[p.slug] = chunk.ridEnd;
+            state.ranAt = Date.now();
+            atomicWriteJson(REFRESH_STATE, state);
+            detail.ok = true;
+            detail.cursorAfter = chunk.ridEnd;
+            logLines.push(`[4] merge ${p.slug} ${i + 1}/${total} (${chunk.label}, ${chunk.count} msgs): ok, cursor -> ${chunk.ridEnd}`);
+
+            // PROVENANCE CHECK (non-fatal): every ⟨m…⟩ id the model cited must
+            // exist in the archive. Catches fabricated or mangled ids; cannot
+            // catch a real id attached to the wrong claim.
+            try {
+              const cdb = openCrmDb();
+              const profileText = fs.readFileSync(path.join(CONTACTS_DIR, `${p.slug}.md`), 'utf8');
+              const v = validateCitations(cdb, profileText);
+              cdb.close();
+              detail.citations = { cited: v.cited, missing: v.missing };
+              if (v.missing.length > 0) {
+                const msg = `citation check ${p.slug} chunk ${i + 1}/${total}: ${v.missing.length}/${v.cited} cited ids NOT in archive: ${v.missing.slice(0, 10).join(', ')}`;
+                warnings.push(msg);
+                logLines.push(`[4] ${msg}`);
+              }
+            } catch (e) {
+              logLines.push(`[4] citation check ${p.slug} chunk ${i + 1}: skipped (${String(e).slice(0, 120)})`);
             }
-          } catch (e) {
-            logLines.push(`[4] citation check ${m.slug}: skipped (${String(e).slice(0, 120)})`);
+
+            // ONE COMMIT PER CHUNK, carrying the message span. This is what makes
+            // `git log -- data/contacts/<slug>.md` a readable history of why the
+            // profile says what it says.
+            const msg = `merge ${p.slug} ${chunk.label} (${chunk.count} msgs, m${chunk.ridStart}..m${chunk.ridEnd}) [${i + 1}/${total}]`;
+            const commit = runNode(SCRIPTS.memoryCommit, [msg]);
+            if (commit.ok) {
+              detail.postSha = gitHeadSha();
+            } else {
+              warnings.push(`chunk commit failed for ${p.slug} ${chunk.label}: ${commit.error}`);
+              logLines.push(`[4] commit ${p.slug} ${chunk.label}: FAILED (non-fatal): ${commit.error}`);
+            }
+          } else {
+            contactFailed = true;
+            mergeFailures.push({ slug: p.slug, chunk: chunk.label, chunkIndex: i + 1, chunkTotal: total, error: result.error });
+            detail.error = result.error;
+            logLines.push(`[4] merge ${p.slug} ${i + 1}/${total} (${chunk.label}): FAILED — cursor NOT advanced, ` +
+              `remaining ${total - i - 1} chunk(s) deferred to the next run: ${result.error}`);
           }
-        } else {
-          mergeFailures.push({ slug: m.slug, error: result.error });
-          detail.error = result.error;
-          logLines.push(`[4] merge ${m.slug}: FAILED (cursor NOT advanced, will retry): ${result.error}`);
+          contactDetails.push(detail);
         }
-        contactDetails.push(detail);
+        if (!contactFailed) merged.push(p.slug);
       }
     }
   } else if (!fatal) {
-    logLines.push('[4] merge: nothing to merge (no contacts with new activity)');
+    logLines.push('[4] merge: nothing to merge (no unmerged messages)');
   }
 
   // ---- 5. compact ----------------------------------------------------------------
   let compactChanged = 0;
+  let compactCitations = null;
   if (ONLY) {
     logLines.push('[5] compact: skipped (--only mode — runs on the next full run)');
     skipped('compact', '--only mode');
@@ -302,6 +365,40 @@ function main() {
     logLines.push(compact.output || compact.error || '');
     if (!compact.ok) warnings.push(`compact failed (non-fatal): ${compact.error}`);
     compactChanged = ((compact.output || '').match(/changed=true/g) || []).length;
+
+    // PROVENANCE CHECK for compaction (non-fatal). Compaction writes ⟨m…⟩ ids
+    // into ## Timeline itself, and it runs AFTER the merges — so the per-merge
+    // check above never sees a single line of its output. Re-validate every file
+    // it may have touched. This matters most when COMPACT_MODEL is set to a
+    // cheaper model than the one whose citation fidelity you already trust:
+    // copying ids verbatim is exactly the skill weaker models drop first.
+    try {
+      const cdb = openCrmDb();
+      const mds = (dir) => {
+        try {
+          return fs.readdirSync(dir).filter((f) => f.endsWith('.md')).map((f) => path.join(dir, f));
+        } catch { return []; }
+      };
+      const files = [...mds(CONTACTS_DIR), ...mds(GROUPS_DIR)];
+      let cited = 0;
+      const bad = [];
+      for (const f of files) {
+        const v = validateCitations(cdb, fs.readFileSync(f, 'utf8'));
+        cited += v.cited;
+        if (v.missing.length > 0) bad.push(`${path.basename(f, '.md')}(${v.missing.slice(0, 5).join(',')})`);
+      }
+      cdb.close();
+      compactCitations = { files: files.length, cited, bad };
+      if (bad.length > 0) {
+        const msg = `citation check post-compact: unresolvable ids in ${bad.length} file(s): ${bad.slice(0, 10).join(' ')}`;
+        warnings.push(msg);
+        logLines.push(`[5] ${msg}`);
+      } else {
+        logLines.push(`[5] citation check post-compact: ${cited} cited ids across ${files.length} files, all resolve`);
+      }
+    } catch (e) {
+      logLines.push(`[5] citation check post-compact: skipped (${String(e).slice(0, 120)})`);
+    }
   } else if (DRY_RUN) {
     logLines.push('[5] compact --write: skipped (--dry-run)');
   }
@@ -325,11 +422,19 @@ function main() {
     durationMs: endedAt - startedAt,
     dryRun: DRY_RUN,
     only: ONLY,
+    // Which model did which half of the work. Recorded per run so a profile diff
+    // is always attributable to a model — the whole point of being able to A/B
+    // MERGE_MODEL on one contact and compare the output.
+    models: { merge: MERGE_MODEL, compact: COMPACT_MODEL },
     promoted,
-    contactsWithActivity: manifest.length,
+    contactsWithActivity: plans.length,
+    totalChunks,
+    chunksMerged: contactDetails.filter((c) => c.ok).length,
+    messagesMerged: contactDetails.filter((c) => c.ok).reduce((n, c) => n + c.count, 0),
     merged,
     mergeFailures,
     compactChanged,
+    compactCitations,
     warnings,
   };
 
@@ -345,11 +450,13 @@ function main() {
       id: runId,
       ...summary,
       steps,
-      contacts: contactDetails,
+      // One entry per CHUNK (was per contact before week-aligned chunking).
+      // Each carries its own preSha/postSha so the UI can diff that chunk alone.
+      chunks: contactDetails,
       preSha,
       postSha,
     });
-    const oneLine = `${nowIso()} durationMs=${summary.durationMs} promoted=${promoted} activity=${manifest.length} merged=${merged.length} mergeFailures=${mergeFailures.length} compactChanged=${compactChanged} warnings=${warnings.length}`;
+    const oneLine = `${nowIso()} durationMs=${summary.durationMs} promoted=${promoted} activity=${plans.length} chunks=${summary.chunksMerged}/${totalChunks} merged=${merged.length} mergeFailures=${mergeFailures.length} compactChanged=${compactChanged} warnings=${warnings.length}`;
     fs.appendFileSync(path.join(LOGS_DIR, 'daily.log'), `${oneLine}\n${logLines.join('\n')}\n`);
   } else {
     console.log(logLines.join('\n'));

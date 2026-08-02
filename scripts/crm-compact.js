@@ -41,7 +41,7 @@ const {
   MY_SERVICE_ID,
   BOT_SERVICE_ID,
   PI_CLI,
-  MODEL,
+  COMPACT_MODEL,
 } = require("../lib/config");
 
 const DAY = 86_400_000;
@@ -90,7 +90,7 @@ function piSummarize(prompt) {
   try {
     const out = execFileSync(
       process.execPath,
-      [PI_CLI, "-p", "--no-session", "-nc", "--no-extensions", "--no-skills", "--no-tools", "--model", MODEL],
+      [PI_CLI, "-p", "--no-session", "-nc", "--no-extensions", "--no-skills", "--no-tools", "--model", COMPACT_MODEL],
       {
         input: prompt,
         cwd: require("os").tmpdir(),

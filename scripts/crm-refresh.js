@@ -1,76 +1,63 @@
-// Incremental CRM refresh. Pulls only messages newer than each contact's own
-// per-contact cursor (a Signal messages.rowid watermark, NOT a timestamp),
-// writes a per-contact "new messages" file for anyone with fresh activity,
-// bumps last_contact_at, and prints a manifest. No model, no sends.
+// crm-refresh.js — turns "messages we haven't merged yet" into an ordered list
+// of week-aligned CHUNKS, and writes the ledger for one chunk at a time.
 //
-// Per-contact rowid cursor (the fix): the original cron used ONE global
-// `lastRefresh` timestamp watermark for every contact. That's fragile —
-// Signal's `sent_at` is set by the (possibly clock-skewed) sender, and
-// linked-device sync can insert older messages asynchronously, so a global
-// timestamp watermark can silently skip messages whose sent_at falls behind
-// a watermark already advanced by other contacts' newer messages. `rowid` is
-// SQLite's monotonic local insertion order for the `messages` table: it only
-// moves forward as rows are inserted into by THIS Signal Desktop install, so
-// a per-contact "highest rowid we've merged" cursor can never skip a row
-// that lands in the DB after we last looked, regardless of sender clock
-// skew or when a synced message actually arrives. rowid is global across the
-// whole `messages` table, so ONE cursor per contact covers every conversation
-// we pull that contact from (their DM plus any groups) at once.
+// This is a library first and a CLI second: crm-daily.js calls planAll() in
+// process, then walks each chunk (writeChunkLedger -> merge -> commit cursor ->
+// git commit) so every chunk is an independently attributable, independently
+// revertible step. Running the file directly just prints the plan.
 //
-// DM + GROUP CHATS: "all messages with a person" is not just their 1:1 DM.
-// For each contact we pull from:
-//   (a) their DM/private conversation  -> ALL messages (both directions).
-//   (b) group chats where they are the ONLY other party besides me and the
-//       old bot (e.g. "Nat & Kat") -> ALL messages from me or them (the bot's
-//       messages are dropped). These are effectively private channels.
-//   (c) larger group chats they're a member of -> ONLY that contact's own
-//       messages (sourceServiceId = contact), tagged with the group name, so
-//       the profile captures what THEY said without importing everyone else.
-// Speaker attribution and the "other party" test use MY_SERVICE_ID /
-// BOT_SERVICE_ID from config.
+// WEEK-ALIGNED CHUNKING (see lib/weeks.js): a merge never sees a fragment of a
+// week. Messages are grouped into Monday-04:00-Pacific weeks, and consecutive
+// QUIET weeks are batched together up to a token ceiling — so a contact who
+// sends thirty texts a week doesn't cost one full merge per week, while a
+// contact who sends two thousand gets a chunk per week. A backfill of a year of
+// history is therefore just N sequential ordinary merges; there is no separate
+// backfill code path and no ledger big enough to overflow a context window.
 //
-// State shape: { cursors: { "<slug>": <lastRowid>, ... }, ranAt: <ms> }.
-// If the OLD shape ({ lastRefresh, ranAt }) is found, it is treated as "no
-// per-contact cursors yet" (cursors = {}) — every tracked slug then falls
-// into the "new contact" backfill path below exactly once.
+// PER-CONTACT ROWID CURSOR: the cursor is a crm.db archive rowid watermark, NOT
+// a timestamp. Signal's `sent_at` is set by the (possibly clock-skewed) sender
+// and linked-device sync can insert older rows late, so a timestamp watermark
+// can silently skip messages. rowid only moves forward as rows are inserted
+// locally, so a per-contact "highest rowid merged" cursor can never skip a row
+// that lands after we last looked. One cursor per contact covers every source
+// (their DM plus any groups) at once.
 //
-// CRASH SAFETY: this script never writes REFRESH_STATE. It only reads the
-// current cursors (to know where to start) and prints a manifest with a
-// `proposedCursor` per contact. The orchestrator (crm-daily.js) is
-// responsible for advancing a contact's cursor in REFRESH_STATE, and only
-// AFTER that contact's merge into their profile has actually succeeded. If
-// the process crashes mid-run (or a merge fails), the cursor stays where it
-// was, and the same messages get retried on the next run instead of being
-// lost.
+// DM + GROUP CHATS: "messages with a person" is not just their 1:1 DM — see
+// lib/sources.js, which owns those rules and is shared with compaction and the
+// web status board so all three agree.
+//
+// CRASH SAFETY: this file never writes REFRESH_STATE. The orchestrator advances
+// a contact's cursor only AFTER that chunk's merge has actually succeeded, so a
+// crash mid-run re-merges the same chunk rather than losing it.
 //
 // Usage:
-//   node scripts/crm-refresh.js                 # all tracked contacts
-//   node scripts/crm-refresh.js --only <slug>   # just one contact (dry ledger)
+//   node scripts/crm-refresh.js                 # print the chunk plan for everyone
+//   node scripts/crm-refresh.js --only <slug>   # ...for one contact
+//   node scripts/crm-refresh.js --write-first   # also write each contact's first ledger
+'use strict';
 const fs = require('fs');
 const path = require('path');
 const { openSignalDb, openCrmDb } = require('../lib/signal-db');
 const { runSweep } = require('./crm-archive');
 const { resolveSources, buildArchiveQuery } = require('../lib/sources');
+const { fmtLocal, planChunks, lastCompleteWeekStart } = require('../lib/weeks');
 const {
   TRACKED, NICKNAMES, REFRESH_STATE, REFRESH_DIR,
 } = require('../lib/config');
 
 const DAY = 86_400_000;
-const BACKFILL_DAYS = 30; // new-contact backfill window (by sent_at)
-
-function pad(n) { return String(n).padStart(2, '0'); }
-function fmtTs(ms) {
-  const d = new Date(ms);
-  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
-}
+// How far back a contact with NO cursor starts. 30 days by default; set
+// CRM_BACKFILL_DAYS=3650 (or pass backfillDays) to merge the full archive.
+// Whatever this is, the work still arrives as ordinary week-sized chunks.
+const BACKFILL_DAYS = Number(process.env.CRM_BACKFILL_DAYS) || 30;
 
 function loadCursors() {
   let raw = null;
   try { raw = JSON.parse(fs.readFileSync(REFRESH_STATE, 'utf8')); } catch { /* no state file yet */ }
   if (!raw || typeof raw !== 'object') return {};
   if (raw.cursors && typeof raw.cursors === 'object') return raw.cursors;
-  // Old shape ({ lastRefresh, ranAt }) or anything else unrecognized: treat
-  // as "no per-contact cursors yet" so every tracked contact backfills once.
+  // Old shape ({ lastRefresh, ranAt }): treat as "no per-contact cursors yet"
+  // so every tracked contact backfills exactly once.
   return {};
 }
 
@@ -82,104 +69,177 @@ function loadNicknames() {
   }
 }
 
-// Source resolution AND the message query (DM + bi-group + multi-group,
-// including the NULL-src outgoing fix) live in lib/sources.js, shared with
-// crm-compact.js and crm-web.js so ledgers, timelines, and the status board
-// all agree on what counts as "messages with this person".
+// ---- planning ------------------------------------------------------------------
 
-function main() {
-  const argv = process.argv.slice(2);
-  const onlyIdx = argv.indexOf('--only');
-  const onlySlug = onlyIdx !== -1 ? argv[onlyIdx + 1] : null;
+// Plan one contact: resolve their sources, pull everything past their cursor out
+// of the ARCHIVE (never Signal — see crm-archive.js), and cut it into chunks.
+// Returns null if the contact has no sources or nothing pending.
+function planContact(cdb, sdb, slug, opts) {
+  const { cursors, nicks, now, includePartialWeek, backfillDays } = opts;
+  const rel = `data/contacts/${slug}.md`;
+  const row = cdb.prepare('SELECT signal_id, name FROM contacts WHERE file_path = ?').get(rel);
+  if (!row || !row.signal_id) return null;
+
+  const sources = resolveSources(sdb, row.signal_id);
+  const hasCursor = Object.prototype.hasOwnProperty.call(cursors, slug);
+  const cursorBefore = hasCursor ? (cursors[slug] || 0) : null;
+
+  // Lower bound: past the cursor, or the backfill window for a new contact.
+  // Upper bound: scheduled runs clamp to the last COMPLETE week so no merge ever
+  // sees a partial one. An on-demand single-contact run passes
+  // includePartialWeek — you press that button because you're seeing someone
+  // today, and freshness beats the whole-week invariant.
+  const lowClause = hasCursor ? 'id > ?' : 'sent_at >= ?';
+  const lowParam = hasCursor ? cursorBefore : now - backfillDays * DAY;
+  const cutoff = lastCompleteWeekStart(now);
+  const bound = includePartialWeek
+    ? { clause: lowClause, params: [lowParam] }
+    : { clause: `${lowClause} AND sent_at < ?`, params: [lowParam, cutoff] };
+
+  const q = buildArchiveQuery(sources, row.signal_id, bound);
+  if (!q) return null;
+  const msgs = cdb.prepare(q.sql).all(...q.params);
+  if (msgs.length === 0) return null;
+
+  const display = (nicks[row.signal_id] && nicks[row.signal_id].name) || row.name;
+  const chunks = planChunks(msgs);
+  return {
+    slug,
+    name: display,
+    profile: rel,
+    sources,
+    hasCursor,
+    cursorBefore,
+    total: msgs.length,
+    chunks,
+  };
+}
+
+// Plan every tracked contact (or just one). Sweeps the archive first so the plan
+// reflects everything Signal currently has.
+function planAll(cdb, sdb, opts = {}) {
+  const {
+    onlySlug = null,
+    includePartialWeek = false,
+    now = Date.now(),
+    backfillDays = BACKFILL_DAYS,
+    sweep = true,
+  } = opts;
+
+  // ARCHIVE-FIRST: pull anything new out of Signal, then read only the archive.
+  // A disappearing message the hourly sweep caught still reaches the merge even
+  // if it has since expired from Signal's own database.
+  if (sweep) runSweep(cdb, sdb);
 
   let tracked = JSON.parse(fs.readFileSync(TRACKED, 'utf8')).slugs || [];
   if (onlySlug) tracked = tracked.filter((s) => s === onlySlug);
 
   const cursors = loadCursors();
   const nicks = loadNicknames();
+  const plans = [];
+  for (const slug of tracked) {
+    const p = planContact(cdb, sdb, slug, { cursors, nicks, now, includePartialWeek, backfillDays });
+    if (p) plans.push(p);
+  }
+  return plans;
+}
+
+// ---- ledger writing ------------------------------------------------------------
+
+// Write ONE chunk's ledger to the contact's ledger path, overwriting whatever
+// the previous chunk left there. That overwrite is deliberate: crm-daily commits
+// after every chunk, so `git log -- data/contacts/_refresh/<slug>.new.txt` in the
+// memory history is the full record of every ledger ever fed to a merge, without
+// accumulating hundreds of files on disk.
+function writeChunkLedger(plan, chunk, chunkIndex, chunkTotal) {
+  fs.mkdirSync(REFRESH_DIR, { recursive: true });
+  const file = path.join(REFRESH_DIR, `${plan.slug}.new.txt`);
+
+  // PROVENANCE: every line carries its ⟨m…⟩ archive id so the merge can cite the
+  // exact source messages. Timestamps are Pacific, matching the week boundaries.
+  // Speakers were attributed once, at archive time.
+  const lines = chunk.msgs.map((m) => {
+    const label = plan.sources.labels[m.cid]; // set only for group conversations
+    const ctx = label ? `(${label}) ` : '';
+    return `[${fmtLocal(m.sent_at)}] ⟨m${m.rid}⟩ ${ctx}${m.sender}: ${m.body}`;
+  });
+
+  const srcBits = [];
+  if (plan.sources.dmConvIds.length) srcBits.push('DM');
+  for (const cid of [...plan.sources.biGroupConvIds, ...plan.sources.multiGroupConvIds]) {
+    if (chunk.msgs.some((m) => m.cid === cid)) srcBits.push(`group "${plan.sources.labels[cid]}"`);
+  }
+
+  const header = [
+    `# Messages with ${plan.name} — ${chunk.label} (Pacific)`,
+    `# chunk ${chunkIndex} of ${chunkTotal} · ${chunk.count} messages · ids m${chunk.ridStart}–m${chunk.ridEnd}`,
+    `# window: ${fmtLocal(chunk.startMs)} to ${fmtLocal(chunk.endMs)}${chunk.partial ? ' (partial week — oversized week split by day)' : ''}`,
+    `# sources: ${srcBits.join(', ') || 'DM'}`,
+  ].join('\n');
+
+  fs.writeFileSync(file, `${header}\n\n${lines.join('\n')}\n`);
+  return { file, rel: `data/contacts/_refresh/${plan.slug}.new.txt` };
+}
+
+// Chunk -> the flat record crm-daily stores in its run record and prints.
+function chunkSummary(plan, chunk, i, total) {
+  return {
+    slug: plan.slug,
+    name: plan.name,
+    chunkIndex: i,
+    chunkTotal: total,
+    label: chunk.label,
+    weekStart: chunk.startKey,
+    weekEnd: chunk.endKey,
+    count: chunk.count,
+    tokens: chunk.tokens,
+    ridStart: chunk.ridStart,
+    ridEnd: chunk.ridEnd,
+    partial: chunk.partial,
+  };
+}
+
+// ---- CLI -----------------------------------------------------------------------
+
+function main() {
+  const argv = process.argv.slice(2);
+  const onlyIdx = argv.indexOf('--only');
+  const onlySlug = onlyIdx !== -1 ? argv[onlyIdx + 1] : null;
+  const writeFirst = argv.includes('--write-first');
+  const includePartialWeek = Boolean(onlySlug);
 
   const cdb = openCrmDb();
   const sdb = openSignalDb();
+  const plans = planAll(cdb, sdb, { onlySlug, includePartialWeek });
 
-  // ARCHIVE-FIRST: sweep anything new from Signal into crm.db's archive, then
-  // build every ledger FROM THE ARCHIVE. Signal is never read for message
-  // content here — so a disappearing message that the hourly sweep caught
-  // still reaches the merge even if it has since expired from Signal's DB.
-  runSweep(cdb, sdb);
-
-  fs.mkdirSync(REFRESH_DIR, { recursive: true });
-
-  const manifest = [];
-  const now = Date.now();
-
-  for (const slug of tracked) {
-    const rel = `data/contacts/${slug}.md`;
-    const row = cdb.prepare('SELECT signal_id, name FROM contacts WHERE file_path = ?').get(rel);
-    if (!row || !row.signal_id) continue;
-
-    const sources = resolveSources(sdb, row.signal_id);
-    const hasCursor = Object.prototype.hasOwnProperty.call(cursors, slug);
-    const bound = hasCursor
-      ? { clause: 'id > ?', param: cursors[slug] || 0 }
-      : { clause: 'sent_at >= ?', param: now - BACKFILL_DAYS * DAY };
-
-    const q = buildArchiveQuery(sources, row.signal_id, bound);
-    if (!q) continue;
-    const msgs = cdb.prepare(q.sql).all(...q.params);
-    if (msgs.length === 0) continue;
-
-    const display = (nicks[row.signal_id] && nicks[row.signal_id].name) || row.name;
-    // PROVENANCE: every line carries the message's ⟨m<id>⟩ archive id, so the
-    // merge model can cite the exact source messages behind what it writes.
-    // Speaker labels were attributed once, at archive time.
-    const lines = msgs.map((m) => {
-      const label = sources.labels[m.cid]; // set only for group convs
-      const ctx = label ? `(${label}) ` : '';
-      return `[${fmtTs(m.sent_at)}] ⟨m${m.rid}⟩ ${ctx}${m.sender}: ${m.body}`;
-    });
-
-    // Describe which sources contributed, for the file header.
-    const srcBits = [];
-    if (sources.dmConvIds.length) srcBits.push('DM');
-    for (const cid of [...sources.biGroupConvIds, ...sources.multiGroupConvIds]) {
-      if (msgs.some((m) => m.cid === cid)) srcBits.push(`group "${sources.labels[cid]}"`);
+  if (plans.length === 0) {
+    console.log('CRM_REFRESH: no unmerged messages for any tracked contact.');
+  } else {
+    let chunks = 0;
+    let msgs = 0;
+    console.log('CRM_REFRESH: chunk plan');
+    for (const p of plans) {
+      chunks += p.chunks.length;
+      msgs += p.total;
+      console.log(`  ${p.slug} (${p.name}): ${p.total} msgs in ${p.chunks.length} chunk(s)` +
+        `${p.hasCursor ? `, cursor ${p.cursorBefore}` : ', BACKFILL (no cursor)'}`);
+      p.chunks.forEach((c, i) => {
+        console.log(`    ${String(i + 1).padStart(3)}/${p.chunks.length}  ${c.label.padEnd(24)}` +
+          `${String(c.count).padStart(6)} msgs  ~${String(Math.round(c.tokens / 1000)).padStart(3)}k tok  ` +
+          `m${c.ridStart}–m${c.ridEnd}${c.partial ? '  [day-split]' : ''}`);
+      });
+      if (writeFirst && p.chunks.length) {
+        const { rel } = writeChunkLedger(p, p.chunks[0], 1, p.chunks.length);
+        console.log(`    wrote ${rel} (chunk 1)`);
+      }
     }
-    const headerSince = hasCursor
-      ? 'since last refresh'
-      : `since ${fmtTs(now - BACKFILL_DAYS * DAY)} (new contact backfill, ${BACKFILL_DAYS}d)`;
-    const outFile = path.join(REFRESH_DIR, `${slug}.new.txt`);
-    fs.writeFileSync(
-      outFile,
-      `# New messages with ${display} ${headerSince}\n# sources: ${srcBits.join(', ') || 'DM'}\n# ${msgs.length} messages\n\n${lines.join('\n')}`
-    );
-
-    const proposedCursor = msgs.reduce((mx, m) => Math.max(mx, m.rid), 0);
-    const lastSentAt = msgs.reduce((mx, m) => Math.max(mx, m.sent_at), 0);
-    cdb.prepare('UPDATE contacts SET last_contact_at = ? WHERE file_path = ?').run(lastSentAt, rel);
-
-    manifest.push({
-      slug,
-      name: display,
-      count: msgs.length,
-      profile: rel,
-      newFile: `data/contacts/_refresh/${slug}.new.txt`,
-      proposedCursor,
-    });
+    console.log(`CRM_REFRESH: ${msgs} message(s) across ${chunks} chunk(s), ${plans.length} contact(s).`);
   }
 
   sdb.close();
   cdb.close();
-
-  // NOTE: REFRESH_STATE is intentionally NOT written here. See header comment
-  // for the crash-safety rationale — the orchestrator commits cursors
-  // per-contact, only after that contact's merge succeeds.
-
-  if (manifest.length === 0) {
-    console.log('CRM_REFRESH: no new messages for any tracked contact.');
-  } else {
-    console.log('CRM_REFRESH: contacts with new activity:');
-    for (const m of manifest) console.log(JSON.stringify(m));
-  }
+  // NOTE: REFRESH_STATE is intentionally NOT written here — see header.
 }
 
-main();
+if (require.main === module) main();
+module.exports = { planAll, planContact, writeChunkLedger, chunkSummary, BACKFILL_DAYS };

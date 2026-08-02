@@ -19,7 +19,7 @@
 // whether `pi` can actually authenticate.
 const fs = require('fs');
 const { execFileSync } = require('child_process');
-const { ROOT, PI_CLI, MODEL, MERGE_PROMPT } = require('../lib/config');
+const { ROOT, PI_CLI, MERGE_MODEL, MERGE_PROMPT } = require('../lib/config');
 
 function buildArgs(slug, mergePromptText) {
   return [
@@ -28,7 +28,7 @@ function buildArgs(slug, mergePromptText) {
     '-nc',
     '--no-extensions',
     '--no-skills',
-    '--model', MODEL,
+    '--model', MERGE_MODEL,
     '--tools', 'read,edit',
     '--system-prompt', mergePromptText,
     `@data/contacts/${slug}.md`,
@@ -53,8 +53,12 @@ function mergeContact(slug, opts = {}) {
   const argv = [process.execPath, PI_CLI, ...piArgs];
 
   if (dryRun) {
-    console.log(JSON.stringify(argv));
-    console.log(`cwd: ${ROOT}`);
+    // `quiet` is for library callers (crm-daily plans dozens of chunks and would
+    // otherwise dump the entire system prompt once per chunk).
+    if (!opts.quiet) {
+      console.log(JSON.stringify(argv));
+      console.log(`cwd: ${ROOT}`);
+    }
     return { ok: true, dryRun: true, argv, cwd: ROOT };
   }
 
