@@ -21,35 +21,51 @@ const fs = require('fs');
 const { execFileSync } = require('child_process');
 const { ROOT, PI_CLI, MERGE_MODEL, MERGE_PROMPT } = require('../lib/config');
 
-function buildArgs(slug, mergePromptText) {
+// The default user turn. Prompt variants may replace it (see opts.userMessage):
+// one of the review's high-severity findings is that ALL run-specific context —
+// which file, which person, what today's date is — is withheld from the model,
+// and the user turn is where that context belongs.
+const DEFAULT_USER_MESSAGE = 'Merge the new messages into this profile per your instructions.';
+
+// opts: { model, userMessage } — both default to production behaviour. They exist
+// so evals/run.js can drive this exact code path with a different model or a
+// different prompt variant, rather than reimplementing the invocation and then
+// testing something that isn't what ships.
+function buildArgs(slug, mergePromptText, opts = {}) {
   return [
     '-p',
     '--no-session',
     '-nc',
     '--no-extensions',
     '--no-skills',
-    '--model', MERGE_MODEL,
+    '--model', opts.model || MERGE_MODEL,
     '--tools', 'read,edit',
     '--system-prompt', mergePromptText,
     `@data/contacts/${slug}.md`,
     `@data/contacts/_refresh/${slug}.new.txt`,
-    'Merge the new messages into this profile per your instructions.',
+    opts.userMessage || DEFAULT_USER_MESSAGE,
   ];
 }
 
 // Returns { ok: true, output } or { ok: false, error }. Never throws.
+//
+// opts: { dryRun, quiet, cwd, promptFile, model, userMessage }. cwd/promptFile let
+// the eval harness point this at a throwaway copy of data/ with a candidate
+// prompt, so a bad prompt under test can never touch a real profile.
 function mergeContact(slug, opts = {}) {
   const dryRun = Boolean(opts.dryRun);
+  const cwd = opts.cwd || ROOT;
+  const promptFile = opts.promptFile || MERGE_PROMPT;
   let mergePromptText;
   try {
-    mergePromptText = fs.readFileSync(MERGE_PROMPT, 'utf8');
+    mergePromptText = fs.readFileSync(promptFile, 'utf8');
   } catch (e) {
-    const error = `could not read MERGE_PROMPT (${MERGE_PROMPT}): ${e.message}`;
+    const error = `could not read merge prompt (${promptFile}): ${e.message}`;
     console.log(`crm-merge: ${slug}: FAIL (${error})`);
     return { ok: false, error };
   }
 
-  const piArgs = buildArgs(slug, mergePromptText);
+  const piArgs = buildArgs(slug, mergePromptText, opts);
   const argv = [process.execPath, PI_CLI, ...piArgs];
 
   if (dryRun) {
@@ -57,14 +73,14 @@ function mergeContact(slug, opts = {}) {
     // otherwise dump the entire system prompt once per chunk).
     if (!opts.quiet) {
       console.log(JSON.stringify(argv));
-      console.log(`cwd: ${ROOT}`);
+      console.log(`cwd: ${cwd}`);
     }
-    return { ok: true, dryRun: true, argv, cwd: ROOT };
+    return { ok: true, dryRun: true, argv, cwd };
   }
 
   try {
     const output = execFileSync(process.execPath, [PI_CLI, ...piArgs], {
-      cwd: ROOT,
+      cwd,
       encoding: 'utf8',
       timeout: 600_000, // backfill ledgers can be thousands of messages; give the model room
       maxBuffer: 16 * 1024 * 1024,

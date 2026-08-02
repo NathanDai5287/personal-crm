@@ -151,9 +151,11 @@ function planAll(cdb, sdb, opts = {}) {
 // after every chunk, so `git log -- data/contacts/_refresh/<slug>.new.txt` in the
 // memory history is the full record of every ledger ever fed to a merge, without
 // accumulating hundreds of files on disk.
-function writeChunkLedger(plan, chunk, chunkIndex, chunkTotal) {
-  fs.mkdirSync(REFRESH_DIR, { recursive: true });
-  const file = path.join(REFRESH_DIR, `${plan.slug}.new.txt`);
+// `dir` defaults to the production ledger directory; evals/ passes a throwaway
+// sandbox so building fixtures never clobbers a real pending ledger.
+function writeChunkLedger(plan, chunk, chunkIndex, chunkTotal, dir = REFRESH_DIR) {
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `${plan.slug}.new.txt`);
 
   // PROVENANCE: every line carries its ⟨m…⟩ archive id so the merge can cite the
   // exact source messages. Timestamps are Pacific, matching the week boundaries.
