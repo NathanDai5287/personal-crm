@@ -28,21 +28,31 @@ const FREE_PREFIX = 'anthropic/';
 const DEFAULT_MODEL = 'anthropic/claude-opus-5';
 const CHARS_PER_TOKEN = 2.4;
 
-const STYLE_INSTRUCTION = {
+// The style strings live in scripts/crm-compact.js in production, but here they
+// are PART OF THE VARIANT: v2 replaces the unfalsifiable "ONE concise line" with
+// a hard word budget and moves "past tense, no preamble" into its system prompt.
+// Sharing one copy would silently apply v2's wording to v1 and destroy the
+// control — the same trap as pointing variant A at a moving prompts/merge.md.
+const STYLE_V1 = {
   daily: 'Summarize the day in ONE concise line: what was discussed/done, plus any durable facts (plans, decisions, life events). Past tense, no preamble.',
   weekly: 'Summarize the period in 1-2 concise lines: the main threads and any durable facts. Past tense, no preamble.',
 };
+const STYLE_V2 = {
+  daily: 'Summarize this day in at most 40 words: what happened, plus any durable facts (plans, decisions, life events).',
+  weekly: 'Summarize this week in at most 70 words: the main threads and any durable facts.',
+};
 
 const VARIANTS = {
-  v1: { label: 'v1 (current)', prompt: 'prompts/compact-v1.md' },
-  v2: { label: 'v2 (rewrite)', prompt: 'prompts/compact-v2.md' },
+  v1: { label: 'v1 (current)', prompt: 'prompts/compact-v1.md', style: STYLE_V1 },
+  v2: { label: 'v2 (rewrite)', prompt: 'prompts/compact-v2.md', style: STYLE_V2 },
 };
 
 function buildPrompt(c, variantKey) {
-  const tpl = loadTemplate(path.resolve(__dirname, '..', VARIANTS[variantKey].prompt));
+  const v = VARIANTS[variantKey];
+  const tpl = loadTemplate(path.resolve(__dirname, '..', v.prompt));
   return render(tpl, {
     PERIOD_SENTENCE: `These are Signal messages ${c.who} during ${c.periodLabel}.`,
-    STYLE_INSTRUCTION: STYLE_INSTRUCTION[c.style] || STYLE_INSTRUCTION.weekly,
+    STYLE_INSTRUCTION: v.style[c.style] || v.style.weekly,
     MESSAGES: c.lines.join('\n'),
   });
 }

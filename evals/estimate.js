@@ -83,11 +83,13 @@ function main() {
   for (const k of keys) {
     const v = VARIANTS[k];
     if (!v) { console.error(`unknown variant '${k}'`); process.exit(2); }
+    const promptPath = path.resolve(__dirname, '..', v.prompt);
+    if (!fs.existsSync(promptPath)) { console.log(`${v.label}: ${v.prompt} does not exist yet — skipping\n`); continue; }
     const modelId = (v.model || globalModel).split('/').pop();
     const free = (v.model || globalModel).startsWith('anthropic/');
     let price;
     try { price = priceOf(modelId); } catch (e) { console.error(e.message); process.exit(1); }
-    const sys = tok(fs.readFileSync(path.resolve(__dirname, '..', v.prompt), 'utf8'));
+    const sys = tok(fs.readFileSync(promptPath, 'utf8'));
 
     console.log(`${v.label}  —  ${v.model || globalModel}${free ? '   (subscription auth: $0 regardless of tokens)' : ''}`);
     console.log(`  prompt ${v.prompt} = ${sys.toLocaleString()} tok · price in $${price.cost.input}/M, out $${price.cost.output}/M\n`);
