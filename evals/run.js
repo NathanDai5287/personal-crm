@@ -206,7 +206,17 @@ function main() {
   fs.mkdirSync(runDir, { recursive: true });
 
   console.log('building fixtures…');
-  let cases = buildFixtures(path.join(runDir, 'fixtures'));
+  const fixturesDir = path.join(runDir, 'fixtures');
+  let cases;
+  if (scoreOnly && fs.existsSync(path.join(fixturesDir, 'cases.json'))) {
+    // Re-score against the ORIGINAL fixtures. Rebuilding them would silently
+    // re-derive from a since-changed archive and score old outputs against new
+    // inputs — the classic way a re-scored eval quietly stops meaning anything.
+    cases = JSON.parse(fs.readFileSync(path.join(fixturesDir, 'cases.json'), 'utf8'));
+  } else {
+    cases = buildFixtures(fixturesDir);
+    fs.writeFileSync(path.join(fixturesDir, 'cases.json'), JSON.stringify(cases, null, 2));
+  }
   if (onlyCase) cases = cases.filter((c) => c.name === onlyCase);
   const variants = onlyVariant ? [onlyVariant] : Object.keys(VARIANTS);
 
