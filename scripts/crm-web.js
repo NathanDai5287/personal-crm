@@ -550,19 +550,35 @@ function runDetailPage(id) {
       (note ? `<pre class="log">${esc(note)}</pre>` : '<p class="sub">no output</p>') + `</details>`;
   }).join('');
 
-  const canDiff = run.preSha && run.postSha && run.preSha !== run.postSha;
-  const contactsHtml = (run.contacts || []).length
-    ? `<h2>Contacts</h2><table class="tbl"><tr><th>Contact</th><th>Msgs</th><th>Cursor</th><th>Merge</th><th>Citations</th><th>Changes</th></tr>` +
-      run.contacts.map((c) => {
+  // Runs are recorded per CHUNK (one week-aligned slice of one contact = one
+  // merge = one commit). `run.contacts` is the pre-chunking shape, kept so old
+  // run records still render.
+  const rows = run.chunks || run.contacts || [];
+  const chunked = Boolean(run.chunks);
+  const contactsHtml = rows.length
+    ? `<h2>${chunked ? 'Chunks' : 'Contacts'}</h2><table class="tbl"><tr><th>Contact</th>` +
+      (chunked ? '<th>Window</th><th>#</th>' : '') +
+      `<th>Msgs</th><th>Cursor</th><th>Merge</th><th>Citations</th><th>Changes</th></tr>` +
+      rows.map((c, idx) => {
         const cite = c.citations
           ? (c.citations.missing.length ? `<span class="bad">${c.citations.missing.length}/${c.citations.cited} missing</span>` : `<span class="ok">${c.citations.cited} ok</span>`)
           : '<span class="skip">—</span>';
+        // Per-chunk shas when present, else the whole-run pair (old records).
+        const pre = c.preSha || run.preSha;
+        const post = c.postSha || run.postSha;
+        const canDiff = pre && post && pre !== post;
+        const diffHref = `/runs/${encodeURIComponent(run.id)}/diff/${encodeURIComponent(c.slug)}` +
+          (chunked ? `?chunk=${idx}` : '');
         return `<tr><td><a href="/c/${encodeURIComponent(c.slug)}">${esc(c.name || c.slug)}</a></td>` +
+          (chunked
+            ? `<td class="sub">${esc(c.label || '')}${c.partial ? ' <span class="skip">[day-split]</span>' : ''}</td>` +
+              `<td class="num sub">${c.chunkIndex}/${c.chunkTotal}</td>`
+            : '') +
           `<td class="num">${c.count}</td>` +
           `<td class="num">${c.cursorBefore == null ? 'backfill' : c.cursorBefore} → ${c.cursorAfter == null ? '—' : c.cursorAfter}</td>` +
           `<td>${c.ok ? `<span class="ok">ok</span> <span class="sub">${fmtMs(c.ms)}</span>` : `<span class="bad">FAILED</span> <span class="sub">${esc(String(c.error || '').slice(0, 200))}</span>`}</td>` +
           `<td>${cite}</td>` +
-          `<td>${c.ok && canDiff ? `<a href="/runs/${encodeURIComponent(run.id)}/diff/${encodeURIComponent(c.slug)}">diff</a>` : '<span class="skip">—</span>'}</td></tr>`;
+          `<td>${c.ok && canDiff ? `<a href="${diffHref}">diff</a>` : '<span class="skip">—</span>'}</td></tr>`;
       }).join('') + `</table>`
     : '<p class="sub">No contacts had new activity.</p>';
 
@@ -570,20 +586,41 @@ function runDetailPage(id) {
     ? `<h2>Warnings</h2><ul>${run.warnings.map((w) => `<li class="bad">${esc(w)}</li>`).join('')}</ul>`
     : '';
 
+  // Which model wrote this run's output. Shown next to the diff links on
+  // purpose: a profile diff is only interpretable if you know which model
+  // produced it, and merge/compact can now be pointed at different models.
+  const modelsHtml = run.models
+    ? `<span class="sub"> · merge <code>${esc(run.models.merge || '?')}</code>` +
+      (run.models.compact && run.models.compact !== run.models.merge
+        ? ` · compact <code>${esc(run.models.compact)}</code>` : '') + `</span>`
+    : '';
+  const cc = run.compactCitations;
+  const compactCiteHtml = cc
+    ? `<h2>Timeline citations (post-compact)</h2><p class="${cc.bad && cc.bad.length ? 'bad' : 'ok'}">` +
+      (cc.bad && cc.bad.length
+        ? `unresolvable ids in ${cc.bad.length} file(s): ${esc(cc.bad.join(' '))}`
+        : `${cc.cited} cited ids across ${cc.files} files, all resolve`) + `</p>`
+    : '';
+
   const body = `<div class="back"><a href="/runs">&larr; All runs</a></div>` +
     `<header class="top"><h1>Run ${esc(fmtWhen(run.startedAt))}</h1>` +
-    `<span class="sub">${esc(runMode(run))} · ${fmtMs(run.durationMs)}</span></header>` +
-    `<h2>Steps</h2>${stepsHtml}${contactsHtml}${warnHtml}`;
+    `<span class="sub">${esc(runMode(run))} · ${fmtMs(run.durationMs)}</span>${modelsHtml}</header>` +
+    `<h2>Steps</h2>${stepsHtml}${contactsHtml}${compactCiteHtml}${warnHtml}`;
   return page(`Run ${run.id}`, body, '/runs');
 }
 
-function diffPage(id, slug) {
+function diffPage(id, slug, chunkIdx) {
   let run;
   try { run = JSON.parse(fs.readFileSync(path.join(RUNS_DIR, `${id}.json`), 'utf8')); } catch { return null; }
-  if (!run.preSha || !run.postSha) return null;
+  // A chunk index selects that chunk's own commit pair, so the diff shows what
+  // ONE week-aligned merge did rather than everything the run touched.
+  const chunk = chunkIdx != null && run.chunks ? run.chunks[chunkIdx] : null;
+  const pre = (chunk && chunk.preSha) || run.preSha;
+  const post = (chunk && chunk.postSha) || run.postSha;
+  if (!pre || !post) return null;
   let diff;
   try {
-    diff = execFileSync('git', ['--git-dir', GITDIR, 'diff', `${run.preSha}..${run.postSha}`, '--', `data/contacts/${slug}.md`],
+    diff = execFileSync('git', ['--git-dir', GITDIR, 'diff', `${pre}..${post}`, '--', `data/contacts/${slug}.md`],
       { cwd: ROOT, encoding: 'utf8', timeout: 15_000, maxBuffer: 8 * 1024 * 1024 });
   } catch (e) {
     diff = null;
@@ -725,7 +762,10 @@ function start() {
         const id = decodeURIComponent(rdiff[1]);
         const slug = decodeURIComponent(rdiff[2]);
         if (!isSafeRunId(id) || !isSafeSlug(slug)) { send(400, page('Bad request', '<p>Bad request.</p>')); return; }
-        const html = diffPage(id, slug);
+        // ?chunk=<n> selects one chunk's own commit pair; absent = whole run.
+        const rawChunk = url.searchParams.get('chunk');
+        const chunkIdx = rawChunk != null && /^\d{1,4}$/.test(rawChunk) ? Number(rawChunk) : null;
+        const html = diffPage(id, slug, chunkIdx);
         if (!html) { send(404, page('Not found', '<div class="back"><a href="/runs">&larr; Runs</a></div><p>No such run (or it has no snapshots to diff).</p>')); return; }
         send(200, html);
         return;
