@@ -20,7 +20,7 @@ const PORT = Number(process.env.CRM_EVAL_PORT) || 8788;
 const SCRATCH = process.env.CRM_EVAL_DIR
   || 'C:/Users/natha/AppData/Local/Temp/claude/C--Users-natha--openclaw/7de048dc-42ba-4c94-b38c-b7fc743ad280/scratchpad/crm-eval';
 
-const VARIANT_LABEL = { a: 'A (current)', b: 'B (rewrite)' };
+const VARIANT_LABEL = { a: 'A (current)', b: 'B (rewrite)', c: 'C (B + capture)' };
 const SEV_ORDER = { high: 0, medium: 1, low: 2 };
 
 // ---- data ----------------------------------------------------------------------
@@ -37,9 +37,18 @@ function loadRun(id) {
   const scored = JSON.parse(fs.readFileSync(path.join(dir, 'scored.json'), 'utf8'));
   let cases = [];
   try { cases = JSON.parse(fs.readFileSync(path.join(dir, 'fixtures', 'cases.json'), 'utf8')); } catch { /* older run */ }
-  let judge = null;
-  try { judge = JSON.parse(fs.readFileSync(path.join(dir, 'judge.json'), 'utf8')); } catch { /* not judged */ }
-  return { id, dir, scored, cases, judge };
+  // A run can be judged more than once — A-vs-B and B-vs-C are separate pairwise
+  // comparisons over the same outputs, so each gets its own file and its own
+  // block in the UI rather than one silently overwriting the other.
+  const judges = [];
+  for (const f of fs.readdirSync(dir).filter((x) => /^judge(-[a-z]{2})?\.json$/.test(x)).sort()) {
+    try {
+      const j = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'));
+      j.pair = j.pair || ['a', 'b']; // files written before pairs were recorded
+      judges.push(j);
+    } catch { /* unreadable */ }
+  }
+  return { id, dir, scored, cases, judges };
 }
 
 // A judged winner is only reported when both presentation orders agreed; a flip
@@ -274,18 +283,22 @@ function viewRun(id) {
       <td><code>${esc(f.id)}</code></td><td>${esc(f.detail)}</td></tr>`).join('')}</table>`
     : '<p class="sub">No failures.</p>';
 
-  // ---- semantic judgment ----
-  const { judge } = loadRun(id);
-  let judgeBlock = `<p class="sub">Not judged yet. Run <code>node evals/judge.js ${esc(id)}</code>.</p>`;
-  if (judge && judge.results.length) {
+  // ---- semantic judgment (one block per judged pair) ----
+  const { judges } = loadRun(id);
+  let judgeBlock = judges.length ? '' : `<p class="sub">Not judged yet. Run <code>node evals/judge.js ${esc(id)}</code>.</p>`;
+  for (const judge of judges) {
+    if (!judge.results.length) continue;
     const dims = judge.dimensions;
-    const tally = { a: 0, b: 0, tie: 0 };
+    const [P1, P2] = judge.pair;
+    const tally = { [P1]: 0, [P2]: 0, tie: 0 };
     for (const r of judge.results) for (const d of dims) tally[r.dimensions[d].winner]++;
-    const ov = { a: 0, b: 0, tie: 0 };
+    const ov = { [P1]: 0, [P2]: 0, tie: 0 };
     for (const r of judge.results) ov[r.overall.winner]++;
     const flips = judge.results.reduce((n, r) => n + dims.filter((d) => !r.dimensions[d].agreed).length, 0);
+    const L = (v) => esc(VARIANT_LABEL[v] || v);
 
-    judgeBlock = `<p class="sub">Blind pairwise, judged by <code>${esc(judge.model)}</code> in both presentation orders.
+    judgeBlock += `<h3 style="margin:22px 0 6px;font-size:15px">${L(P1)} vs ${L(P2)}</h3>
+      <p class="sub">Blind pairwise, judged by <code>${esc(judge.model)}</code> in both presentation orders.
       A verdict counts only when both orders agree; a flip is recorded as a tie and marked <b>*</b>.</p>
       <table><tr><th>case</th>${dims.map((d) => `<th>${esc(d.replace(/_/g, ' '))}</th>`).join('')}<th>overall</th></tr>
       ${judge.results.map((r) => `<tr>
@@ -293,14 +306,14 @@ function viewRun(id) {
         ${dims.map((d) => `<td>${verdictPill(r.dimensions[d])}</td>`).join('')}
         <td>${verdictPill(r.overall)}</td></tr>`).join('')}
       </table>
-      <p class="sub" style="margin-top:10px">dimension wins — <b>A ${tally.a}</b> · <b>B ${tally.b}</b> · tie ${tally.tie}
-        (of ${judge.results.length * dims.length}) &nbsp;·&nbsp; overall — <b>A ${ov.a}</b> · <b>B ${ov.b}</b> · tie ${ov.tie}
+      <p class="sub" style="margin-top:10px">dimension wins — <b>${L(P1)} ${tally[P1]}</b> · <b>${L(P2)} ${tally[P2]}</b> · tie ${tally.tie}
+        (of ${judge.results.length * dims.length}) &nbsp;·&nbsp; overall — <b>${L(P1)} ${ov[P1]}</b> · <b>${L(P2)} ${ov[P2]}</b> · tie ${ov.tie}
         &nbsp;·&nbsp; ${flips} order-flip${flips === 1 ? '' : 's'}</p>`;
 
     const unsup = judge.results.flatMap((r) => r.unsupported.map((u) => ({ ...u, case: r.case })));
     judgeBlock += unsup.length
-      ? `<h2>Unsupported claims flagged</h2><table><tr><th>variant</th><th>case</th><th>pass</th><th>claim</th></tr>
-        ${unsup.map((u) => `<tr><td><span class="pill ${u.variant === 'b' ? 'winb' : 'wina'}">${esc(VARIANT_LABEL[u.variant] || u.variant)}</span></td>
+      ? `<table><tr><th>unsupported claim flagged against</th><th>case</th><th>pass</th><th>claim</th></tr>
+        ${unsup.map((u) => `<tr><td><span class="pill ${u.variant === P2 ? 'winb' : 'wina'}">${L(u.variant)}</span></td>
           <td>${esc(u.case)}</td><td class="sub">${esc(u.pass)}</td><td>${esc(u.claim)}</td></tr>`).join('')}</table>`
       : '<p class="sub">No unsupported claims flagged in either variant.</p>';
   }
@@ -326,10 +339,16 @@ function renderDiff(before, after) {
   }).join('')}</pre></div>`;
 }
 
+function judgeBlocksForCase(judges, caseName) {
+  return (judges || []).map((j) => judgeBlockForCase(j, caseName)).filter(Boolean).join('');
+}
+
 function judgeBlockForCase(judge, caseName) {
   if (!judge) return '';
   const r = judge.results.find((x) => x.case === caseName);
   if (!r) return '';
+  const [P1, P2] = judge.pair || ['a', 'b'];
+  const L = (v) => esc(VARIANT_LABEL[v] || v);
   const rows = judge.dimensions.map((d) => {
     const v = r.dimensions[d];
     return `<tr><td>${verdictPill(v)}</td><td><b>${esc(d.replace(/_/g, ' '))}</b>
@@ -339,9 +358,9 @@ function judgeBlockForCase(judge, caseName) {
   }).join('');
   const unsup = r.unsupported.length
     ? `<div class="card" style="margin-top:10px"><b>Unsupported claims flagged</b>
-       ${r.unsupported.map((u) => `<div class="why"><span class="pill ${u.variant === 'b' ? 'winb' : 'wina'}">${esc(VARIANT_LABEL[u.variant] || u.variant)}</span> ${esc(u.claim)}</div>`).join('')}</div>`
+       ${r.unsupported.map((u) => `<div class="why"><span class="pill ${u.variant === P2 ? 'winb' : 'wina'}">${L(u.variant)}</span> ${esc(u.claim)}</div>`).join('')}</div>`
     : '';
-  return `<h2>Semantic judgment</h2>
+  return `<h2>Semantic judgment — ${L(P1)} vs ${L(P2)}</h2>
     <div class="card" style="margin-bottom:12px">
       <div style="display:flex;gap:10px;align-items:center"><b>Overall</b> ${verdictPill(r.overall)}</div>
       <div class="why">${esc(r.overall.why)}</div>
@@ -351,7 +370,7 @@ function judgeBlockForCase(judge, caseName) {
 }
 
 function viewCase(id, caseName) {
-  const { dir, scored, cases, judge } = loadRun(id);
+  const { dir, scored, cases, judges } = loadRun(id);
   const c = cases.find((x) => x.name === caseName);
   const runs = scored.filter((s) => s.case === caseName).sort((a, b) => a.variant.localeCompare(b.variant));
   if (!runs.length) return page('not found', `<nav><a href="/run/${encodeURIComponent(id)}">← back</a></nav><p>No runs scored for case <code>${esc(caseName)}</code>.</p>`);
@@ -389,7 +408,7 @@ function viewCase(id, caseName) {
   return page(`${caseName} — eval`, `<nav><a href="/">all runs</a> · <a href="/run/${encodeURIComponent(id)}">← ${esc(id.replace('run-', ''))}</a></nav>
     <h1>${esc(caseName)} <span class="tag">${esc(c.slug)}</span></h1>
     <p class="sub">${esc(c.why)} · ${c.messages} messages · ledger ${esc(c.chunkLabel || '')}</p>
-    ${judgeBlockForCase(judge, caseName)}
+    ${judgeBlocksForCase(judges, caseName)}
     <div class="grid">${panels}</div>
     <h2>Ledger fed to both</h2><div class="card scroll"><pre>${esc(c.ledger)}</pre></div>`);
 }

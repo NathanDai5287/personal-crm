@@ -53,6 +53,17 @@ const VARIANTS = {
       `Today's date: ${today}`,
     ].join('\n'),
   },
+  // C = B plus the capture fixes from the Fable 5 critique. B beat A on
+  // faithfulness and restraint but LOST selection and talking_points, because
+  // the v2 rewrite silently dropped two of A's capture-driving instructions
+  // (the talking-point category checklist, and the verb "add" for open
+  // questions) and taught the model to treat Nathan's half of the conversation
+  // as noise. Same user turn as B, so the prompt file is the only variable.
+  c: {
+    label: 'C (B + capture)',
+    prompt: 'prompts/merge-v3.md',
+    user: (c, today) => VARIANTS.b.user(c, today),
+  },
 };
 
 function sha(s) { return crypto.createHash('sha1').update(s).digest('hex'); }

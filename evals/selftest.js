@@ -162,6 +162,11 @@ const MUTANTS = [
     after: GOOD,
     extra: { expectNoop: true },
   },
+  {
+    name: 'left Last contact stale',
+    expect: 'last_contact_current',
+    after: GOOD.replace('- **Last contact:** 2026-07-07', '- **Last contact:** 2026-06-30'),
+  },
 ];
 
 function main() {
@@ -179,6 +184,24 @@ function main() {
   const noopCheck = noop.results.find((r) => r.id === 'noop_respected');
   console.log(`unchanged profile under expectNoop: ${noopCheck.pass ? 'ok' : 'FAIL'}`);
   if (!noopCheck.pass) failures++;
+
+  // 2b. Bumping ONLY Last contact must still count as a no-op — it is mechanical,
+  // not a content judgement. This is the behaviour the semantic judge argued for.
+  const bumped = score(BEFORE.replace('- **Last contact:** 2026-06-30', '- **Last contact:** 2026-07-07'),
+    { expectNoop: true });
+  const bumpNoop = bumped.results.find((r) => r.id === 'noop_respected');
+  const bumpLc = bumped.results.find((r) => r.id === 'last_contact_current');
+  console.log(`Last-contact-only bump under expectNoop: noop ${bumpNoop.pass ? 'ok' : 'FAIL'}, date ${bumpLc.pass ? 'ok' : 'FAIL'}`);
+  if (!bumpNoop.pass || !bumpLc.pass) failures++;
+
+  // 2c. Month precision is a real precision, not a missing date. This guards a
+  // bug the three-way run exposed: the check counted `**2026-08**` as undated and
+  // failed a prompt for doing exactly what it was told.
+  const monthly = score(GOOD.replace('- **2026-07-06** ask how the new espresso machine is working out ⟨m1000⟩',
+    '- **2026-08** ask about the August trip ⟨m1000⟩\n- **2026-07-06** ask how the new espresso machine is working out ⟨m1000⟩'));
+  const monthCheck = monthly.results.find((r) => r.id === 'tp_format');
+  console.log(`month-precision date (**2026-08**) accepted: ${monthCheck.pass ? 'ok' : `FAIL — ${monthCheck.detail}`}`);
+  if (!monthCheck.pass) failures++;
 
   // 3. Every mutant must be caught BY THE CHECK IT TARGETS.
   console.log('\nmutants (each must trip its own check):');

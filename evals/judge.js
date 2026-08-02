@@ -167,6 +167,8 @@ function main() {
     console.error(`REFUSING to judge with '${MODEL}': billed per token. Pass --allow-paid if intended.`);
     process.exit(2);
   }
+  const pairIdx = argv.indexOf('--pair');
+  const [V1, V2] = (pairIdx === -1 ? 'a,b' : argv[pairIdx + 1]).split(',').map((x) => x.trim());
   const runs = fs.readdirSync(SCRATCH).filter((d) => d.startsWith('run-')).sort();
   if (!id || id === 'latest') id = runs[runs.length - 1];
   const dir = path.join(SCRATCH, id);
@@ -174,7 +176,7 @@ function main() {
   const cases = JSON.parse(fs.readFileSync(path.join(dir, 'fixtures', 'cases.json'), 'utf8'));
 
   const caseNames = [...new Set(scored.map((s) => s.case))];
-  console.log(`judging ${id} with ${MODEL} (subscription auth — free)`);
+  console.log(`judging ${id} — ${V1.toUpperCase()} vs ${V2.toUpperCase()} — with ${MODEL} (subscription auth — free)`);
   console.log(`${caseNames.length} case(s) x 2 orders = ${caseNames.length * 2} call(s)\n`);
 
   const results = [];
@@ -184,7 +186,7 @@ function main() {
     const run = scored.find((s) => s.case === cn);
     if (!c || !run) { console.log(`  skip ${cn}`); continue; }
     let a, b;
-    try { a = afterText(dir, 'a', cn, run.slug); b = afterText(dir, 'b', cn, run.slug); } catch (e) {
+    try { a = afterText(dir, V1, cn, run.slug); b = afterText(dir, V2, cn, run.slug); } catch (e) {
       console.log(`  skip ${cn}: ${e.message}`); continue;
     }
 
@@ -195,9 +197,9 @@ function main() {
     let fwd, rev;
     try {
       process.stdout.write(`  ${cn.padEnd(16)} forward … `);
-      fwd = withRetry(() => callJudge(SYSTEM, buildUser(c, a, b), path.join(jdir, `${cn}.fwd.md`))).parsed; // 1=a, 2=b
+      fwd = withRetry(() => callJudge(SYSTEM, buildUser(c, a, b), path.join(jdir, `${cn}.${V1}${V2}.fwd.md`))).parsed; // 1=a, 2=b
       process.stdout.write('reverse … ');
-      rev = withRetry(() => callJudge(SYSTEM, buildUser(c, b, a), path.join(jdir, `${cn}.rev.md`))).parsed; // 1=b, 2=a
+      rev = withRetry(() => callJudge(SYSTEM, buildUser(c, b, a), path.join(jdir, `${cn}.${V1}${V2}.rev.md`))).parsed; // 1=b, 2=a
     } catch (e) {
       console.log(`UNJUDGED (${e.message.slice(0, 70)})`);
       failures.push({ case: cn, error: e.message });
@@ -206,8 +208,8 @@ function main() {
 
     const dims = {};
     for (const [k] of DIMENSIONS) {
-      const f = toVariant(fwd.dimensions?.[k]?.winner, 'a', 'b');
-      const r = toVariant(rev.dimensions?.[k]?.winner, 'b', 'a');
+      const f = toVariant(fwd.dimensions?.[k]?.winner, V1, V2);
+      const r = toVariant(rev.dimensions?.[k]?.winner, V2, V1);
       dims[k] = {
         winner: reconcile(f, r), forward: f, reverse: r,
         agreed: f === r,
@@ -215,23 +217,24 @@ function main() {
         whyReverse: rev.dimensions?.[k]?.why || '',
       };
     }
-    const of = toVariant(fwd.overall?.winner, 'a', 'b');
-    const or_ = toVariant(rev.overall?.winner, 'b', 'a');
+    const of = toVariant(fwd.overall?.winner, V1, V2);
+    const or_ = toVariant(rev.overall?.winner, V2, V1);
     const overall = {
       winner: reconcile(of, or_), forward: of, reverse: or_, agreed: of === or_,
       why: fwd.overall?.why || '', whyReverse: rev.overall?.why || '',
     };
     const unsupported = [
-      ...(fwd.unsupported_claims || []).map((u) => ({ variant: toVariant(u.candidate, 'a', 'b'), claim: u.claim, pass: 'forward' })),
-      ...(rev.unsupported_claims || []).map((u) => ({ variant: toVariant(u.candidate, 'b', 'a'), claim: u.claim, pass: 'reverse' })),
+      ...(fwd.unsupported_claims || []).map((u) => ({ variant: toVariant(u.candidate, V1, V2), claim: u.claim, pass: 'forward' })),
+      ...(rev.unsupported_claims || []).map((u) => ({ variant: toVariant(u.candidate, V2, V1), claim: u.claim, pass: 'reverse' })),
     ].filter((u) => u.variant !== 'tie');
 
     results.push({ case: cn, dimensions: dims, overall, unsupported });
     console.log(`${overall.winner === 'tie' ? 'tie' : overall.winner.toUpperCase()}${overall.agreed ? '' : ' (order-flipped)'}`);
   }
 
-  const payload = { model: MODEL, judgedAt: new Date().toISOString(), dimensions: DIMENSIONS.map(([k]) => k), results, failures };
-  fs.writeFileSync(path.join(dir, 'judge.json'), JSON.stringify(payload, null, 2));
+  const payload = { model: MODEL, judgedAt: new Date().toISOString(), dimensions: DIMENSIONS.map(([k]) => k), pair: [V1, V2], results, failures };
+  const outName = (V1 === 'a' && V2 === 'b') ? 'judge.json' : `judge-${V1}${V2}.json`;
+  fs.writeFileSync(path.join(dir, outName), JSON.stringify(payload, null, 2));
 
   // ---- report ----
   console.log('\n================ SEMANTIC JUDGMENT ================\n');
@@ -247,12 +250,12 @@ function main() {
   }
   console.log('\n* = judge flipped with presentation order, recorded as a tie\n');
 
-  const tally = { a: 0, b: 0, tie: 0 };
+  const tally = { [V1]: 0, [V2]: 0, tie: 0 };
   for (const r of results) for (const [k] of DIMENSIONS) tally[r.dimensions[k].winner]++;
-  console.log(`dimension wins   A: ${tally.a}   B: ${tally.b}   tie: ${tally.tie}   (of ${results.length * DIMENSIONS.length})`);
-  const ov = { a: 0, b: 0, tie: 0 };
+  console.log(`dimension wins   ${V1.toUpperCase()}: ${tally[V1]}   ${V2.toUpperCase()}: ${tally[V2]}   tie: ${tally.tie}   (of ${results.length * DIMENSIONS.length})`);
+  const ov = { [V1]: 0, [V2]: 0, tie: 0 };
   for (const r of results) ov[r.overall.winner]++;
-  console.log(`overall wins     A: ${ov.a}   B: ${ov.b}   tie: ${ov.tie}   (of ${results.length})`);
+  console.log(`overall wins     ${V1.toUpperCase()}: ${ov[V1]}   ${V2.toUpperCase()}: ${ov[V2]}   tie: ${ov.tie}   (of ${results.length})`);
 
   const unsup = results.flatMap((r) => r.unsupported.map((u) => ({ ...u, case: r.case })));
   if (unsup.length) {
@@ -264,7 +267,7 @@ function main() {
     console.log(`\n${failures.length} case(s) UNJUDGED — raw replies kept in judge/ for diagnosis:`);
     for (const f of failures) console.log(`  ${f.case}: ${f.error.slice(0, 140)}`);
   }
-  console.log(`\nwrote ${path.join(dir, 'judge.json')}`);
+  console.log(`\nwrote ${path.join(dir, outName)}`);
 }
 
 if (require.main === module) main();

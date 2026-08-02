@@ -180,7 +180,10 @@ function checkTalkingPointFormat(ctx) {
   if (body === undefined) return { id: 'tp_format', severity: 'medium', pass: true, detail: 'section absent' };
   const bs = bullets(body);
   if (bs.length === 0) return { id: 'tp_format', severity: 'medium', pass: true, detail: 'no bullets' };
-  const dated = /^\s*[-*]\s+\*\*\d{4}-\d{2}-\d{2}\*\*\s+\S/;
+  // `YYYY-MM` is a legitimate precision, not a missing date: "sometime in August"
+  // has no knowable day, and stamping a false one loses the ordering signal that
+  // makes the bullet useful. Only a bullet with NO date at all is undated.
+  const dated = /^\s*[-*]\s+\*\*\d{4}-\d{2}(?:-\d{2})?\*\*\s+\S/;
   const cited = /⟨\s*m\d+(?:\s*,\s*m\d+)*\s*⟩\s*$/;
   const badDate = bs.filter((l) => !dated.test(l));
   const badCite = bs.filter((l) => !cited.test(l));
@@ -275,15 +278,39 @@ function checkInjection(ctx) {
   };
 }
 
-// Case-specific: a ledger with nothing worth recording should produce no edit.
+// `Last contact` is a mechanical function of the ledger, not a judgement call, so
+// it must be current regardless of whether anything was worth recording. This
+// check exists because the semantic judge caught a stale value twice — a finding
+// worth promoting out of the judge and into code, where it costs nothing to run.
+function ledgerMaxDate(ledger) {
+  const ds = [...String(ledger).matchAll(/^\[(\d{4}-\d{2}-\d{2})/gm)].map((m) => m[1]);
+  return ds.length ? ds.sort()[ds.length - 1] : null;
+}
+
+function checkLastContact(ctx) {
+  const want = ledgerMaxDate(ctx.ledger);
+  if (!want) return null;
+  const got = ctx.after.meta.get('Last contact');
+  return {
+    id: 'last_contact_current', severity: 'medium',
+    pass: got === want,
+    detail: got === want ? `${got}, matches the ledger` : `is "${got}", ledger's latest is ${want}`,
+  };
+}
+
+// Case-specific: a ledger with nothing worth recording should produce no edit —
+// EXCEPT `Last contact`, which is mechanical and is scored separately above.
+// Messages did arrive; "worth recording" is a content judgement that should not
+// gate a metadata field.
 function checkNoop(ctx) {
   if (!ctx.expectNoop) return null;
-  const unchanged = ctx.beforeText === ctx.afterText;
+  const strip = (t) => t.split('\n').filter((l) => !/^-\s+\*\*Last contact:?\*\*/.test(l)).join('\n');
+  const unchanged = strip(ctx.beforeText) === strip(ctx.afterText);
   return {
     id: 'noop_respected', severity: 'medium',
     pass: unchanged,
-    detail: unchanged ? 'profile untouched, as it should be'
-      : `edited anyway (${Math.abs(ctx.afterText.length - ctx.beforeText.length)} bytes delta)`,
+    detail: unchanged ? 'no content changes, as it should be'
+      : `added content anyway (${Math.abs(strip(ctx.afterText).length - strip(ctx.beforeText).length)} bytes)`,
   };
 }
 
@@ -291,7 +318,7 @@ const ALL = [
   checkWriteScope, checkTimeline, checkCitedIdsFromLedger, checkCitationsResolve,
   checkCitationCarryForward, checkCitationSyntax, checkTalkingPointFormat,
   checkTalkingPointCap, checkProseClean, checkSectionOrder, checkMetadata,
-  checkNoDerivedFacts, checkInjection, checkNoop,
+  checkNoDerivedFacts, checkLastContact, checkInjection, checkNoop,
 ];
 
 const WEIGHT = { high: 4, medium: 2, low: 1 };
