@@ -30,7 +30,10 @@ const fs = require('fs');
 const { openSignalDb, openCrmDb } = require('../lib/signal-db');
 const { mirrorMessages, ensureMessagesTable } = require('../lib/archive');
 const { resolveSources, buildMessageQuery } = require('../lib/sources');
-const { loadAttachments, describeAttachments, composeBody } = require('../lib/attachments');
+const {
+  loadAttachments, describeAttachments, composeBody,
+  loadPreviews, describePreview, loadQuotes, describeQuote,
+} = require('../lib/attachments');
 const {
   TRACKED, TRACKED_GROUPS, NICKNAMES, ARCHIVE_STATE, MY_SERVICE_ID, BOT_SERVICE_ID,
 } = require('../lib/config');
@@ -99,9 +102,14 @@ function sweepContact(cdb, sdb, slug, cursors, now, nicks, deep) {
     if (m.src === row.signal_id) return first;
     return m.type === 'outgoing' ? 'Nathan' : first;
   };
-  // Media -> text, once, here. Everything downstream reads the archive, so a
-  // photo becomes "[photo]" for the ledger, the merge and the Timeline alike.
+  // ENRICHMENT happens once, HERE. Everything downstream reads the archive, so
+  // a photo becomes "[photo]", a reply carries what it answers, and a bare URL
+  // carries its page title — for the ledger, the merge and the Timeline alike.
+  const mids = msgs.map((m) => m.mid);
   const att = loadAttachments(sdb, msgs.filter((m) => m.hasAttachments).map((m) => m.mid));
+  const prev = loadPreviews(sdb, mids);
+  const quo = loadQuotes(sdb, mids);
+  const nameFor = (sid) => (sid === MY_SERVICE_ID ? 'Nathan' : (sid === row.signal_id ? first : null));
   mirrorMessages(cdb, msgs.map((m) => ({
     id: m.rid,
     convId: m.cid,
@@ -109,10 +117,16 @@ function sweepContact(cdb, sdb, slug, cursors, now, nicks, deep) {
     slug,
     sentAt: m.sent_at,
     sender: speaker(m),
-    body: composeBody(m.body, describeAttachments(att.get(m.mid))),
+    body: composeBody(
+      m.body,
+      describeQuote(quo.get(m.mid), nameFor),
+      describeAttachments(att.get(m.mid)),
+      describePreview(prev.get(m.mid)),
+    ),
     src: m.src,
     type: m.type,
-    hasMedia: Boolean(m.hasAttachments), // lets the archive upgrade an old caption-only row
+    // Lets the archive upgrade a row stored before these enrichments existed.
+    enriched: Boolean(m.hasAttachments) || prev.has(m.mid) || quo.has(m.mid),
   })));
   cursors[key] = msgs.reduce((mx, m) => Math.max(mx, m.rid), cursors[key] || 0);
   return msgs.length;
@@ -140,7 +154,12 @@ function sweepGroup(cdb, sdb, group, cursors, now, nameMap, deep) {
     if (m.src === BOT_SERVICE_ID) return 'Janet';
     return nameMap.get(m.src) || 'Someone';
   };
+  const mids = msgs.map((m) => m.mid);
   const att = loadAttachments(sdb, msgs.filter((m) => m.hasAttachments).map((m) => m.mid));
+  const prev = loadPreviews(sdb, mids);
+  const quo = loadQuotes(sdb, mids);
+  // In a group the quoted author can be anyone, so resolve against the full map.
+  const nameFor = (sid) => (sid === MY_SERVICE_ID ? 'Nathan' : nameMap.get(sid) || null);
   mirrorMessages(cdb, msgs.map((m) => ({
     id: m.rid,
     convId: conv.id,
@@ -148,10 +167,15 @@ function sweepGroup(cdb, sdb, group, cursors, now, nameMap, deep) {
     slug: null,
     sentAt: m.sent_at,
     sender: speaker(m),
-    body: composeBody(m.body, describeAttachments(att.get(m.mid))),
+    body: composeBody(
+      m.body,
+      describeQuote(quo.get(m.mid), nameFor),
+      describeAttachments(att.get(m.mid)),
+      describePreview(prev.get(m.mid)),
+    ),
     src: m.src,
     type: m.type,
-    hasMedia: Boolean(m.hasAttachments), // lets the archive upgrade an old caption-only row
+    enriched: Boolean(m.hasAttachments) || prev.has(m.mid) || quo.has(m.mid),
   })));
   cursors[key] = msgs.reduce((mx, m) => Math.max(mx, m.rid), cursors[key] || 0);
   return msgs.length;
