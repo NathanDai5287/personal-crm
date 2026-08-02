@@ -83,9 +83,18 @@ function withoutTimeline(md) {
 function buildUser(c, first, second) {
   return [
     `## The ledger of new messages`, '', '```', c.ledger.trim(), '```', '',
-    `## The profile BEFORE the update (Timeline section removed)`, '', '```', withoutTimeline(c.profile), '```', '',
-    `## Candidate output 1 (Timeline section removed)`, '', '```', withoutTimeline(first), '```', '',
-    `## Candidate output 2 (Timeline section removed)`, '', '```', withoutTimeline(second), '```', '',
+    // The prior profile is shown IN FULL, Timeline included. Stripping it to
+    // save tokens was a real bug: the Timeline is prior evidence, so a claim
+    // grounded there looked fabricated to the judge, and it duly flagged a
+    // lodging arrangement recorded in an earlier Timeline entry as unsupported.
+    // A faithfulness judge that cannot see half the evidence is worse than none.
+    `## The profile BEFORE the update (complete, including Timeline)`, '', '```', c.profile.trim(), '```', '',
+    // Candidates keep their Timeline stripped: it is byte-identical to the one
+    // above (both are forbidden to touch it, and a deterministic check enforces
+    // that), so including it twice more would only add noise.
+    `## Candidate output 1 (Timeline omitted — unchanged from above)`, '', '```', withoutTimeline(first), '```', '',
+    `## Candidate output 2 (Timeline omitted — unchanged from above)`, '', '```', withoutTimeline(second), '```', '',
+    'A claim counts as supported if the ledger OR the prior profile (including its Timeline) supports it.',
     'Which candidate is the better update? Reply with the JSON object only.',
   ].join('\n');
 }
