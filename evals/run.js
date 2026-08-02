@@ -31,10 +31,14 @@ const SCRATCH = process.env.CRM_EVAL_DIR
 const FREE_PREFIX = 'anthropic/';
 const DEFAULT_MODEL = 'anthropic/claude-opus-5';
 
+// Variants point at VERSIONED prompt files, never at prompts/merge.md. merge.md
+// is production and moves when a prompt is promoted; if variant A tracked it,
+// promoting C would silently turn the control into the treatment and every past
+// run would become unreproducible.
 const VARIANTS = {
   a: {
-    label: 'A (current)',
-    prompt: 'prompts/merge.md',
+    label: 'A (original)',
+    prompt: 'prompts/merge-v1.md',
     // Verbatim production user turn — a faithful control.
     user: () => 'Merge the new messages into this profile per your instructions.',
   },
@@ -62,6 +66,16 @@ const VARIANTS = {
   c: {
     label: 'C (B + capture)',
     prompt: 'prompts/merge-v3.md',
+    user: (c, today) => VARIANTS.b.user(c, today),
+  },
+  // K = the SAME prompt as C on a different model. The only variable is the
+  // model, so a C-vs-K comparison answers "does this prompt survive a weaker
+  // instruction-follower" rather than confounding prompt and model together.
+  // PAID: this variant bills per token, so --allow-paid is required to run it.
+  k: {
+    label: 'K3 (prompt C)',
+    prompt: 'prompts/merge-v3.md',
+    model: 'moonshotai/kimi-k3',
     user: (c, today) => VARIANTS.b.user(c, today),
   },
 };
@@ -119,8 +133,14 @@ function scoreOne(c, variantKey, runDir, resolveIds) {
   return { ...meta, checks };
 }
 
-function runOne(c, variantKey, runDir, model, today) {
+// A variant may pin its own model (see `k`); otherwise the run-wide --model wins.
+function modelFor(variantKey, globalModel) {
+  return VARIANTS[variantKey].model || globalModel;
+}
+
+function runOne(c, variantKey, runDir, globalModel, today) {
   const v = VARIANTS[variantKey];
+  const model = modelFor(variantKey, globalModel);
   const dir = path.join(runDir, variantKey, c.name);
   const sandbox = path.join(dir, 'sandbox');
   fs.mkdirSync(sandbox, { recursive: true });
@@ -208,8 +228,13 @@ function main() {
   const scoreOnly = arg('--score-only', null);
   const today = arg('--today', new Date().toISOString().slice(0, 10));
 
-  if (!model.startsWith(FREE_PREFIX) && !argv.includes('--allow-paid')) {
-    console.error(`REFUSING to run '${model}': billed per token. Re-run with --allow-paid if that is intended.`);
+  const selected = onlyVariant ? onlyVariant.split(',').map((x) => x.trim()).filter(Boolean) : Object.keys(VARIANTS);
+  for (const v of selected) if (!VARIANTS[v]) { console.error(`unknown variant '${v}' — have: ${Object.keys(VARIANTS).join(', ')}`); process.exit(2); }
+  const paid = [...new Set(selected.map((v) => modelFor(v, model)))].filter((m) => !m.startsWith(FREE_PREFIX));
+  if (paid.length && !argv.includes('--allow-paid')) {
+    console.error(`REFUSING to run: ${paid.join(', ')} bill per token.`);
+    console.error(`Selected variants: ${selected.map((v) => `${v}=${modelFor(v, model)}`).join(', ')}`);
+    console.error('Re-run with --allow-paid if that is intended.');
     process.exit(2);
   }
 
@@ -219,7 +244,16 @@ function main() {
   console.log('building fixtures…');
   const fixturesDir = path.join(runDir, 'fixtures');
   let cases;
-  if (scoreOnly && fs.existsSync(path.join(fixturesDir, 'cases.json'))) {
+  const from = arg('--fixtures-from', null);
+  if (from) {
+    // Comparing two MODELS means the inputs must be byte-identical, not merely
+    // rebuilt by the same deterministic code. Copy the earlier run's fixtures.
+    const src = path.join(fs.existsSync(from) ? from : path.join(SCRATCH, from), 'fixtures', 'cases.json');
+    cases = JSON.parse(fs.readFileSync(src, 'utf8'));
+    fs.mkdirSync(fixturesDir, { recursive: true });
+    fs.writeFileSync(path.join(fixturesDir, 'cases.json'), JSON.stringify(cases, null, 2));
+    console.log(`  reusing ${cases.length} fixture(s) from ${src}`);
+  } else if (scoreOnly && fs.existsSync(path.join(fixturesDir, 'cases.json'))) {
     // Re-score against the ORIGINAL fixtures. Rebuilding them would silently
     // re-derive from a since-changed archive and score old outputs against new
     // inputs — the classic way a re-scored eval quietly stops meaning anything.
@@ -229,10 +263,13 @@ function main() {
     fs.writeFileSync(path.join(fixturesDir, 'cases.json'), JSON.stringify(cases, null, 2));
   }
   if (onlyCase) cases = cases.filter((c) => c.name === onlyCase);
-  const variants = onlyVariant ? [onlyVariant] : Object.keys(VARIANTS);
+  const variants = selected;
 
   console.log(`\n${cases.length} case(s) x ${variants.length} variant(s) = ${cases.length * variants.length} run(s)`);
-  console.log(`model: ${model}${model.startsWith(FREE_PREFIX) ? '  (subscription auth — no per-token cost)' : '  (PAID)'}`);
+  for (const v of variants) {
+    const m = modelFor(v, model);
+    console.log(`  ${VARIANTS[v].label.padEnd(18)} ${VARIANTS[v].prompt.padEnd(22)} ${m}${m.startsWith(FREE_PREFIX) ? '  (subscription — free)' : '  ** PAID **'}`);
+  }
   console.log(`runDir: ${runDir}\n`);
   for (const c of cases) console.log(`  ${pad(c.name, 16)} ${pad(c.slug, 24)} ${pad(`${c.messages} msgs`, 12)} ${c.why}`);
 
