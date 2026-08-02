@@ -78,6 +78,31 @@ const VARIANTS = {
     model: 'moonshotai/kimi-k3',
     user: (c, today) => VARIANTS.b.user(c, today),
   },
+  // D = the K3-tuned rewrite, on Opus. Must not regress Opus, since D replaces C.
+  d: {
+    label: 'D (K3-tuned)',
+    prompt: 'prompts/merge-v4.md',
+    user: (c, today) => VARIANTS.b.user(c, today),
+  },
+  // REASONING SWEEP. Same prompt, same model, only the thinking level differs.
+  // The first K3 run passed no --thinking at all and inherited pi's configured
+  // default, so it ran at 'high' without that being a deliberate choice; these
+  // make the level explicit and comparable. All PAID.
+  kd_low: {
+    label: 'K3+D think=low', prompt: 'prompts/merge-v4.md',
+    model: 'moonshotai/kimi-k3', thinking: 'low',
+    user: (c, today) => VARIANTS.b.user(c, today),
+  },
+  kd_high: {
+    label: 'K3+D think=high', prompt: 'prompts/merge-v4.md',
+    model: 'moonshotai/kimi-k3', thinking: 'high',
+    user: (c, today) => VARIANTS.b.user(c, today),
+  },
+  kd_max: {
+    label: 'K3+D think=max', prompt: 'prompts/merge-v4.md',
+    model: 'moonshotai/kimi-k3', thinking: 'max',
+    user: (c, today) => VARIANTS.b.user(c, today),
+  },
 };
 
 function sha(s) { return crypto.createHash('sha1').update(s).digest('hex'); }
@@ -152,6 +177,7 @@ function runOne(c, variantKey, runDir, globalModel, today) {
     cwd: sandbox,
     promptFile: path.resolve(__dirname, '..', v.prompt),
     model,
+    thinking: v.thinking || null,
     userMessage: v.user(c, today),
     quiet: true,
   });
@@ -161,7 +187,7 @@ function runOne(c, variantKey, runDir, globalModel, today) {
   const reply = String(res.output || res.error || '').trim();
   fs.writeFileSync(path.join(dir, 'reply.txt'), reply);
   const meta = {
-    case: c.name, slug: c.slug, variant: variantKey, model, ok: res.ok, elapsed,
+    case: c.name, slug: c.slug, variant: variantKey, model, thinking: v.thinking || null, ok: res.ok, elapsed,
     reply: reply.slice(-400),
     filesBefore: [...filesBefore], filesAfter: [...filesAfter],
   };
@@ -228,7 +254,11 @@ function main() {
   const scoreOnly = arg('--score-only', null);
   const today = arg('--today', new Date().toISOString().slice(0, 10));
 
-  const selected = onlyVariant ? onlyVariant.split(',').map((x) => x.trim()).filter(Boolean) : Object.keys(VARIANTS);
+  // Default to the FREE Opus variants only. The paid and reasoning-sweep
+  // variants must be asked for by name, so a bare `node evals/run.js` can never
+  // start spending.
+  const DEFAULT_VARIANTS = ['a', 'b', 'c', 'd'];
+  const selected = onlyVariant ? onlyVariant.split(',').map((x) => x.trim()).filter(Boolean) : DEFAULT_VARIANTS;
   for (const v of selected) if (!VARIANTS[v]) { console.error(`unknown variant '${v}' — have: ${Object.keys(VARIANTS).join(', ')}`); process.exit(2); }
   const paid = [...new Set(selected.map((v) => modelFor(v, model)))].filter((m) => !m.startsWith(FREE_PREFIX));
   if (paid.length && !argv.includes('--allow-paid')) {

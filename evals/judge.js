@@ -117,7 +117,10 @@ function extractJson(text) {
   const s = text.replace(/```(?:json)?/g, '');
   const start = s.indexOf('{');
   if (start === -1) throw new Error(`no JSON object in reply: ${s.slice(0, 200)}`);
-  let depth = 0, inStr = false, esc = false;
+  // Stack of open containers, so an unterminated reply can be closed in the
+  // right order rather than by guessing.
+  const stack = [];
+  let inStr = false, esc = false;
   for (let i = start; i < s.length; i++) {
     const ch = s[i];
     if (inStr) {
@@ -127,10 +130,45 @@ function extractJson(text) {
       continue;
     }
     if (ch === '"') inStr = true;
-    else if (ch === '{') depth++;
-    else if (ch === '}' && --depth === 0) return JSON.parse(s.slice(start, i + 1));
+    else if (ch === '{' || ch === '[') stack.push(ch === '{' ? '}' : ']');
+    else if (ch === '}' || ch === ']') {
+      stack.pop();
+      if (stack.length === 0) return JSON.parse(s.slice(start, i + 1));
+    }
   }
-  throw new Error(`unterminated JSON object (depth ${depth}) in reply of ${s.length} chars`);
+
+  // BOUNDED REPAIR. Observed in the wild: the judge emitted 1,368 chars that
+  // ended in `}]}` but never closed its `dimensions` object, and the retry made
+  // the identical mistake — so retrying is not a fix for a systematic slip.
+  // Appending the missing closers is only safe because the result is then
+  // PARSED and SHAPE-CHECKED; a repair that yields the wrong shape is rejected
+  // exactly like a parse failure, so this can salvage a truncated reply but can
+  // never invent a verdict.
+  if (!inStr && stack.length) {
+    const repaired = s.slice(start) + stack.slice().reverse().join('');
+    try {
+      const obj = normalizeShape(JSON.parse(repaired));
+      if (obj && obj.dimensions && obj.overall) return obj;
+    } catch { /* fall through to the error below */ }
+  }
+  throw new Error(`unterminated JSON object (${stack.length} unclosed) in reply of ${s.length} chars`);
+}
+
+// Closing the containers at the END of the text is correct bracket-wise but puts
+// every key that followed the unclosed one INSIDE it: the observed reply forgot
+// to close `dimensions`, so `overall` and `unsupported_claims` became members of
+// `dimensions`. Lifting them back out is the exact inverse of that specific
+// mistake, not a guess — and the caller still validates the result, so a reply
+// that was wrong in some other way is rejected rather than silently reshaped.
+function normalizeShape(obj) {
+  if (!obj || typeof obj !== 'object' || !obj.dimensions) return obj;
+  for (const k of ['overall', 'unsupported_claims']) {
+    if (obj[k] === undefined && obj.dimensions[k] !== undefined) {
+      obj[k] = obj.dimensions[k];
+      delete obj.dimensions[k];
+    }
+  }
+  return obj;
 }
 
 function afterText(dir, variant, caseName, slug) {
@@ -271,4 +309,4 @@ function main() {
 }
 
 if (require.main === module) main();
-module.exports = { withoutTimeline, reconcile };
+module.exports = { withoutTimeline, reconcile, extractJson };

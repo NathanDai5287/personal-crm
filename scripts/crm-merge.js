@@ -32,6 +32,12 @@ const DEFAULT_USER_MESSAGE = 'Merge the new messages into this profile per your 
 // different prompt variant, rather than reimplementing the invocation and then
 // testing something that isn't what ships.
 function buildArgs(slug, mergePromptText, opts = {}) {
+  // Without --thinking, pi applies its own configured default (currently 'high'
+  // via ~/.pi/agent/settings.json). That is an invisible dependency on a machine
+  // setting: the same command could reason at a different level on another box,
+  // and the first K3 comparison silently ran one tier below the model's ceiling.
+  // Passing it explicitly makes the level part of the experiment.
+  const thinking = opts.thinking || process.env.CRM_MERGE_THINKING || null;
   return [
     '-p',
     '--no-session',
@@ -39,6 +45,7 @@ function buildArgs(slug, mergePromptText, opts = {}) {
     '--no-extensions',
     '--no-skills',
     '--model', opts.model || MERGE_MODEL,
+    ...(thinking ? ['--thinking', thinking] : []),
     '--tools', 'read,edit',
     '--system-prompt', mergePromptText,
     `@data/contacts/${slug}.md`,

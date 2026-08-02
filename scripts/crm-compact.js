@@ -28,6 +28,7 @@ const fs = require("fs");
 const path = require("path");
 const { execFileSync } = require("child_process");
 const { openSignalDb, openCrmDb } = require("../lib/signal-db");
+const { render, loadTemplate } = require("../lib/compact-prompt");
 const { runSweep } = require("./crm-archive");
 const { resolveSources, groupOthers } = require("../lib/sources");
 const {
@@ -42,6 +43,7 @@ const {
   BOT_SERVICE_ID,
   PI_CLI,
   COMPACT_MODEL,
+  COMPACT_PROMPT,
 } = require("../lib/config");
 
 const DAY = 86_400_000;
@@ -85,12 +87,17 @@ function fmtTs(ms) {
 // Replaces the original claude.exe call: invoke `pi` headless, prompt via
 // stdin, `pi -p` prints just the response text on stdout. Never throws —
 // compaction must never crash the pipeline on a model error.
-function piSummarize(prompt) {
+function piSummarize(prompt, system) {
   if (NO_LLM) return "(summary skipped: --no-llm)";
   try {
+    const argv = [PI_CLI, "-p", "--no-session", "-nc", "--no-extensions", "--no-skills", "--no-tools", "--model", COMPACT_MODEL];
+    // v1 declares no system prompt — the whole contract sits in the user turn,
+    // which was the review's top finding. A variant that declares one gets it
+    // on the system channel where models weight it more heavily.
+    if (system) argv.push("--system-prompt", system);
     const out = execFileSync(
       process.execPath,
-      [PI_CLI, "-p", "--no-session", "-nc", "--no-extensions", "--no-skills", "--no-tools", "--model", COMPACT_MODEL],
+      argv,
       {
         input: prompt,
         cwd: require("os").tmpdir(),
@@ -105,20 +112,36 @@ function piSummarize(prompt) {
     return `(summary failed: ${String(e).slice(0, 80)})`;
   }
 }
+// The daily/weekly wording lives in CODE, not the template, because the code is
+// what knows which bucket it is building. The template decides how to frame it.
+const STYLE_INSTRUCTION = {
+  daily: "Summarize the day in ONE concise line: what was discussed/done, plus any durable facts (plans, decisions, life events). Past tense, no preamble.",
+  weekly: "Summarize the period in 1-2 concise lines: the main threads and any durable facts. Past tense, no preamble.",
+};
+
+// Exported so evals/ can build the exact prompt this pipeline sends without
+// re-implementing it — the same reason crm-merge.js takes a promptFile override.
+function buildSummaryPrompt(who, periodLabel, lines, style, template) {
+  return render(template, {
+    PERIOD_SENTENCE: `These are Signal messages ${who} during ${periodLabel}.`,
+    STYLE_INSTRUCTION: STYLE_INSTRUCTION[style] || STYLE_INSTRUCTION.weekly,
+    MESSAGES: lines.join("\n"),
+  });
+}
+
+// piSummarize never throws — it returns a placeholder string on error, on an
+// empty model reply, or under --no-llm. Those placeholders must never be stored
+// as if they were summaries; see the callers in buildConvTiers.
+function isBadSummary(s) {
+  return !s || /^\((summary (failed|skipped)|no result)/.test(String(s).trim());
+}
+
+let COMPACT_TEMPLATE = null;
 function summarize(who, periodLabel, lines, style) {
   if (lines.length === 0) return null;
-  const prompt = [
-    `These are Signal messages ${who} during ${periodLabel}.`,
-    style === "daily"
-      ? "Summarize the day in ONE concise line: what was discussed/done, plus any durable facts (plans, decisions, life events). Past tense, no preamble."
-      : "Summarize the period in 1-2 concise lines: the main threads and any durable facts. Past tense, no preamble.",
-    "Each message line starts with a ⟨m…⟩ source id. For each key fact in your summary, cite the id(s) of the message(s) it came from by copying their ⟨m…⟩ marker inline right after the fact (e.g. \"planned camping trip ⟨m88123⟩\"). Cite at most 5 ids total — only the load-bearing messages. Copy ids EXACTLY as they appear; NEVER invent or alter an id.",
-    "Output only the summary text, nothing else.",
-    "",
-    "Messages:",
-    lines.join("\n"),
-  ].join("\n");
-  return piSummarize(prompt);
+  if (COMPACT_TEMPLATE === null) COMPACT_TEMPLATE = loadTemplate(COMPACT_PROMPT);
+  const { system, user } = buildSummaryPrompt(who, periodLabel, lines, style, COMPACT_TEMPLATE);
+  return piSummarize(user, system);
 }
 
 // ---- timeline block parsing --------------------------------------------------
@@ -269,6 +292,13 @@ function buildConvTiers(cdb, convs, who, since, now, t) {
     const lines = messagesBetween(cdb, convs, dayStart, dayStart + DAY).lines;
     if (lines.length === 0) continue;
     const s = summarize(who, key, lines, "daily");
+    // A failed or skipped summary must NOT be stored. Storing it is permanent:
+    // the `t.daily.has(key)` guard above skips any filled key forever, so one
+    // transient model error would leave "(summary failed: …)" in the Timeline
+    // for good — and compaction is the step whose raw lines get dropped, so
+    // there is nothing to regenerate from later. Leaving the key empty means
+    // the next run simply retries the day.
+    if (isBadSummary(s)) continue;
     t.daily.set(key, s);
     newDailies.set(key, s);
     summaries++;
@@ -281,7 +311,9 @@ function buildConvTiers(cdb, convs, who, since, now, t) {
     if (t.weekly.has(key)) continue;
     const lines = messagesBetween(cdb, convs, weekStart, now - wk * 7 * DAY).lines;
     if (lines.length === 0) continue;
-    t.weekly.set(key, summarize(who, `the week of ${key}`, lines, "weekly"));
+    const ws = summarize(who, `the week of ${key}`, lines, "weekly");
+    if (isBadSummary(ws)) continue; // same permanence trap as the daily loop
+    t.weekly.set(key, ws);
     summaries++;
   }
   const dailyCutoff = dayKey(now - DAILY_UNTIL_DAYS * DAY);
