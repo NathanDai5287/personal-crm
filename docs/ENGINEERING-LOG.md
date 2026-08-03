@@ -15,6 +15,44 @@ Newest first.
 
 ## 2026-08-03 (evening)
 
+### DECISION — `merge-v6` (F) promoted to `prompts/merge.md`
+Was `merge-v5` (E). New sha `3ca8bfeaef7d`, 2,021 words.
+
+Deterministic: F **294/294**, E 288/294 — F perfect on held-out *and* contaminated,
+and 21% faster (296s vs 373s) despite being 300 words longer.
+
+**That result is nearly circular and should not be read as "F is a better prompt."**
+All six of E's failures are `wik_cited`, the check added because Nathan asked for
+provenance on `## What I know` — and F is the variant whose purpose is to instruct
+exactly that. It establishes that F does what F says, nothing more.
+
+The non-circular half is the judge, and it is a **dead wash**: overall 2-2 with 4 ties;
+dimensions E 6 / F 7 / **tie 27** of 40. Critically, **faithfulness ties on all eight
+cases** — the worry was that citation pressure would spend the model's attention on
+brackets at the cost of selection, and it did not. One unsupported claim flagged per
+variant, so even there.
+
+So F is promoted not because it wins but because it delivers the requested behaviour at
+no measurable cost. `prompts/merge-v5.md` is retained as the comparator.
+
+### SURPRISE — three flag-parsing footguns, one shape, one day
+`arg()`-style parsing matches a flag exactly and falls through to a default otherwise,
+so a near-miss is silently ignored and the run proceeds doing something *plausible*.
+
+- `node evals/run.js --variants e,f` — the flag is `--variant`, singular. Ran the four
+  default variants and reported a clean result for prompts nobody asked about.
+- `node evals/judge.js latest` — defaults to pair `a,b`. A run containing only `e` and
+  `f` skipped all eight cases and printed `E: 0  F: 0  tie: 0` with "No unsupported
+  claims flagged", which is indistinguishable from a genuine tie.
+- `crm-daily.js --dry-runn` performs a REAL run over all 34 contacts; `--onlly <slug>`
+  widens a one-contact run to all of them.
+
+All three now reject unknown flags before doing anything, and the judge exits 2 on zero
+comparisons. **The eval tooling already refused paid models and unknown *variants* — the
+gap was that nobody guarded the flag names themselves.** Worth checking for this shape
+in any new script here.
+
+
 ### SURPRISE — `require('./scripts/crm-daily.js')` runs the whole pipeline
 Intended as a syntax check. `crm-daily.js` calls `main()` unconditionally rather than
 behind the `require.main === module` guard the other scripts use, so importing it

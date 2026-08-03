@@ -14,8 +14,11 @@ Ordered roughly by how much they matter, not by effort.
 - [ ] **Compaction prompt v3.** Keep v1's coverage, fix only its two real defects:
   the meta-commentary leak on the injection case (high severity) and the length
   blowouts. Do NOT adopt v2 — the judge showed it drops 2.8× more durable content.
-- [ ] **Judge E vs F**, then promote one to `merge.md`. Deterministic checks are
-  saturated (both 330/330 on their own contract) and cannot rank them.
+- [ ] **New merge checks, or the arena.** F now scores 100% on every held-out case, so
+  the deterministic suite is saturated again. `wik_cited` bought exactly one prompt
+  generation of headroom, and the lesson generalises: a check written to enforce a new
+  rule will always be won by the prompt that adds that rule. Ranking the next merge
+  prompt needs human preference labels, not another check.
 - [ ] **Sandbox realism.** The eval sandbox is a `cwd` with two files; production is
   the full project tree. Suspected tell behind K3's evaluation-awareness at
   `thinking=max`. Until closed, every K3 eval number is an upper bound.

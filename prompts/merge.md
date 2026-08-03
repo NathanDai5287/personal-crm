@@ -37,7 +37,7 @@ The file's section order is fixed. Most profiles are missing one or both optiona
 
 **Metadata block (top of file).** Set `Last contact` to the latest date in the ledger — always, even on a week with nothing worth recording. Fill `Relationship` or `Birthday` only if the messages state it clearly and unambiguously. Change no other field.
 
-**`## What I know`** — durable facts worth remembering in a year. Plain prose bullets, no citations.
+**`## What I know`** — durable facts worth remembering in a year. Prose bullets, cited **per claim**: each checkable fact — a name, date, place, employer, number, status change — carries the id of the message that established it, placed immediately after the claim it supports, not pooled at the bullet's end. These bullets hold five or six facts each; a trailing id says nothing about which one it backs. One id per claim (two only when the claim genuinely spans two messages), never a pile. Characterization and summary prose ("dry humor", "the responsible one") stays uncited — it is distilled from hundreds of messages and no single id honestly supports it.
 
 **`## Talking points`** — max 8 bullets: what to bring up next time — upcoming plans and dates, offers or asks still on the table (theirs or Nathan's), things they recently mentioned that matter to them (worries, wins, purchases, trips, people visiting), and follow-ups ("ask how X went", "did they watch what Nathan sent"). Every bullet ends with its source id(s). Create this section immediately before `## Timeline` if absent.
 
@@ -67,12 +67,14 @@ and the ledger adds:
 Fold it into the bullet that owns the topic:
 
 ```
-- **Work:** […existing text…] Self-deprecating that he "can't do SWE" — but by July was talking up Latch's work, sending Nathan the company blog on their kimi-k3 benchmark findings.
+- **Work:** […existing text…] Self-deprecating that he "can't do SWE" — but by July was talking up Latch's work, sending Nathan the company blog on their kimi-k3 benchmark findings ⟨m89166⟩ ⟨m89167⟩.
 ```
 
-Fold even when the new detail reverses the bullet's emotional framing — a new bullet is earned by a new fact, not by a new message about an old fact.
+Fold even when the new detail reverses the bullet's emotional framing — a new bullet is earned by a new fact, not by a new message about an old fact. And note where the ids sit: on the new claim only. The start date, role, and office in the existing text predate citation-keeping and have no ids anywhere you can see — leave them exactly as they are, uncited. A bullet mixing old uncited claims with new cited ones is the normal steady state, not an error to fix.
 
-**Citation carry-forward:** when you rewrite, merge, or reword a `## Talking points` bullet that already carries `⟨m…⟩` ids and the claim survives, keep those ids. Add the new id alongside; do not silently drop provenance from a claim that is still standing. A citation is only removed when the claim it supports is removed.
+**Citation carry-forward:** when you rewrite, merge, or reword a `## Talking points` or `## What I know` bullet that already carries `⟨m…⟩` ids and the claim survives, keep those ids — in `## What I know`, still attached to the claim they support. Add the new id alongside; do not silently drop provenance from a claim that is still standing. A citation is only removed when the claim it supports is removed.
+
+**Uncited legacy claims:** most profiles predate citation-keeping, so their `## What I know` prose carries no ids — and no id for those claims exists anywhere you can see. Leave them as they are. When you extend such a bullet, the new fact arrives with its id and the old claims stay uncited. Never invent or borrow an id for an uncited claim, never delete or hedge a claim because it lacks one, and never hold back a new cited fact because its neighbors are uncited. An old claim gains an id only one way: the ledger itself re-states it, and you attach the new id then.
 
 # Talking points format
 
@@ -140,7 +142,7 @@ Check each of these. If any fails, fix it before replying:
 - `Last contact` is the latest date in the ledger.
 - Every `⟨m…⟩` you newly wrote appears literally in the ledger.
 - Every `## Talking points` bullet has the `- **YYYY-MM-DD** … ⟨m…⟩` shape; 8 or fewer bullets.
-- No citations in `## What I know` or `## Open questions`.
+- No citations in `## Open questions`. Every id in `## What I know` sits immediately after the claim it supports; no uncited legacy claim was deleted or given an invented id.
 - Surviving bullets kept their existing ids.
 
 Then reply with one line: `DONE — <n> talking points, <n> facts added/changed`, or `NO-OP`.
