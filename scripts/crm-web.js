@@ -490,31 +490,22 @@ function taskItems() {
   return out;
 }
 
-// Build every draft an ingest run would have produced, minus the ones already
-// accepted or dismissed. Drafts are not stored — they are recomputed each load, so
-// a merge rewording a bullet re-drafts it rather than mutating an owned task.
-function buildDrafts(db) {
-  const known = TASKS.knownKeys(db);
-  const out = [];
-  for (const c of taskItems().all) {
-    const d = TASKS.draftFrom(c.slug, c.name, c);
-    if (known.has(d.key)) continue;
-    out.push(d);
-  }
-  return out.sort((a, b) => (a.deadline || '9999').localeCompare(b.deadline || '9999'));
-}
-
 function tasksPage(editId = null) {
   let cdb;
   try { cdb = openCrmDb(); } catch { return page('To do', '<p class="bad">archive unavailable</p>', '/tasks'); }
   let drafts = [];
   let active = [];
   let done = [];
+  let n = { draft: 0, active: 0, done: 0, dismissed: 0 };
   let editing = null;
   try {
-    drafts = buildDrafts(cdb);
-    active = TASKS.listTasks(cdb, 'active');
-    done = TASKS.listTasks(cdb, 'done');
+    // Drafts are ROWS now, written by scripts/crm-tasks.js during an ingest run —
+    // not derived from the profile. Deriving them from `## Talking points` is what
+    // filled this list with conversation topics instead of commitments.
+    drafts = TASKS.listByStatus(cdb, 'draft');
+    active = TASKS.listByStatus(cdb, 'active');
+    done = TASKS.listByStatus(cdb, 'done');
+    n = TASKS.counts(cdb);
     if (editId) editing = TASKS.getTask(cdb, editId);
   } finally {
     try { cdb.close(); } catch { /* closed */ }
@@ -523,41 +514,32 @@ function tasksPage(editId = null) {
   const today = new Date().toISOString().slice(0, 10);
   const hidden = (o) => Object.entries(o)
     .map(([k, v]) => `<input type="hidden" name="${esc(k)}" value="${esc(v == null ? '' : String(v))}">`).join('');
+  const btn = (action, id, label, cls = '') => `<form method="post" action="/tasks/${action}" class="inl">`
+    + hidden({ id })
+    + `<button class="btn ${cls}" type="submit">${label}</button></form>`;
 
-  // "who it came from" and "which message triggered it" — the two provenance facts
-  // that stay visible after acceptance, since they are the reason the task exists.
-  const srcHtml = (t) => {
-    const ids = String(t.source_msg_ids || '').split(',').filter(Boolean);
-    const links = ids.slice(0, 4)
-      .map((id) => `<a href="/m/${esc(id)}">m${esc(id)}</a>`).join(' ');
-    return `<div class="tsrc">from <a href="/c/${encodeURIComponent(t.slug)}">${esc(t.contact_name || t.slug)}</a>`
-      + (links ? ` · triggered by ${links}` : ' · no source message')
-      + `</div>`;
-  };
+  const srcHtml = (t) => `<div class="tsrc">`
+    + (t.slug ? `from <a href="/c/${encodeURIComponent(t.slug)}">${esc(t.contact_name || t.slug)}</a>` : 'added by hand')
+    + (t.source_msg_id ? ` · agreed in <a href="/m/${t.source_msg_id}">m${t.source_msg_id}</a>` : '')
+    + (t.owner && t.owner !== 'nathan' ? ` · owner: ${esc(t.owner)}` : '')
+    + (t.confidence === 'probable' ? ' · <span class="prob">probable</span>' : '')
+    + `</div>`;
 
   const draftRow = (d) => `<li class="dr">`
     + `<div class="dtitle">${esc(d.title)}</div>`
-    + `<div class="dmeta">${esc(d.contactName || d.slug)}${d.deadline ? ` · ${esc(d.deadline)}` : ''}`
-    + (d.sourceMsgId ? ` · <a href="/m/${d.sourceMsgId}">m${d.sourceMsgId}</a>` : '')
+    + (d.description ? `<div class="ddesc">${inline(d.description)}</div>` : '')
+    + `<div class="dmeta">${esc(d.contact_name || d.slug)}${d.deadline ? ` · due ${esc(d.deadline)}` : ''}`
+    + (d.source_msg_id ? ` · <a href="/m/${d.source_msg_id}">m${d.source_msg_id}</a>` : '')
+    + (d.owner !== 'nathan' ? ` · ${esc(d.owner)}` : '')
+    + (d.confidence === 'probable' ? ' · <span class="prob">probable</span>' : '')
     + `</div>`
-    + (d.description ? `<details class="dwhy"><summary>context</summary><div>${inline(d.description)}</div></details>` : '')
-    + `<div class="dacts">`
-    + `<form method="post" action="/tasks/accept">${hidden({
-      key: d.key, slug: d.slug, contactName: d.contactName, title: d.title,
-      description: d.description, deadline: d.deadline, sourceMsgId: d.sourceMsgId,
-      sourceMsgIds: (d.sourceMsgIds || []).join(','), originText: d.originText,
-    })}<button class="btn ok" type="submit">+ add</button></form>`
-    + `<form method="post" action="/tasks/dismiss">${hidden({
-      key: d.key, slug: d.slug, contactName: d.contactName, title: d.title,
-      description: d.description, deadline: d.deadline, sourceMsgId: d.sourceMsgId,
-      sourceMsgIds: (d.sourceMsgIds || []).join(','), originText: d.originText,
-    })}<button class="btn" type="submit">dismiss</button></form>`
-    + `</div></li>`;
+    + `<div class="dacts">${btn('accept', d.id, '+ add', 'ok')}${btn('dismiss', d.id, 'dismiss')}</div>`
+    + `</li>`;
 
   const editForm = (t) => `<form method="post" action="/tasks/edit" class="ed">`
     + hidden({ id: t.id })
     + `<label>Title<input name="title" value="${esc(t.title)}" maxlength="300"></label>`
-    + `<label>Description<textarea name="description" rows="3">${esc(t.description || '')}</textarea></label>`
+    + `<label>Description<textarea name="description" rows="2">${esc(t.description || '')}</textarea></label>`
     + `<label>Deadline <span class="hint">YYYY-MM-DD, or blank</span>`
     + `<input name="deadline" value="${esc(t.deadline || '')}" placeholder="2026-09-01" maxlength="20"></label>`
     + `<div class="dacts"><button class="btn ok" type="submit">save</button>`
@@ -567,9 +549,7 @@ function tasksPage(editId = null) {
     const isEditing = editing && editing.id === t.id;
     const overdue = t.deadline && t.deadline < today && t.status === 'active';
     return `<li class="tr${t.status === 'done' ? ' isdone' : ''}">`
-      + `<form method="post" action="/tasks/done" class="tform">`
-      + hidden({ id: t.id, done: t.status === 'done' ? '0' : '1' })
-      + `<button type="submit" class="tbox">${t.status === 'done' ? '☑' : '☐'}</button></form>`
+      + btn(t.status === 'done' ? 'reopen' : 'done', t.id, t.status === 'done' ? '☑' : '☐', 'box')
       + `<div class="tbody">`
       + `<div class="tline"><span class="ttitle">${esc(t.title)}</span>`
       + (t.deadline ? `<span class="tdate${overdue ? ' od' : ''}">${esc(t.deadline)}</span>` : '')
@@ -581,15 +561,20 @@ function tasksPage(editId = null) {
       + `</div></li>`;
   };
 
+  const addForm = `<form method="post" action="/tasks/add" class="add">`
+    + `<input name="title" placeholder="Add a task yourself…" maxlength="300" required>`
+    + `<input name="deadline" placeholder="due (optional)" maxlength="20" class="sm">`
+    + `<button class="btn ok" type="submit">add</button></form>`;
+
   const st = `<style>
     .cols{display:grid;grid-template-columns:1fr;gap:22px}
-    @media(min-width:900px){.cols{grid-template-columns:1fr 320px}}
+    @media(min-width:900px){.cols{grid-template-columns:1fr 330px}}
     ul.tl,ul.dl{list-style:none;padding:0;margin:6px 0}
     li.tr{display:flex;gap:8px;align-items:flex-start;padding:8px 4px;border-bottom:1px solid var(--line)}
     li.isdone .ttitle{text-decoration:line-through;color:var(--mut)}
-    .tform{margin:0}
-    .tbox{background:none;border:none;font-size:17px;cursor:pointer;padding:0 2px;color:var(--mut)}
-    .tbox:hover{color:var(--accent)}
+    .inl{margin:0;display:inline-block}
+    .btn.box{background:none;border:none;font-size:17px;padding:0 2px;color:var(--mut)}
+    .btn.box:hover{color:var(--accent)}
     .tbody{flex:1;min-width:0}
     .tline{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
     .ttitle{flex:1 1 auto;min-width:0;font-weight:500}
@@ -597,13 +582,13 @@ function tasksPage(editId = null) {
     .tsrc{font-size:11px;color:var(--mut);margin-top:2px}
     .tdate{font-size:12px;color:var(--mut);font-variant-numeric:tabular-nums}
     .tdate.od{color:#c2410c;font-weight:600}
+    .prob{color:#b45309}
     .side{border-left:1px solid var(--line);padding-left:16px}
     @media(max-width:899px){.side{border-left:none;padding-left:0;border-top:1px solid var(--line);padding-top:12px}}
     li.dr{border:1px solid var(--line);border-radius:6px;padding:7px 8px;margin-bottom:8px;background:var(--card)}
     .dtitle{font-size:13px;font-weight:500}
-    .dmeta{font-size:11px;color:var(--mut);margin-top:2px}
-    .dwhy{font-size:12px;color:var(--mut);margin-top:4px}
-    .dwhy summary{cursor:pointer;font-size:11px}
+    .ddesc{font-size:12px;color:var(--mut);margin-top:2px}
+    .dmeta{font-size:11px;color:var(--mut);margin-top:3px}
     .dacts{display:flex;gap:6px;margin-top:6px;align-items:center}
     .dacts form{margin:0}
     .btn{font-size:11px;padding:2px 8px;border:1px solid var(--line);border-radius:5px;background:var(--card);
@@ -612,26 +597,32 @@ function tasksPage(editId = null) {
     .btn.sm{font-size:10px;padding:1px 6px}
     .ed{margin:8px 0;padding:8px;border:1px solid var(--accent);border-radius:6px;display:grid;gap:6px}
     .ed label{display:grid;gap:3px;font-size:11px;color:var(--mut)}
-    .ed input,.ed textarea{font:inherit;font-size:13px;padding:4px 6px;border:1px solid var(--line);
+    .ed input,.ed textarea,.add input{font:inherit;font-size:13px;padding:4px 6px;border:1px solid var(--line);
          border-radius:4px;background:var(--bg);color:var(--ink);width:100%}
+    .add{display:flex;gap:6px;margin:10px 0 4px}
+    .add input.sm{max-width:130px}
     .hint{color:var(--mut);font-weight:400}
     h2{font-size:15px;margin:18px 0 4px}
   </style>`;
 
   const body = st
     + `<header class="top"><h1>To do</h1>`
-    + `<span class="sub">${active.length} active · ${done.length} done · ${drafts.length} draft${drafts.length === 1 ? '' : 's'}</span></header>`
+    + `<span class="sub">${n.active} active · ${n.done} done · ${n.draft} draft${n.draft === 1 ? '' : 's'}`
+    + (n.dismissed ? ` · ${n.dismissed} dismissed` : '') + `</span></header>`
     + `<div class="cols"><div>`
+    + addForm
     + (active.length ? `<ul class="tl">${active.map(taskRow).join('')}</ul>`
-      : '<p>No active tasks. Add one from the drafts panel.</p>')
+      : '<p style="color:var(--mut);font-size:13px">No active tasks.</p>')
     + (done.length ? `<h2>Done</h2><ul class="tl">${done.map(taskRow).join('')}</ul>` : '')
     + `</div><div class="side">`
-    + `<h2>Drafts <span class="hint">${drafts.length}</span></h2>`
-    + `<p style="font-size:11px;color:var(--mut);margin:0 0 8px">Suggested by ingest runs. Add one to make it yours &mdash; then you can edit it.</p>`
-    + (drafts.length ? `<ul class="dl">${drafts.map(draftRow).join('')}</ul>` : '<p style="font-size:12px;color:var(--mut)">No new suggestions.</p>')
+    + `<h2>Drafts <span class="hint">${n.draft}</span></h2>`
+    + `<p style="font-size:11px;color:var(--mut);margin:0 0 8px">Commitments an ingest run found in your messages &mdash; things you or they said you would do. Add one to make it yours, then edit it.</p>`
+    + (drafts.length ? `<ul class="dl">${drafts.map(draftRow).join('')}</ul>`
+      : `<p style="font-size:12px;color:var(--mut)">None. Drafts appear after an ingest run extracts commitments (<code>scripts/crm-tasks.js</code>).</p>`)
     + `</div></div>`;
   return page('To do', body, '/tasks');
 }
+
 
 function indexPage() {
   const contacts = listContacts();
@@ -1299,31 +1290,20 @@ function start() {
           try {
             const p = new URLSearchParams(raw);
             cdb = openCrmDb();
-            if (action === 'accept' || action === 'dismiss') {
-              const slug = p.get('slug') || '';
-              if (!p.get('key') || !isSafeSlug(slug)) { send(400, page('Bad request', '<p>Bad request.</p>')); return; }
-              const d = {
-                key: p.get('key'),
-                slug,
-                contactName: p.get('contactName') || null,
-                title: p.get('title') || '(untitled)',
-                description: p.get('description') || null,
-                deadline: p.get('deadline') || null,
-                sourceMsgId: p.get('sourceMsgId') ? Number(p.get('sourceMsgId')) : null,
-                sourceMsgIds: (p.get('sourceMsgIds') || '').split(',').filter(Boolean),
-                originText: p.get('originText') || null,
-              };
-              if (action === 'accept') TASKS.acceptDraft(cdb, d); else TASKS.dismissDraft(cdb, d);
-            } else if (action === 'done') {
+            const STATUS_ACTIONS = { accept: 'active', dismiss: 'dismissed', done: 'done', reopen: 'active' };
+            if (action === 'add') {
+              if (!p.get('title')) { send(400, page('Bad request', '<p>A title is required.</p>')); return; }
+              TASKS.addManual(cdb, { title: p.get('title'), deadline: p.get('deadline') || null });
+            } else if (STATUS_ACTIONS[action] || action === 'edit') {
               const id = p.get('id');
               if (!/^\d+$/.test(String(id))) { send(400, page('Bad request', '<p>Bad request.</p>')); return; }
-              TASKS.setDone(cdb, id, p.get('done') === '1');
-            } else if (action === 'edit') {
-              const id = p.get('id');
-              if (!/^\d+$/.test(String(id))) { send(400, page('Bad request', '<p>Bad request.</p>')); return; }
-              TASKS.updateTask(cdb, id, {
-                title: p.get('title'), description: p.get('description'), deadline: p.get('deadline'),
-              });
+              if (action === 'edit') {
+                TASKS.updateTask(cdb, id, {
+                  title: p.get('title'), description: p.get('description'), deadline: p.get('deadline'),
+                });
+              } else {
+                TASKS.setStatus(cdb, id, STATUS_ACTIONS[action]);
+              }
             } else {
               send(404, page('Not found', '<p>Not found.</p>')); return;
             }
