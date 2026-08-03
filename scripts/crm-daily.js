@@ -63,6 +63,7 @@ const SCRIPTS = {
   memoryCommit: path.join(ROOT, 'scripts', 'memory-commit.js'),
   autopromote: path.join(ROOT, 'scripts', 'crm-autopromote.js'),
   compact: path.join(ROOT, 'scripts', 'crm-compact.js'),
+  backup: path.join(ROOT, 'scripts', 'crm-backup.js'),
   // NOTE: refresh is no longer spawned as a subprocess — crm-daily calls
   // planAll() from crm-refresh.js in-process so it gets real chunk objects.
 };
@@ -194,6 +195,27 @@ function main() {
     return r;
   };
   const skipped = (name, why) => steps.push({ name, skipped: true, note: why });
+
+  // ---- 0. archive backup --------------------------------------------------------
+  // BEFORE anything else, because crm.db is the one file in this system that cannot
+  // be regenerated (it holds messages Signal has already deleted) and step 3 writes
+  // to it. Non-fatal: a failed backup is a reason to shout, not a reason to stop
+  // ingesting — messages missed today are harder to recover than a skipped snapshot.
+  // A run that reports a backup warning should not be followed by a backfill.
+  let backupNote = null;
+  if (DRY_RUN) {
+    const chk = timed('backup (check)', () => runNode(SCRIPTS.backup, ['--check']));
+    logLines.push(`[0] crm.db backup: check only (--dry-run) — ${chk.ok ? 'fresh' : 'STALE'}`);
+    if (!chk.ok) warnings.push('crm.db backup is stale or missing');
+  } else {
+    const bk = timed('backup', () => runNode(SCRIPTS.backup, [], { timeout: 300_000 }));
+    backupNote = String(bk.output || bk.error || '').split(/\r?\n/).find((l) => l.startsWith('wrote ')) || null;
+    logLines.push(`[0] crm.db backup: ${bk.ok ? backupNote || 'ok' : 'FAILED (non-fatal)'}`);
+    if (!bk.ok) {
+      warnings.push(`crm.db backup FAILED (non-fatal, but do not backfill until fixed): ${String(bk.error).slice(0, 200)}`);
+      logLines.push(bk.error || '');
+    }
+  }
 
   // ---- 1. pre-refresh snapshot ------------------------------------------------
   const preCommit = timed('snapshot (pre)', () => runNode(SCRIPTS.memoryCommit, ['daily pre-refresh snapshot']));
@@ -509,4 +531,9 @@ function main() {
   process.exit(exitNonZero ? 1 : 0);
 }
 
-main();
+// Guarded, like every other script here. Unguarded, `require('./crm-daily.js')` — the
+// obvious way to reach in for a helper, or to check the file parses — silently executes
+// a full ingest: refresh, merges, real pi calls, cursor writes. That happened on
+// 2026-08-03. Use `node --check` to validate syntax.
+if (require.main === module) main();
+module.exports = { main };

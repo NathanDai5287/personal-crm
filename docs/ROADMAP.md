@@ -11,9 +11,6 @@ Ordered roughly by how much they matter, not by effort.
 
 ## Blocking a full backfill
 
-- [ ] **`crm.db` backup.** It's out of the history repo now (20MB binary), but it
-  holds disappearing messages Signal no longer has, so it is not regenerable. Needs
-  a periodic SQLite `.backup`. **Nothing currently protects it.**
 - [ ] **Compaction prompt v3.** Keep v1's coverage, fix only its two real defects:
   the meta-commentary leak on the injection case (high severity) and the length
   blowouts. Do NOT adopt v2 — the judge showed it drops 2.8× more durable content.
@@ -25,6 +22,25 @@ Ordered roughly by how much they matter, not by effort.
 
 ## Tasks / todo list
 
+- [ ] **Reconciliation pass — the fourth LLM call site.** `prompts/tasks.md` only scans
+  for kill conditions (fulfilled / cancelled / superseded) *within one chunk*, so a
+  commitment made in chunk 3 and fulfilled in chunk 40 arrives looking live. Needed
+  before tasks run over the backfill. Input is small and cheap: the accumulated draft
+  list plus the messages after each draft's `source_msg_id`, answering only "which of
+  these are already done?". Deliberately NOT folded into `tasks.md` — different
+  question, and merging them makes both harder to eval.
+- [ ] **Wire `crm-tasks.js` into `crm-daily.js`** as a step, after merge.
+- [ ] **Tasks eval.** None exists. Easier than the merge eval because the output is JSON
+  with a message id, so precision/recall against a hand-labelled gold set is exact — no
+  judge needed for the primary metric, and no saturation problem. Layers: (1) precision,
+  recall, precision split by `confidence` (if `explicit` and `probable` score the same,
+  the field is decorative and should be cut), deadline accuracy; (2) a judged pass on
+  title quality for true positives only. **`arshia-nayebnazar` and `charles-wu` are
+  contaminated** — both were read while drafting the variants. Gold set must come from
+  elsewhere. Labelling shortcut: mechanically extract every commitment-*shaped* line,
+  hand Nathan a yes/no checklist (~60 decisions across 5 contacts).
+- [ ] **`owner` column is now vestigial** — always `'nathan'` after the Nathan-only
+  decision. Drop it, or keep it for a future waiting-on feature. Decide, don't drift.
 - [ ] **Actionable-vs-context split.** `merge.md` currently lumps "things to do"
   and "things they mentioned that matter to them" into one `## Talking points`
   section, so the todo list still shows non-actions ("Patricia finally moved out").

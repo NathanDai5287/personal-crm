@@ -13,6 +13,88 @@ Newest first.
 
 ---
 
+## 2026-08-03 (evening)
+
+### SURPRISE — `require('./scripts/crm-daily.js')` runs the whole pipeline
+Intended as a syntax check. `crm-daily.js` calls `main()` unconditionally rather than
+behind the `require.main === module` guard the other scripts use, so importing it
+executes a full ingest. It ran ~2 min before being killed: two real merges committed
+(`katia-jacoby`, `charles-wu`, both `anthropic/claude-opus-5`, so $0), killed mid-merge
+on `arshia-nayebnazar`.
+
+**To syntax-check a script in this repo, use `node --check <file>`, never `require`.**
+
+Silver lining — the crash-safe cursor design was validated under a real kill for the
+first time. `crm-refresh-state.json` was byte-identical afterwards, the two completed
+merges advanced their cursors, arshia's did not, and nothing was lost. The only
+casualty was a regenerable scratch ledger.
+
+### SURPRISE — only 3 of 34 contacts have a refresh cursor
+The other 31 fall through to `now - backfillDays * DAY`, a 30-day lookback
+(`crm-refresh.js:93`). Harmless for daily runs, but it means a contact's ledger window
+silently moves forward day to day until their first successful merge sets a cursor.
+
+This bit us concretely: an arshia ledger analysed earlier in the session started
+2026-07-01 and contained `⟨m83972⟩`; after regeneration it started 2026-07-06 and did
+not. Two agents disagreed about whether a line existed and **both were right** — they
+had read different generations of the same path. **`data/contacts/_refresh/*.new.txt`
+is scratch, not evidence.** Quote from `.memory-history.git` if a quote has to hold up.
+
+### DECISION — tasks WILL run during the backfill, with a reconciliation pass
+Earlier in this session the opposite was argued: that backfilling tasks would flood the
+draft panel with long-dead commitments, because the kill-condition scan in
+`prompts/tasks.md` only sees within one chunk, so a commitment made in chunk 3 and
+fulfilled in chunk 40 arrives looking live.
+
+Nathan pushed back and the original reasoning does not survive it. That is a limit of
+how the prompt is *invoked*, not a property of the data, and the cost of the workaround
+is the feature's best use case: a commitment made months ago and never honoured is
+exactly what you want surfaced, and a recent-window-only extraction can never see one.
+
+Plan: extract per chunk as normal, then **one reconciliation pass per contact** whose
+input is only the accumulated draft list plus the messages following each draft's
+source id, answering only "which of these are already done?". Small input, cheap, and
+it sees the evidence the per-chunk scan structurally cannot.
+
+Kept as a **fourth call site**, not folded into `prompts/tasks.md` — "is this done?" is
+a different question from "is this a commitment?", and merging them would make both
+harder to eval.
+
+### DECISION — tasks are Nathan's only; `owner: them` is never extracted
+Nathan: *"all owner should be me. it should never show tasks where the owner is someone
+else."* `mutual` folds into his, since a joint undertaking still puts him on the hook.
+
+Enforced in the prompt, not the UI — a `them` task that gets extracted and then filtered
+is wasted tokens and an unexplainable row. Known cost: the "waiting on them" list goes
+away, including real items like Nigesh's Optiver referral check ⟨m89614⟩.
+
+### DECISION — `prompts/tasks.md` (V1) is production; v2 and v3 are not adopted
+Three variants were drafted along one axis: what a draft is *for*. V2 treats drafts as
+cheap and leans recall (conduct-as-assent, soft undertakings, eager `them`); V3 treats
+every junk draft as training Nathan to ignore the panel and only subtracts. Yields
+across five real ledgers (charles / nigesh / liang / pine / arshia):
+V1 `2/2/1/0/0`, V2 `3/2/2/1/0`, V3 `1/0/1/0/0`.
+
+All three reject the same junk — the disagreement is entirely about expired-but-
+unconfirmed items and whether "I'll try" counts. V3's case rested on the backfill being
+a flood of ghosts, which the reconciliation pass above removes. `prompts/tasks-v2.md`
+and `prompts/tasks-v3.md` are kept as eval comparators.
+
+### SHIPPED — `scripts/crm-backup.js`
+`crm.db` had nothing protecting it: excluded from both git repos, 81,170 messages,
+not regenerable (it holds messages Signal has since deleted). Now backed up via
+`VACUUM INTO` (consistent snapshot + compaction; 20MB → 17.1MB), verified by
+`integrity_check` plus a row-count census against the source *before* the file is given
+its final name, so a bad snapshot can never be mistaken for a good one.
+
+Destination defaults to a sibling of the repo, not inside `data/` — a backup inside the
+tree survives corruption but not the likelier accident of deleting the tree.
+Retention is tiered rather than last-N, because the real threat is "it has been quietly
+wrong for a while": 730 daily inputs → 18 kept, at 0-9d, then weekly to 34d, monthly to
+156d. Wired as step 0 of `crm-daily.js` (non-fatal; `--dry-run` only runs `--check`).
+
+---
+
 ## 2026-08-03 (later)
 
 ### DECISION — `## What I know` now carries provenance (reversal)

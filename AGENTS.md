@@ -17,11 +17,22 @@ item is worse than a missing one. New plans go in, shipped work moves to the log
 Signal messages → `data/crm.db` (append-only archive, **never deleted**) → chunked
 ledgers → an LLM merge writes per-person markdown in `data/contacts/<slug>.md`.
 
-**Only two LLM call sites.** Everything else is deterministic.
+**Three LLM call sites.** Everything else is deterministic.
 - `scripts/crm-merge.js` → `prompts/merge.md` (read+edit tools)
 - `scripts/crm-compact.js` → `prompts/compact.md` (no tools, stdin)
+- `scripts/crm-tasks.js` → `prompts/tasks.md` (no tools, stdin, JSON out → `tasks` table)
 
 ## Things that will surprise you
+
+- **`node --check <file>` to validate syntax — never `require`.** Scripts here have
+  side effects on import unless guarded; `require('./scripts/crm-daily.js')` once ran a
+  full ingest with real model calls.
+- **`data/contacts/_refresh/*.new.txt` is scratch, not evidence.** Regenerated every
+  run, and the window moves: only 3 of 34 contacts have a cursor, the rest fall back to
+  a 30-day lookback. Two agents once disagreed about whether a line existed and both
+  were right — different generations of the same path. Quote from `.memory-history.git`.
+- **`crm.db` is backed up by `scripts/crm-backup.js`** (step 0 of the daily run), to a
+  sibling directory of the repo, not into `data/`. `--check` exits 1 if stale.
 
 - **Profiles have version history**, in `.memory-history.git` — a separate local-only
   repo, not the main one. One commit per merged chunk. `data/` is git-ignored in the
