@@ -20,8 +20,102 @@ const PORT = Number(process.env.CRM_EVAL_PORT) || 8788;
 const SCRATCH = process.env.CRM_EVAL_DIR
   || 'C:/Users/natha/AppData/Local/Temp/claude/C--Users-natha--openclaw/7de048dc-42ba-4c94-b38c-b7fc743ad280/scratchpad/crm-eval';
 
-const VARIANT_LABEL = { a: 'A (current)', b: 'B (rewrite)', c: 'C (B + capture)' };
+// Compaction runs live in their own scratch tree: a different prompt, a
+// different scorer, and outputs that are strings rather than file edits.
+const COMPACT_SCRATCH = process.env.CRM_EVAL_COMPACT_DIR
+  || SCRATCH.replace(/crm-eval$/, 'crm-eval-compact');
+
+const VARIANT_LABEL = {
+  a: 'A (original)', b: 'B (rewrite)', c: 'C (B + capture)', d: 'D (K3-tuned)',
+  k: 'K3 (prompt C)', kd_low: 'K3+D low', kd_high: 'K3+D high', kd_max: 'K3+D max',
+  v1: 'v1 (current)', v2: 'v2 (rewrite)',
+};
 const SEV_ORDER = { high: 0, medium: 1, low: 2 };
+
+// ---- compaction runs -------------------------------------------------------
+
+function listCompactRuns() {
+  if (!fs.existsSync(COMPACT_SCRATCH)) return [];
+  return fs.readdirSync(COMPACT_SCRATCH)
+    .filter((d) => d.startsWith('run-') && fs.existsSync(path.join(COMPACT_SCRATCH, d, 'scored.json')))
+    .sort().reverse();
+}
+
+function loadCompactRun(id) {
+  const dir = path.join(COMPACT_SCRATCH, id);
+  const scored = JSON.parse(fs.readFileSync(path.join(dir, 'scored.json'), 'utf8'));
+  let cases = [];
+  try { cases = JSON.parse(fs.readFileSync(path.join(dir, 'cases.json'), 'utf8')); } catch { /* older run */ }
+  return { id, dir, scored, cases };
+}
+
+function viewCompactRun(id) {
+  const { dir, scored, cases } = loadCompactRun(id);
+  const variants = [...new Set(scored.map((s) => s.variant))].sort();
+  const caseNames = [...new Set(scored.map((s) => s.case))];
+  const byCase = new Map(cases.map((c) => [c.name, c]));
+  const L = (v) => esc(VARIANT_LABEL[v] || v);
+
+  const totals = variants.map((v) => {
+    const ss = scored.filter((s) => s.variant === v);
+    return { v, got: ss.reduce((a, s) => a + s.checks.score, 0), max: ss.reduce((a, s) => a + s.checks.maxScore, 0) };
+  });
+  const best = Math.max(...totals.map((t) => t.got));
+  const summary = `<div class="grid">${totals.map((t) => `<div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:baseline">
+        <div class="${t.got === best ? 'win' : ''}" style="font-size:17px">${L(t.v)}</div>
+        <div style="font-size:20px;font-variant-numeric:tabular-nums">${t.got}<span style="color:var(--dim);font-size:14px">/${t.max}</span></div>
+      </div>${bar(t.got, t.max)}
+      <div class="sub" style="margin-top:8px">${((100 * t.got) / t.max).toFixed(1)}%</div></div>`).join('')}</div>`;
+
+  const checkIds = [...new Set(scored.flatMap((s) => s.checks.results.map((r) => r.id)))]
+    .sort((a, b) => {
+      const f = (x) => scored.flatMap((s) => s.checks.results).find((r) => r.id === x).severity;
+      return SEV_ORDER[f(a)] - SEV_ORDER[f(b)] || a.localeCompare(b);
+    });
+  const matrix = `<table><tr><th>check</th><th>severity</th>${variants.map((v) => `<th>${L(v)}</th>`).join('')}</tr>
+    ${checkIds.map((cid) => {
+    const sev = scored.flatMap((s) => s.checks.results).find((r) => r.id === cid).severity;
+    const cells = variants.map((v) => {
+      const rs = scored.filter((s) => s.variant === v).flatMap((s) => s.checks.results).filter((r) => r.id === cid);
+      const p = rs.filter((r) => r.pass).length;
+      return `<td><span class="pill ${p === rs.length ? 'ok' : 'bad'}">${p}/${rs.length}</span></td>`;
+    }).join('');
+    return `<tr><td><code>${esc(cid)}</code></td><td class="sev">${esc(sev)}</td>${cells}</tr>`;
+  }).join('')}</table>`;
+
+  // The summaries ARE the artifact here — there is no file diff to show, so this
+  // side-by-side is the view that actually decides the compaction A/B.
+  const outputs = caseNames.map((cn) => {
+    const c = byCase.get(cn);
+    return `<h3 style="margin:22px 0 6px;font-size:15px">${esc(cn)}
+        <span class="tag">${esc(c ? c.style : '')}</span><span class="tag">${c ? c.messages : '?'} msgs</span></h3>
+      <p class="sub">${esc(c ? c.why : '')}</p>
+      <div class="grid">${variants.map((v) => {
+    const s = scored.find((x) => x.variant === v && x.case === cn);
+    if (!s) return '<div class="card sub">—</div>';
+    return `<div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">
+            <b>${L(v)}</b><span>${s.checks.score}/${s.checks.maxScore}</span></div>
+          <pre>${esc(s.summary)}</pre>
+          ${s.checks.failed.length ? `<div class="why" style="margin-top:8px">${s.checks.failed.map((f) => `<div><span class="pill bad">${esc(f.id)}</span> ${esc(f.detail)}</div>`).join('')}</div>` : ''}
+        </div>`;
+  }).join('')}</div>`;
+  }).join('');
+
+  const failures = scored.flatMap((s) => s.checks.failed.map((f) => ({ ...f, s })))
+    .sort((a, b) => SEV_ORDER[a.severity] - SEV_ORDER[b.severity]);
+
+  return page(`compaction ${id}`, `<nav><a href="/">← all runs</a></nav>
+    <h1>Compaction · ${esc(id.replace('run-', ''))}</h1>
+    <p class="sub">Prompt <code>prompts/compact-v1.md</code> vs <code>compact-v2.md</code> · <code>${esc(dir)}</code></p>
+    ${summary}
+    <h2>Check matrix</h2>${matrix}
+    <h2>Failures</h2>${failures.length ? `<table><tr><th>severity</th><th>variant</th><th>case</th><th>check</th><th>detail</th></tr>
+      ${failures.map((f) => `<tr><td class="sev">${esc(f.severity)}</td><td>${L(f.s.variant)}</td><td>${esc(f.s.case)}</td>
+        <td><code>${esc(f.id)}</code></td><td>${esc(f.detail)}</td></tr>`).join('')}</table>` : '<p class="sub">No failures.</p>'}
+    <h2>Summaries produced</h2>${outputs}`);
+}
 
 // ---- data ----------------------------------------------------------------------
 
@@ -204,6 +298,19 @@ function viewIndex() {
     return page('evals', `<h1>Merge prompt evals</h1><p class="sub">No runs yet in <code>${esc(SCRATCH)}</code>.</p>
       <p>Run <code>node evals/run.js</code> first.</p>`);
   }
+  const compactRows = listCompactRuns().map((id) => {
+    const { scored } = loadCompactRun(id);
+    const vs = [...new Set(scored.map((s) => s.variant))].sort();
+    const cells = vs.map((v) => {
+      const ss = scored.filter((s) => s.variant === v);
+      const got = ss.reduce((a, s) => a + s.checks.score, 0);
+      const max = ss.reduce((a, s) => a + s.checks.maxScore, 0);
+      return `${esc(VARIANT_LABEL[v] || v)}: <b>${got}/${max}</b>`;
+    }).join(' &nbsp;·&nbsp; ');
+    return `<tr><td><a href="/compact/${encodeURIComponent(id)}">${esc(id.replace('run-', ''))}</a></td>
+      <td class="sub">compaction</td><td>${cells}</td><td class="num">${scored.length} calls</td></tr>`;
+  }).join('');
+
   const rows = runs.map((id) => {
     const { scored } = loadRun(id);
     const vs = [...new Set(scored.map((s) => s.variant))].sort();
@@ -217,9 +324,14 @@ function viewIndex() {
     return `<tr><td><a href="/run/${encodeURIComponent(id)}">${esc(id.replace('run-', ''))}</a></td>
       <td>${esc(model)}</td><td>${cells}</td><td class="num">${scored.length} runs</td></tr>`;
   }).join('');
-  return page('evals', `<h1>Merge prompt evals</h1>
-    <p class="sub">Deterministic A/B scoring of <code>prompts/merge.md</code> against <code>prompts/merge-v2.md</code>.</p>
-    <table><tr><th>run</th><th>model</th><th>totals</th><th class="num"></th></tr>${rows}</table>`);
+  return page('evals', `<h1>Prompt evals</h1>
+    <p class="sub">Deterministic scoring plus a blind, order-swapped semantic judge.
+      Every variant is graded against one written-down contract, not against another prompt's wording.</p>
+    <h2>Merge prompt</h2>
+    <table><tr><th>run</th><th>model</th><th>totals</th><th class="num"></th></tr>${rows}</table>
+    <h2>Compaction prompt</h2>
+    ${compactRows ? `<table><tr><th>run</th><th>kind</th><th>totals</th><th class="num"></th></tr>${compactRows}</table>`
+    : '<p class="sub">No compaction runs yet — <code>node evals/compact-run.js</code>.</p>'}`);
 }
 
 function viewRun(id) {
@@ -425,8 +537,12 @@ const server = http.createServer((req, res) => {
   const known = (id) => listRuns().includes(id);
   try {
     if (parts.length === 0) return send(viewIndex());
-    if (parts[0] === 'run' && !known(parts[1])) {
+    if (parts[0] === 'run' && parts.length >= 2 && !known(parts[1])) {
       return send(page('404', `<h1>No such run</h1><p><code>${esc(parts[1])}</code> is not in <code>${esc(SCRATCH)}</code>. <a href="/">Back</a></p>`), 404);
+    }
+    if (parts[0] === 'compact' && parts.length === 2) {
+      if (!listCompactRuns().includes(parts[1])) return send(page('404', `<h1>No such compaction run</h1><p><a href="/">Back</a></p>`), 404);
+      return send(viewCompactRun(parts[1]));
     }
     if (parts[0] === 'run' && parts.length === 2) return send(viewRun(parts[1]));
     if (parts[0] === 'run' && parts[2] === 'case' && parts.length === 4) return send(viewCase(parts[1], parts[3]));
