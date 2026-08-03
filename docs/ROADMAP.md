@@ -33,15 +33,17 @@ Ordered roughly by how much they matter, not by effort.
   these are already done?". Deliberately NOT folded into `tasks.md` — different
   question, and merging them makes both harder to eval.
 - [ ] **Wire `crm-tasks.js` into `crm-daily.js`** as a step, after merge.
-- [ ] **Tasks eval.** None exists. Easier than the merge eval because the output is JSON
-  with a message id, so precision/recall against a hand-labelled gold set is exact — no
-  judge needed for the primary metric, and no saturation problem. Layers: (1) precision,
-  recall, precision split by `confidence` (if `explicit` and `probable` score the same,
-  the field is decorative and should be cut), deadline accuracy; (2) a judged pass on
-  title quality for true positives only. **`arshia-nayebnazar` and `charles-wu` are
-  contaminated** — both were read while drafting the variants. Gold set must come from
-  elsewhere. Labelling shortcut: mechanically extract every commitment-*shaped* line,
-  hand Nathan a yes/no checklist (~60 decisions across 5 contacts).
+- [ ] **Tasks eval — LABELS PENDING.** Harness is built (`evals/tasks-fixtures.js`,
+  `evals/tasks-run.js`); it refuses to run until gold exists. Nathan must tick the real
+  commitments with `[x]` in `data/_eval-tasks/gold/*.md` — 157 candidates across 5
+  contacts. Fixtures are frozen under `data/_eval-tasks/ledgers/`; **rebuilding one
+  invalidates its labels**, and the builder will not clobber a checklist that has any
+  tick in it.
+- [ ] **Tasks eval, layer 2: title quality.** Precision/recall says the right *line* was
+  found; it says nothing about whether "Send Katia the thing" is checkable six weeks
+  later. Needs a judge over true positives only.
+- [ ] **Deadline accuracy.** Not scored — gold has no deadline labels. Add an optional
+  `due=YYYY-MM-DD` annotation to checklist lines and score it when present.
 - [ ] **`owner` column is now vestigial** — always `'nathan'` after the Nathan-only
   decision. Drop it, or keep it for a future waiting-on feature. Decide, don't drift.
 - [ ] **Actionable-vs-context split.** `merge.md` currently lumps "things to do"

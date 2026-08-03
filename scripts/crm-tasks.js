@@ -41,8 +41,8 @@ function contactName(slug) {
   return slug;
 }
 
-function callModel(user, system) {
-  const argv = [PI_CLI, '-p', '--no-session', '-nc', '--no-extensions', '--no-skills', '--no-tools', '--model', MODEL];
+function callModel(user, system, model = MODEL) {
+  const argv = [PI_CLI, '-p', '--no-session', '-nc', '--no-extensions', '--no-skills', '--no-tools', '--model', model];
   if (system) argv.push('--system-prompt', system);
   return execFileSync(process.execPath, argv, {
     input: user,                       // stdin: a ledger blows the ~32KB argv limit
@@ -88,16 +88,19 @@ function ledgerIds(text) {
   return s;
 }
 
-function extractFor(slug, ledgerPath, today) {
+// opts.promptFile / opts.model let the eval sweep variants without going through env
+// vars — the module-level PROMPT_FILE and MODEL are read once at require time, so
+// evals/tasks-run.js could not vary them per call otherwise.
+function extractFor(slug, ledgerPath, today, opts = {}) {
   const ledger = fs.readFileSync(ledgerPath, 'utf8');
   const ids = ledgerIds(ledger);
-  const tpl = loadTemplate(PROMPT_FILE);
+  const tpl = loadTemplate(opts.promptFile || PROMPT_FILE);
   const { user, system } = render(tpl, {
-    CONTACT_NAME: contactName(slug),
+    CONTACT_NAME: opts.contactName || contactName(slug),
     TODAY: today,
     MESSAGES: ledger,
   }, TASK_SLOTS);
-  const raw = callModel(user, system);
+  const raw = callModel(user, system, opts.model || MODEL);
   const arr = extractArray(raw);
   if (!Array.isArray(arr)) return { ok: false, error: `unparseable reply: ${raw.slice(0, 160)}`, tasks: [] };
 
