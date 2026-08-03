@@ -38,9 +38,19 @@ function buildArgs(slug, mergePromptText, opts = {}) {
   // and the first K3 comparison silently ran one tier below the model's ceiling.
   // Passing it explicitly makes the level part of the experiment.
   const thinking = opts.thinking || process.env.CRM_MERGE_THINKING || null;
+  // Production stays ephemeral (--no-session): a merge is a pure function of
+  // profile + ledger and leaving session files around would accumulate copies of
+  // private message content outside data/. The eval harness passes sessionDir to
+  // capture the model's THINKING blocks, which pi only persists to a session
+  // file — they never appear on stdout. Moonshot returns reasoning unencrypted
+  // (thinkingSignature: "reasoning_content"), so K3's traces are readable text;
+  // Anthropic's are opaque signatures.
+  const sessionArgs = opts.sessionDir
+    ? ['--session-dir', opts.sessionDir]
+    : ['--no-session'];
   return [
     '-p',
-    '--no-session',
+    ...sessionArgs,
     '-nc',
     '--no-extensions',
     '--no-skills',
@@ -54,9 +64,88 @@ function buildArgs(slug, mergePromptText, opts = {}) {
   ];
 }
 
+// `Last contact` is DERIVED, not judged. It is the latest date in the ledger —
+// something the harness can read directly — so asking a model to copy a date it
+// can see is asking it to make a mistake it has no reason to make. K3 at
+// thinking=high did exactly that on one eval case, writing 2026-06-17 when the
+// ledger ended 2026-06-16, and the only way more reasoning "fixed" it was by
+// costing 3.6x more. Setting it in code removes the error class outright.
+//
+// The prompt still instructs the model to update the line — that instruction is
+// harmless and keeps the field correct when this runs in a context that skips
+// normalisation. This is the authority, not the request.
+function normalizeLastContact(slug, cwd) {
+  try {
+    const profile = path.join(cwd, 'data', 'contacts', `${slug}.md`);
+    const ledger = path.join(cwd, 'data', 'contacts', '_refresh', `${slug}.new.txt`);
+    if (!fs.existsSync(profile) || !fs.existsSync(ledger)) return null;
+
+    // GROUND TRUTH FIRST. "Last contact" is the date of the newest message with
+    // this person, which the archive knows exactly. Deriving it from the current
+    // chunk's ledger instead only approximates it, and every heuristic built on
+    // that approximation is wrong somewhere: forward-only can't correct a
+    // fabricated future date, and unconditional-set rewinds the field during a
+    // backfill that replays chunks oldest-first.
+    let latest = null;
+    const db = path.join(cwd, 'data', 'crm.db');
+    if (fs.existsSync(db)) {
+      try {
+        const { DatabaseSync } = require('node:sqlite');
+        const h = new DatabaseSync(db, { readOnly: true });
+        const r = h.prepare('select max(sent_at) t from messages where contact_slug = ?').get(slug);
+        h.close();
+        if (r && r.t) latest = new Date(r.t).toISOString().slice(0, 10);
+      } catch { /* fall through to the ledger */ }
+    }
+    // No archive (the eval sandbox copies only the profile and its ledger), so
+    // the ledger is the best available answer — and there it IS the answer,
+    // because a sandbox run is a single chunk.
+    if (!latest) {
+      for (const line of fs.readFileSync(ledger, 'utf8').split('\n')) {
+        const m = /^\[(\d{4}-\d{2}-\d{2})[\s\]]/.exec(line);
+        if (m && (!latest || m[1] > latest)) latest = m[1];
+      }
+    }
+    if (!latest) return null;
+
+    const text = fs.readFileSync(profile, 'utf8');
+    const re = /^(- \*\*Last contact:\*\*\s*)(\S+)\s*$/m;
+    const cur = re.exec(text);
+    if (!cur) return null;
+    if (cur[2] === latest) return null;
+
+    // RETRY THE WRITE. This runs microseconds after pi exited, and on Windows a
+    // just-closed handle from its edit tool can still hold the file long enough
+    // for one writeFileSync to fail with EBUSY/EPERM. The first production
+    // backfill lost this write on 5 of 6 chunks to exactly that race. Verified
+    // in isolation that the logic itself is correct, so retry rather than
+    // redesign.
+    const out = text.replace(re, `$1${latest}`);
+    let lastErr = null;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      try {
+        fs.writeFileSync(profile, out);
+        return { from: cur[2], to: latest, attempts: attempt + 1 };
+      } catch (e) {
+        lastErr = e;
+        // Synchronous backoff: this is a CLI step, not a server, so blocking a
+        // few ms is fine and keeps the function callable from sync code.
+        const until = Date.now() + 40 * (attempt + 1);
+        while (Date.now() < until) { /* spin */ }
+      }
+    }
+    throw lastErr;
+  } catch (e) {
+    // Bookkeeping must never fail a merge — but it must not fail SILENTLY
+    // either. The first production run swallowed something here and the field
+    // simply never moved, with nothing anywhere saying why.
+    return { error: String((e && e.message) || e).slice(0, 200) };
+  }
+}
+
 // Returns { ok: true, output } or { ok: false, error }. Never throws.
 //
-// opts: { dryRun, quiet, cwd, promptFile, model, userMessage }. cwd/promptFile let
+// opts: { dryRun, quiet, cwd, promptFile, model, thinking, userMessage, sessionDir }. cwd/promptFile let
 // the eval harness point this at a throwaway copy of data/ with a candidate
 // prompt, so a bad prompt under test can never touch a real profile.
 function mergeContact(slug, opts = {}) {
@@ -93,8 +182,11 @@ function mergeContact(slug, opts = {}) {
       maxBuffer: 16 * 1024 * 1024,
       env: { ...process.env, PI_SKIP_VERSION_CHECK: '1', PI_OFFLINE: '1' },
     });
+    const fixed = normalizeLastContact(slug, cwd);
+    if (fixed && fixed.error) console.log(`crm-merge: ${slug}: Last contact NOT normalised: ${fixed.error}`);
+    else if (fixed) console.log(`crm-merge: ${slug}: Last contact ${fixed.from} -> ${fixed.to} (derived)`);
     console.log(`crm-merge: ${slug}: ok`);
-    return { ok: true, output };
+    return { ok: true, output, lastContactFixed: fixed || undefined };
   } catch (e) {
     const error = String((e && e.stderr) || (e && e.message) || e).slice(0, 2000);
     console.log(`crm-merge: ${slug}: FAIL (${error.slice(0, 200)})`);
@@ -114,4 +206,4 @@ if (require.main === module) {
   process.exit(result.ok ? 0 : 1);
 }
 
-module.exports = { mergeContact, buildArgs };
+module.exports = { mergeContact, buildArgs, normalizeLastContact };

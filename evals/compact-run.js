@@ -128,6 +128,10 @@ function main() {
   const runDir = scoreOnly || path.join(SCRATCH, `run-${new Date().toISOString().replace(/[:.]/g, '-')}`);
   fs.mkdirSync(runDir, { recursive: true });
   fs.writeFileSync(path.join(runDir, 'cases.json'), JSON.stringify(cases, null, 2));
+  fs.writeFileSync(path.join(runDir, 'manifest.json'), JSON.stringify({
+    model, variants: variants.map((v) => ({ key: v, label: VARIANTS[v].label, prompt: VARIANTS[v].prompt })),
+    cases: cases.map((c) => c.name), startedAt: new Date().toISOString(),
+  }, null, 2));
 
   console.log(`\n${cases.length} case(s) x ${variants.length} variant(s) = ${cases.length * variants.length} call(s)`);
   console.log(`model: ${model}${model.startsWith(FREE_PREFIX) ? '  (subscription — free)' : '  ** PAID **'}\n`);
@@ -157,7 +161,10 @@ function main() {
         summary, inputLines: c.lines.join('\n'), style: c.style,
         canary: c.canary, expectThin: c.expectThin,
       });
-      scored.push({ case: c.name, variant: v, style: c.style, summary, checks });
+      // Record the model on every row. An eval artifact that does not say what
+      // produced it cannot be compared to anything later, and "it was probably
+      // the default" is not provenance.
+      scored.push({ case: c.name, variant: v, style: c.style, model, prompt: VARIANTS[v].prompt, summary, checks });
     }
   }
   fs.writeFileSync(path.join(runDir, 'scored.json'), JSON.stringify(scored, null, 2));

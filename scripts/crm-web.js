@@ -23,6 +23,7 @@ const {
 const { openCrmDb, openSignalDb } = require('../lib/signal-db');
 const { resolveSources, buildMessageQuery } = require('../lib/sources');
 const { validateCitations } = require('../lib/archive');
+const TASKS = require('../lib/tasks');
 
 const RUNS_DIR = path.join(LOGS_DIR, 'runs');
 const DAY = 86_400_000;
@@ -74,13 +75,32 @@ function inline(s) {
   out = out.replace(/(^|[\s(])(https?:\/\/[^\s<)]+)/g, (_, pre, u) => `${pre}<a href="${u}" target="_blank" rel="noopener">${u}</a>`);
   // _italic_ (avoid mangling inside words/URLs by requiring boundaries)
   out = out.replace(/(^|[\s(>])_([^_]+)_(?=$|[\s.,;:!?)<])/g, (_, pre, c) => `${pre}<em>${c}</em>`);
-  // Provenance citations: ⟨m89123, m89150⟩ → superscript links to /m/<id>
-  out = out.replace(/⟨\s*(m\d+(?:\s*,\s*m\d+)*)\s*⟩/g, (_, grp) => {
-    const links = grp.split(',').map((p, idx) => {
-      const id = p.trim().slice(1);
-      return `<a href="/m/${id}" title="source message m${id}">${idx + 1}</a>`;
-    });
-    return `<sup class="cites">${links.join('')}</sup>`;
+  // Provenance citations → superscript links to /m/<id>.
+  //
+  // TWO SHAPES, and only one used to work. The merge prompt emits one bracket per
+  // id — `⟨m28684⟩ ⟨m28709⟩ ⟨m28714⟩` — which is what citation_syntax enforces,
+  // but this only understood the comma form `⟨m1, m2⟩`. Each bracket matched
+  // separately, so each got its own <sup> with the index restarting, and three
+  // sources rendered as "1 1 1" instead of "1 2 3".
+  //
+  // Adjacent brackets are now coalesced into ONE <sup>, and the counter runs
+  // across the whole line so a bullet with citations in two places still numbers
+  // 1,2,3,4 rather than 1,2 then 1,2. Trailing whitespace is deliberately not
+  // consumed, so the space before following prose survives.
+  const GROUP = String.raw`⟨\s*m\d+(?:\s*,\s*m\d+)*\s*⟩`;
+  let n = 0;
+  out = out.replace(new RegExp(`${GROUP}(?:\\s*${GROUP})*`, 'g'), (run) => {
+    const seen = new Set();
+    const links = [];
+    for (const m of run.matchAll(/m(\d+)/g)) {
+      // The same id cited twice in one run would otherwise render as two
+      // differently-numbered links to the same message.
+      if (seen.has(m[1])) continue;
+      seen.add(m[1]);
+      n += 1;
+      links.push(`<a href="/m/${m[1]}" title="source message m${m[1]}">${n}</a>`);
+    }
+    return links.length ? `<sup class="cites">${links.join('')}</sup>` : run;
   });
   return out;
 }
@@ -179,18 +199,112 @@ function parseMeta(md) {
 }
 
 // Pull the `## Talking points` bullets: [{date|null, text}].
+// MONTH PRECISION IS LEGAL. prompts/merge.md permits `**YYYY-MM**` when only the
+// month is known ("sometime in August") rather than stamping a false precise day —
+// and real profiles use it (nigesh carries `**2027-02**`). Requiring YYYY-MM-DD
+// here silently demoted those to undated and left the `**…**` markup in the text.
+//
+// `line` is the 1-based file line, needed to blame the bullet back to the merge
+// that wrote it.
 function parseTalkingPoints(md) {
   const items = [];
   let inSection = false;
-  for (const line of md.split(/\r?\n/)) {
-    const t = line.trim();
+  const lines = md.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i += 1) {
+    const t = lines[i].trim();
     if (/^##\s+Talking points/i.test(t)) { inSection = true; continue; }
-    if (inSection && /^##?\s/.test(t) && /^#/.test(t)) break; // next heading ends it
+    if (inSection && /^#/.test(t)) break; // next heading ends the section
     if (!inSection) continue;
-    const m = t.match(/^[-*]\s+(?:\*\*(\d{4}-\d{2}-\d{2})\*\*\s*)?(.+)$/);
-    if (m && m[2]) items.push({ date: m[1] || null, text: m[2].trim() });
+    const m = t.match(/^[-*]\s+(?:\*\*(\d{4}-\d{2}(?:-\d{2})?)\*\*\s*)?(.+)$/);
+    if (m && m[2]) {
+      items.push({
+        date: m[1] || null,
+        // A month-only date sorts and compares correctly against YYYY-MM-DD once
+        // padded; keep the raw form for display.
+        sortDate: m[1] ? (m[1].length === 7 ? `${m[1]}-01` : m[1]) : null,
+        text: m[2].trim(),
+        line: i + 1,
+      });
+    }
   }
   return items;
+}
+
+// Section-scoped bullet reader, for `## Open questions` (uncited by design) and
+// anything else worth surfacing as a task.
+function parseSectionBullets(md, heading) {
+  const items = [];
+  let inSection = false;
+  const lines = md.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i += 1) {
+    const t = lines[i].trim();
+    if (new RegExp(`^##\\s+${heading}`, 'i').test(t)) { inSection = true; continue; }
+    if (inSection && /^#/.test(t)) break;
+    if (!inSection) continue;
+    const m = t.match(/^[-*]\s+(.+)$/);
+    if (m) items.push({ text: m[1].trim(), line: i + 1 });
+  }
+  return items;
+}
+
+// git blame -> { lineNumber: { sha, model, prompt, subject } }.
+//
+// This is the provenance the profile format cannot carry: which merge wrote a
+// given line, under which model and prompt. --porcelain because it is the only
+// stable machine format; -w so a reflow does not reattribute a line.
+const BLAME_CACHE = new Map();
+function blameProfile(slug) {
+  // Keyed on mtime, not just slug: this server outlives merges, and a cache keyed
+  // on slug alone would serve pre-merge provenance forever.
+  let mtime = 0;
+  try { mtime = fs.statSync(path.posix.join(CONTACTS_DIR, `${slug}.md`)).mtimeMs; } catch { /* gone */ }
+  const key = `${slug}@${mtime}`;
+  if (BLAME_CACHE.has(key)) return BLAME_CACHE.get(key);
+  const map = new Map();
+  try {
+    const out = execFileSync('git', [
+      '--git-dir', GITDIR, '--work-tree', ROOT, 'blame', '--porcelain', '-w',
+      '--', `data/contacts/${slug}.md`,
+    ], { cwd: ROOT, encoding: 'utf8', timeout: 30_000, maxBuffer: 32 * 1024 * 1024 });
+    const meta = new Map();          // sha -> { subject, model, prompt }
+    let sha = null, resultLine = null;
+    for (const line of out.split('\n')) {
+      const hdr = /^([0-9a-f]{40})\s+\d+\s+(\d+)/.exec(line);
+      if (hdr) { sha = hdr[1]; resultLine = Number(hdr[2]); continue; }
+      if (!sha) continue;
+      if (line.startsWith('summary ')) {
+        const s = line.slice(8);
+        const rec = meta.get(sha) || {};
+        // Trailers can be folded into the subject on older commits.
+        rec.subject = s.split(/\s+Model:\s/)[0].trim();
+        const mm = /\bModel:\s*(\S+)/.exec(s); if (mm) rec.model = mm[1];
+        const pm = /\bPrompt:\s*(\S+)/.exec(s); if (pm) rec.prompt = pm[1];
+        meta.set(sha, rec);
+      }
+      if (line.startsWith('\t') && resultLine != null) {
+        map.set(resultLine, { sha, ...(meta.get(sha) || {}) });
+        resultLine = null;
+      }
+    }
+    // --porcelain's `summary` is only the SUBJECT line, so a correctly formatted
+    // commit keeps its trailers in the body where blame never shows them. Fetch
+    // the body once per unique sha to fill those in.
+    for (const [sha2, rec] of meta) {
+      if (rec.model) continue;
+      try {
+        const body = execFileSync('git', ['--git-dir', GITDIR, 'log', '-1', '--format=%B', sha2],
+          { cwd: ROOT, encoding: 'utf8', timeout: 10_000 });
+        const mm = /^Model:\s*(\S+)/m.exec(body); if (mm) rec.model = mm[1];
+        const pm = /^Prompt:\s*(\S+)/m.exec(body); if (pm) rec.prompt = pm[1];
+      } catch { /* leave unknown */ }
+    }
+    // Re-apply: map entries were built with a SPREAD of meta during parsing, so
+    // they are snapshots taken before the fill above and would silently keep the
+    // pre-fill values.
+    for (const [ln, rec] of map) map.set(ln, { ...rec, ...(meta.get(rec.sha) || {}) });
+  } catch { /* uncommitted or untracked: no provenance available */ }
+  BLAME_CACHE.set(key, map);
+  return map;
 }
 
 function listContacts() {
@@ -296,6 +410,7 @@ details.step summary .ms{color:var(--mut);font-size:12px;margin-left:auto}
 
 const NAV = [
   ['/', 'Contacts'],
+  ['/tasks', 'Tasks'],
   ['/status', 'Status'],
   ['/runs', 'Runs'],
   ['/actions', 'Actions'],
@@ -332,6 +447,190 @@ function radarItems(contacts) {
   upcoming.sort((a, b) => a.date.localeCompare(b.date));
   recent.sort((a, b) => b.date.localeCompare(a.date));
   return [...upcoming, ...recent, ...undated].slice(0, 15);
+}
+
+// ---- tasks -----------------------------------------------------------------
+// Every actionable item across every contact, with where it came from.
+//
+// TWO LAYERS OF PROVENANCE, because they answer different questions:
+//   ⟨m…⟩ citations  -> WHAT was said. Links to the message itself.
+//   git blame       -> WHO WROTE THE LINE: which merge, model, prompt, ledger.
+// The second matters because a task is a model's *interpretation* of a message,
+// and "kimi-k3 inferred this on 2026-08-03 from chunk 4/6" is a different claim
+// from "Nigesh said this".
+//
+// Deliberately NOT sourced from the `reminders` table: it exists in crm.db but has
+// zero rows and nothing writes to it. Reading it would imply it works.
+function taskItems() {
+  const today = new Date().toISOString().slice(0, 10);
+  const out = { upcoming: [], recent: [], undated: [], questions: [] };
+  let files = [];
+  try { files = fs.readdirSync(CONTACTS_DIR).filter((f) => f.endsWith('.md')); } catch { return out; }
+
+  for (const f of files) {
+    const slug = f.replace(/\.md$/, '');
+    let md;
+    try { md = fs.readFileSync(path.posix.join(CONTACTS_DIR, f), 'utf8'); } catch { continue; }
+    const titleLine = md.split(/\r?\n/).find((l) => l.startsWith('# '));
+    const name = titleLine ? titleLine.slice(2).trim() : slug;
+    // No blame here. It was one `git blame` subprocess per contact on every page
+    // load, and the model/chunk badges it fed are internal plumbing that meant
+    // nothing to the reader. Line-level authorship still lives on the profile
+    // history page, where it is actually a debugging question.
+    for (const tp of parseTalkingPoints(md)) {
+      const item = { ...tp, slug, name };
+      if (!tp.sortDate) out.undated.push(item);
+      else if (tp.sortDate >= today) out.upcoming.push(item);
+      else out.recent.push(item);
+    }
+  }
+  out.upcoming.sort((a, b) => a.sortDate.localeCompare(b.sortDate));
+  out.recent.sort((a, b) => b.sortDate.localeCompare(a.sortDate));
+  out.all = [...out.upcoming, ...out.recent, ...out.undated];
+  return out;
+}
+
+// Build every draft an ingest run would have produced, minus the ones already
+// accepted or dismissed. Drafts are not stored — they are recomputed each load, so
+// a merge rewording a bullet re-drafts it rather than mutating an owned task.
+function buildDrafts(db) {
+  const known = TASKS.knownKeys(db);
+  const out = [];
+  for (const c of taskItems().all) {
+    const d = TASKS.draftFrom(c.slug, c.name, c);
+    if (known.has(d.key)) continue;
+    out.push(d);
+  }
+  return out.sort((a, b) => (a.deadline || '9999').localeCompare(b.deadline || '9999'));
+}
+
+function tasksPage(editId = null) {
+  let cdb;
+  try { cdb = openCrmDb(); } catch { return page('To do', '<p class="bad">archive unavailable</p>', '/tasks'); }
+  let drafts = [];
+  let active = [];
+  let done = [];
+  let editing = null;
+  try {
+    drafts = buildDrafts(cdb);
+    active = TASKS.listTasks(cdb, 'active');
+    done = TASKS.listTasks(cdb, 'done');
+    if (editId) editing = TASKS.getTask(cdb, editId);
+  } finally {
+    try { cdb.close(); } catch { /* closed */ }
+  }
+
+  const today = new Date().toISOString().slice(0, 10);
+  const hidden = (o) => Object.entries(o)
+    .map(([k, v]) => `<input type="hidden" name="${esc(k)}" value="${esc(v == null ? '' : String(v))}">`).join('');
+
+  // "who it came from" and "which message triggered it" — the two provenance facts
+  // that stay visible after acceptance, since they are the reason the task exists.
+  const srcHtml = (t) => {
+    const ids = String(t.source_msg_ids || '').split(',').filter(Boolean);
+    const links = ids.slice(0, 4)
+      .map((id) => `<a href="/m/${esc(id)}">m${esc(id)}</a>`).join(' ');
+    return `<div class="tsrc">from <a href="/c/${encodeURIComponent(t.slug)}">${esc(t.contact_name || t.slug)}</a>`
+      + (links ? ` · triggered by ${links}` : ' · no source message')
+      + `</div>`;
+  };
+
+  const draftRow = (d) => `<li class="dr">`
+    + `<div class="dtitle">${esc(d.title)}</div>`
+    + `<div class="dmeta">${esc(d.contactName || d.slug)}${d.deadline ? ` · ${esc(d.deadline)}` : ''}`
+    + (d.sourceMsgId ? ` · <a href="/m/${d.sourceMsgId}">m${d.sourceMsgId}</a>` : '')
+    + `</div>`
+    + (d.description ? `<details class="dwhy"><summary>context</summary><div>${inline(d.description)}</div></details>` : '')
+    + `<div class="dacts">`
+    + `<form method="post" action="/tasks/accept">${hidden({
+      key: d.key, slug: d.slug, contactName: d.contactName, title: d.title,
+      description: d.description, deadline: d.deadline, sourceMsgId: d.sourceMsgId,
+      sourceMsgIds: (d.sourceMsgIds || []).join(','), originText: d.originText,
+    })}<button class="btn ok" type="submit">+ add</button></form>`
+    + `<form method="post" action="/tasks/dismiss">${hidden({
+      key: d.key, slug: d.slug, contactName: d.contactName, title: d.title,
+      description: d.description, deadline: d.deadline, sourceMsgId: d.sourceMsgId,
+      sourceMsgIds: (d.sourceMsgIds || []).join(','), originText: d.originText,
+    })}<button class="btn" type="submit">dismiss</button></form>`
+    + `</div></li>`;
+
+  const editForm = (t) => `<form method="post" action="/tasks/edit" class="ed">`
+    + hidden({ id: t.id })
+    + `<label>Title<input name="title" value="${esc(t.title)}" maxlength="300"></label>`
+    + `<label>Description<textarea name="description" rows="3">${esc(t.description || '')}</textarea></label>`
+    + `<label>Deadline <span class="hint">YYYY-MM-DD, or blank</span>`
+    + `<input name="deadline" value="${esc(t.deadline || '')}" placeholder="2026-09-01" maxlength="20"></label>`
+    + `<div class="dacts"><button class="btn ok" type="submit">save</button>`
+    + `<a class="btn" href="/tasks">cancel</a></div></form>`;
+
+  const taskRow = (t) => {
+    const isEditing = editing && editing.id === t.id;
+    const overdue = t.deadline && t.deadline < today && t.status === 'active';
+    return `<li class="tr${t.status === 'done' ? ' isdone' : ''}">`
+      + `<form method="post" action="/tasks/done" class="tform">`
+      + hidden({ id: t.id, done: t.status === 'done' ? '0' : '1' })
+      + `<button type="submit" class="tbox">${t.status === 'done' ? '☑' : '☐'}</button></form>`
+      + `<div class="tbody">`
+      + `<div class="tline"><span class="ttitle">${esc(t.title)}</span>`
+      + (t.deadline ? `<span class="tdate${overdue ? ' od' : ''}">${esc(t.deadline)}</span>` : '')
+      + (isEditing ? '' : `<a class="btn sm" href="/tasks?edit=${t.id}">edit</a>`)
+      + `</div>`
+      + (t.description ? `<div class="tdesc">${inline(t.description)}</div>` : '')
+      + srcHtml(t)
+      + (isEditing ? editForm(t) : '')
+      + `</div></li>`;
+  };
+
+  const st = `<style>
+    .cols{display:grid;grid-template-columns:1fr;gap:22px}
+    @media(min-width:900px){.cols{grid-template-columns:1fr 320px}}
+    ul.tl,ul.dl{list-style:none;padding:0;margin:6px 0}
+    li.tr{display:flex;gap:8px;align-items:flex-start;padding:8px 4px;border-bottom:1px solid var(--line)}
+    li.isdone .ttitle{text-decoration:line-through;color:var(--mut)}
+    .tform{margin:0}
+    .tbox{background:none;border:none;font-size:17px;cursor:pointer;padding:0 2px;color:var(--mut)}
+    .tbox:hover{color:var(--accent)}
+    .tbody{flex:1;min-width:0}
+    .tline{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+    .ttitle{flex:1 1 auto;min-width:0;font-weight:500}
+    .tdesc{font-size:13px;color:var(--mut);margin:2px 0}
+    .tsrc{font-size:11px;color:var(--mut);margin-top:2px}
+    .tdate{font-size:12px;color:var(--mut);font-variant-numeric:tabular-nums}
+    .tdate.od{color:#c2410c;font-weight:600}
+    .side{border-left:1px solid var(--line);padding-left:16px}
+    @media(max-width:899px){.side{border-left:none;padding-left:0;border-top:1px solid var(--line);padding-top:12px}}
+    li.dr{border:1px solid var(--line);border-radius:6px;padding:7px 8px;margin-bottom:8px;background:var(--card)}
+    .dtitle{font-size:13px;font-weight:500}
+    .dmeta{font-size:11px;color:var(--mut);margin-top:2px}
+    .dwhy{font-size:12px;color:var(--mut);margin-top:4px}
+    .dwhy summary{cursor:pointer;font-size:11px}
+    .dacts{display:flex;gap:6px;margin-top:6px;align-items:center}
+    .dacts form{margin:0}
+    .btn{font-size:11px;padding:2px 8px;border:1px solid var(--line);border-radius:5px;background:var(--card);
+         color:var(--ink);cursor:pointer;text-decoration:none;display:inline-block}
+    .btn.ok{border-color:var(--accent);color:var(--accent)}
+    .btn.sm{font-size:10px;padding:1px 6px}
+    .ed{margin:8px 0;padding:8px;border:1px solid var(--accent);border-radius:6px;display:grid;gap:6px}
+    .ed label{display:grid;gap:3px;font-size:11px;color:var(--mut)}
+    .ed input,.ed textarea{font:inherit;font-size:13px;padding:4px 6px;border:1px solid var(--line);
+         border-radius:4px;background:var(--bg);color:var(--ink);width:100%}
+    .hint{color:var(--mut);font-weight:400}
+    h2{font-size:15px;margin:18px 0 4px}
+  </style>`;
+
+  const body = st
+    + `<header class="top"><h1>To do</h1>`
+    + `<span class="sub">${active.length} active · ${done.length} done · ${drafts.length} draft${drafts.length === 1 ? '' : 's'}</span></header>`
+    + `<div class="cols"><div>`
+    + (active.length ? `<ul class="tl">${active.map(taskRow).join('')}</ul>`
+      : '<p>No active tasks. Add one from the drafts panel.</p>')
+    + (done.length ? `<h2>Done</h2><ul class="tl">${done.map(taskRow).join('')}</ul>` : '')
+    + `</div><div class="side">`
+    + `<h2>Drafts <span class="hint">${drafts.length}</span></h2>`
+    + `<p style="font-size:11px;color:var(--mut);margin:0 0 8px">Suggested by ingest runs. Add one to make it yours &mdash; then you can edit it.</p>`
+    + (drafts.length ? `<ul class="dl">${drafts.map(draftRow).join('')}</ul>` : '<p style="font-size:12px;color:var(--mut)">No new suggestions.</p>')
+    + `</div></div>`;
+  return page('To do', body, '/tasks');
 }
 
 function indexPage() {
@@ -404,7 +703,9 @@ function profilePage(slug) {
   try { md = fs.readFileSync(file, 'utf8'); } catch { return null; }
   const titleLine = md.split(/\r?\n/).find((l) => l.startsWith('# '));
   const name = titleLine ? titleLine.slice(2).trim() : slug;
-  const body = `<div class="back"><a href="/">&larr; All contacts</a></div><div class="profile">${renderMarkdown(md)}</div>`;
+  const body = `<div class="back"><a href="/">&larr; All contacts</a>`
+    + ` &middot; <a href="/c/${encodeURIComponent(slug)}/history">History &rarr;</a></div>`
+    + `<div class="profile">${renderMarkdown(md)}</div>`;
   return page(name, body);
 }
 
@@ -609,6 +910,233 @@ function runDetailPage(id) {
   return page(`Run ${run.id}`, body, '/runs');
 }
 
+// ---- profile history -------------------------------------------------------
+// Every state a profile has been in, newest first. Git already stores a COMPLETE
+// snapshot per commit (not a chain of patches to replay), so this is a read: one
+// `git log -p` gives every version and its diff in a single subprocess.
+//
+// --follow so a rename does not truncate the history at the rename point.
+
+const HIST_REC = '\x00';   // record separator — cannot appear in a commit
+const HIST_FLD = '\x1f';   // field separator
+
+function contactHistory(slug, limit = 300) {
+  // %x00/%x1f, not the literal bytes: Node's execFileSync rejects any argv
+  // entry containing a NUL, so git has to be the one that emits the separator.
+  // %B (the whole message) and regex, NOT %(trailers:key=…). Git only parses
+  // trailers in the final paragraph after a blank line, so a commit written with
+  // a single newline before them has the data present but unreadable as
+  // trailers. Regexing the body reads both shapes, which matters because the
+  // first real backfill produced the malformed kind.
+  const fmt = ['%x00%H', '%at', '%s', '%B', ''].join('%x1f');
+  let out;
+  try {
+    out = execFileSync('git', [
+      '--git-dir', GITDIR, 'log', `--max-count=${limit}`, '--follow',
+      `--format=${fmt}`, '-p', '--', `data/contacts/${slug}.md`,
+    ], { cwd: ROOT, encoding: 'utf8', timeout: 30_000, maxBuffer: 32 * 1024 * 1024 });
+  } catch {
+    return null;
+  }
+  // SECOND QUERY, for the commits the first one structurally cannot return.
+  // `git log -- <path>` lists only commits that CHANGED that path, so a merge
+  // that correctly decided to change nothing is absent — the single entry most
+  // worth auditing is the one that silently disappears. Chunk commits name their
+  // slug in the subject, so grep finds them regardless of what they touched.
+  let extra = '';
+  try {
+    extra = execFileSync('git', [
+      '--git-dir', GITDIR, 'log', `--max-count=${limit}`,
+      `--format=${fmt}`, `--grep=^merge ${slug} `, '--extended-regexp',
+    ], { cwd: ROOT, encoding: 'utf8', timeout: 30_000, maxBuffer: 8 * 1024 * 1024 });
+  } catch { /* none */ }
+
+  const seen = new Set();
+  return [...out.split(HIST_REC), ...extra.split(HIST_REC)].filter((r) => {
+    if (!r.trim()) return false;
+    const sha = r.split(HIST_FLD)[0].trim();
+    if (seen.has(sha)) return false;   // path query wins: it carries the patch
+    seen.add(sha);
+    return true;
+  }).map((rec) => {
+    const parts = rec.split(HIST_FLD);
+    const [sha, at, subject, body] = parts;
+    const field = (k) => {
+      const m = new RegExp(`^${k}:[ \\t]*(.+)$`, 'm').exec(body || '');
+      return m ? m[1].trim() : '';
+    };
+    const model = field('Model');
+    const prompt = field('Prompt');
+    const run = field('Run');
+    // Chunk commits carry their provenance in the subject; parse it so the
+    // message span can link back to the messages that caused the change.
+    const m = /^merge\s+(\S+)\s+(\S+)\s+\((\d+)\s+msgs?,\s*m(\d+)\.\.m(\d+)\)(?:\s*\[(\d+)\/(\d+)\])?/.exec(subject || '');
+    return {
+      sha: (sha || '').trim(),
+      at: Number(at) * 1000,
+      // On the malformed commits the trailers are folded into the subject, so
+      // cut them off for display rather than showing them twice.
+      subject: (subject || '').split(/\s+Model:\s/)[0].trim(),
+      model: (model || '').trim(),
+      prompt: (prompt || '').trim(),
+      run: (run || '').trim(),
+      chunk: m ? { label: m[2], msgs: Number(m[3]), from: Number(m[4]), to: Number(m[5]), i: m[6], n: m[7] } : null,
+      patch: parts.slice(4).join(HIST_FLD),
+    };
+    // The two queries are each sorted, but their union is not.
+  }).sort((a, b) => b.at - a.at);
+}
+
+function renderPatch(patch) {
+  const lines = String(patch || '').split('\n')
+    // diff --git / index / +++ / --- headers are noise when the file is already
+    // named by the page itself.
+    .filter((l) => !/^(diff --git |index |--- |\+\+\+ |new file mode |similarity index |rename )/.test(l));
+  const body = lines.map((l) => {
+    const e = esc(l);
+    if (l.startsWith('@@')) return `<span class="hunk">${e}</span>`;
+    if (l.startsWith('+')) return `<span class="add">${e}</span>`;
+    if (l.startsWith('-')) return `<span class="del">${e}</span>`;
+    return `<span class="ctx">${e}</span>`;
+  }).join('\n').trim();
+  return body || '<span class="ctx">(no textual change to this profile)</span>';
+}
+
+// THE SPOT-CHECK VIEW. A merge that changed nothing is either correct restraint
+// or a silent failure, and the profile diff cannot tell you which — it is empty
+// in both cases. Answering it needs the two things the merge actually saw: the
+// ledger it was given, and the profile as it stood at that moment.
+//
+// Both are recoverable because the chunk commit captured them: data/contacts/
+// _refresh/<slug>.new.txt is overwritten per chunk, so its content AT THAT
+// COMMIT is exactly that chunk's input. That is the reason _refresh is kept in
+// the history repo rather than excluded as scratch.
+function ledgerPage(slug, sha) {
+  if (!/^[0-9a-f]{7,40}$/i.test(sha)) return null;
+  const show = (rev, p) => {
+    try {
+      return execFileSync('git', ['--git-dir', GITDIR, 'show', `${rev}:${p}`],
+        { cwd: ROOT, encoding: 'utf8', timeout: 20_000, maxBuffer: 32 * 1024 * 1024 });
+    } catch { return null; }
+  };
+  const ledger = show(sha, `data/contacts/_refresh/${slug}.new.txt`);
+  if (ledger === null) return null;
+  // The PARENT's profile: this commit holds the POST-merge state, and the question
+  // being asked is what the merge was looking at when it decided. For a no-op
+  // chunk the two are identical anyway. Falls back to this commit for a root
+  // commit, which has no parent.
+  const profile = show(`${sha}^`, `data/contacts/${slug}.md`)
+    ?? show(sha, `data/contacts/${slug}.md`);
+
+  let subject = '';
+  try {
+    subject = execFileSync('git', ['--git-dir', GITDIR, 'log', '-1', '--format=%s', sha],
+      { cwd: ROOT, encoding: 'utf8', timeout: 10_000 }).split(/\s+Model:\s/)[0].trim();
+  } catch { /* unnamed */ }
+
+  const lines = ledger.split('\n');
+  const rows = lines.map((l) => {
+    const m = /^\[([^\]]+)\]\s+⟨m(\d+)⟩\s+(?:\(([^)]*)\)\s+)?([^:]+):\s*([\s\S]*)$/.exec(l);
+    if (!m) return l.trim() ? `<div class="lmeta">${esc(l)}</div>` : '';
+    const mine = /^nathan$/i.test(m[4]);
+    return `<div class="lrow ${mine ? 'me' : 'them'}">`
+      + `<a class="lid" href="/m/${m[2]}">m${m[2]}</a>`
+      + `<span class="lts">${esc(m[1])}</span>`
+      + `<span class="lwho">${esc(m[4])}</span>`
+      + `<span class="lbody">${inline(m[5])}</span></div>`;
+  }).join('');
+  const counted = lines.filter((l) => /^\[[^\]]+\]\s+⟨m\d+⟩/.test(l)).length;
+
+  // The profile's judged sections only — the Timeline is compaction's and would
+  // bury the thing you are checking.
+  const judged = profile
+    ? profile.split(/^## Timeline/m)[0]
+    : '(profile not present at this commit)';
+
+  const st = `<style>
+    .lrow{display:grid;grid-template-columns:64px 128px 92px 1fr;gap:8px;padding:2px 6px;font-size:13px;border-bottom:1px solid #1c2027}
+    .lrow.me{background:#161b22}
+    .lid{color:#7aa2f7;font-family:ui-monospace,monospace;font-size:11px}
+    .lts,.lwho{color:#8b93a4;font-size:11px}
+    .lbody{white-space:pre-wrap;word-break:break-word}
+    .lmeta{color:#8b93a4;font-size:12px;padding:6px}
+    .two{display:grid;grid-template-columns:1fr;gap:16px}
+    .pane{border:1px solid #2a2f3a;border-radius:8px;overflow:hidden}
+    .pane h2{margin:0;padding:8px 12px;background:#1b1f27;font-size:13px}
+    .pane .inner{max-height:70vh;overflow:auto}
+    .pane pre{margin:0;padding:10px;white-space:pre-wrap;font-size:13px}
+  </style>`;
+
+  const body = st
+    + `<div class="back"><a href="/c/${encodeURIComponent(slug)}/history">&larr; ${esc(slug)} history</a></div>`
+    + `<header class="top"><h1>Spot check &mdash; ${esc(slug)}</h1>`
+    + `<span class="sub">${esc(subject || sha.slice(0, 8))} &middot; ${counted} messages in this chunk</span></header>`
+    + `<div class="two">`
+    + `<div class="pane"><h2>Profile as the merge saw it (judged sections only)</h2>`
+    + `<div class="inner"><pre>${esc(judged)}</pre></div></div>`
+    + `<div class="pane"><h2>Ledger the merge was given &mdash; ${counted} messages</h2>`
+    + `<div class="inner">${rows}</div></div>`
+    + `</div>`;
+  return page(`${slug} — spot check`, body);
+}
+
+function historyPage(slug) {
+  // `git log` on a path that never existed exits 0 with no output, so an unknown
+  // contact would otherwise render an empty page with HTTP 200 instead of 404.
+  if (!fs.existsSync(path.posix.join(CONTACTS_DIR, `${slug}.md`))) return null;
+  const hist = contactHistory(slug);
+  if (!hist) return null;
+
+  const changed = hist.filter((h) => h.patch && h.patch.trim());
+  const models = [...new Set(hist.map((h) => h.model).filter(Boolean))];
+  const st = `<style>
+    .hentry{border:1px solid #2a2f3a;border-radius:8px;margin:14px 0;overflow:hidden}
+    .hhead{padding:8px 12px;background:#1b1f27;display:flex;flex-wrap:wrap;gap:8px;align-items:baseline}
+    .hhead .when{font-weight:600}
+    .hsub{color:#8b93a4;font-size:12px;flex:1 1 100%}
+    .badge{font-size:11px;padding:2px 7px;border-radius:10px;background:#262b36;color:#c3cad8;white-space:nowrap}
+    .badge.model{background:#1e3a2b;color:#8fe3ac}
+    .badge.prompt{background:#2b2440;color:#c4aef5}
+    .hentry pre.diff{margin:0;border-top:1px solid #2a2f3a;border-radius:0}
+    .hmeta{color:#8b93a4;font-size:12px;margin:2px 0 14px}
+  </style>`;
+
+  const entries = hist.map((h) => {
+    const badges = [
+      h.model ? `<span class="badge model">${esc(h.model)}</span>` : '',
+      h.prompt ? `<span class="badge prompt">${esc(h.prompt)}</span>` : '',
+      h.chunk && h.chunk.i ? `<span class="badge">chunk ${esc(h.chunk.i)}/${esc(h.chunk.n)}</span>` : '',
+      `<span class="badge">${esc(h.sha.slice(0, 8))}</span>`,
+    ].join('');
+    // The rowid span in the subject is exactly the ledger that produced this
+    // edit, and /m/<id> already renders a message in context — so a change can
+    // be traced to the words that caused it.
+    // A no-change entry is the one you most need to inspect, and its diff is
+    // empty by definition — so the spot-check link matters most exactly where
+    // this page has least to show.
+    const spot = `<a href="/c/${encodeURIComponent(slug)}/ledger/${h.sha}">spot check &rarr;</a>`;
+    const src = h.chunk
+      ? `<span class="hsub">${h.chunk.msgs} messages · ${esc(h.chunk.label)} · `
+        + `<a href="/m/${h.chunk.from}">m${h.chunk.from}</a>…<a href="/m/${h.chunk.to}">m${h.chunk.to}</a>`
+        + ` · ${spot}</span>`
+      : `<span class="hsub">${esc(h.subject)} · ${spot}</span>`;
+    const empty = !h.patch || !h.patch.trim();
+    return `<div class="hentry"><div class="hhead">`
+      + `<span class="when">${esc(fmtWhen(h.at))}</span>${badges}`
+      + (empty ? '<span class="badge">no profile change</span>' : '')
+      + `${src}</div>`
+      + `<pre class="diff">${renderPatch(h.patch)}</pre></div>`;
+  }).join('');
+
+  const body = st
+    + `<div class="back"><a href="/c/${encodeURIComponent(slug)}">&larr; ${esc(slug)}</a></div>`
+    + `<header class="top"><h1>${esc(slug)} — history</h1>`
+    + `<span class="sub">${hist.length} version${hist.length === 1 ? '' : 's'}, ${changed.length} with changes</span></header>`
+    + `<p class="hmeta">${models.length ? `models: ${esc(models.join(', '))}` : 'no model recorded on these commits (they pre-date provenance trailers)'}</p>`
+    + (entries || '<p>No history recorded for this profile yet.</p>');
+  return page(`${slug} — history`, body);
+}
+
 function diffPage(id, slug, chunkIdx) {
   let run;
   try { run = JSON.parse(fs.readFileSync(path.join(RUNS_DIR, `${id}.json`), 'utf8')); } catch { return null; }
@@ -755,6 +1283,60 @@ function start() {
 
       if (url.pathname === '/') { send(200, indexPage()); return; }
 
+      if (url.pathname === '/tasks') {
+        const ed = url.searchParams.get('edit');
+        send(200, tasksPage(ed && /^\d+$/.test(ed) ? Number(ed) : null));
+        return;
+      }
+      if (url.pathname.startsWith('/tasks/') && req.method === 'POST') {
+        // Same CSRF guard as /actions/run: allow same-origin and direct curl
+        // (which sends no Sec-Fetch-Site), refuse anything cross-site.
+        const sfs = req.headers['sec-fetch-site'];
+        if (sfs && sfs !== 'same-origin' && sfs !== 'none') { send(403, page('Forbidden', '<p>Cross-site request refused.</p>')); return; }
+        const action = url.pathname.slice('/tasks/'.length);
+        readBody(req, (raw) => {
+          let cdb = null;
+          try {
+            const p = new URLSearchParams(raw);
+            cdb = openCrmDb();
+            if (action === 'accept' || action === 'dismiss') {
+              const slug = p.get('slug') || '';
+              if (!p.get('key') || !isSafeSlug(slug)) { send(400, page('Bad request', '<p>Bad request.</p>')); return; }
+              const d = {
+                key: p.get('key'),
+                slug,
+                contactName: p.get('contactName') || null,
+                title: p.get('title') || '(untitled)',
+                description: p.get('description') || null,
+                deadline: p.get('deadline') || null,
+                sourceMsgId: p.get('sourceMsgId') ? Number(p.get('sourceMsgId')) : null,
+                sourceMsgIds: (p.get('sourceMsgIds') || '').split(',').filter(Boolean),
+                originText: p.get('originText') || null,
+              };
+              if (action === 'accept') TASKS.acceptDraft(cdb, d); else TASKS.dismissDraft(cdb, d);
+            } else if (action === 'done') {
+              const id = p.get('id');
+              if (!/^\d+$/.test(String(id))) { send(400, page('Bad request', '<p>Bad request.</p>')); return; }
+              TASKS.setDone(cdb, id, p.get('done') === '1');
+            } else if (action === 'edit') {
+              const id = p.get('id');
+              if (!/^\d+$/.test(String(id))) { send(400, page('Bad request', '<p>Bad request.</p>')); return; }
+              TASKS.updateTask(cdb, id, {
+                title: p.get('title'), description: p.get('description'), deadline: p.get('deadline'),
+              });
+            } else {
+              send(404, page('Not found', '<p>Not found.</p>')); return;
+            }
+            res.writeHead(303, { Location: '/tasks' });
+            res.end();
+          } catch (e) {
+            try { send(500, page('Error', `<p class="bad">${esc(String(e.message).slice(0, 200))}</p>`)); } catch { /* sent */ }
+          } finally {
+            if (cdb) try { cdb.close(); } catch { /* closed */ }
+          }
+        });
+        return;
+      }
       if (url.pathname === '/status') { send(200, statusPage()); return; }
       if (url.pathname === '/runs') { send(200, runsPage()); return; }
       const rdiff = url.pathname.match(/^\/runs\/([^/]+)\/diff\/([^/]+)$/);
@@ -805,6 +1387,27 @@ function start() {
       if (mm) {
         const html = messagePage(Number(mm[1]));
         if (!html) { send(404, page('Not found', '<div class="back"><a href="/">&larr; All contacts</a></div><p>Message not in the archive (it may predate provenance tracking).</p>')); return; }
+        send(200, html);
+        return;
+      }
+      // Must precede /c/<slug>, whose pattern would otherwise not match but
+      // whose 404 would. isSafeSlug is the path-traversal guard: the slug goes
+      // into a git pathspec, so `../` must never reach it.
+      const cl = url.pathname.match(/^\/c\/([^/]+)\/ledger\/([0-9a-fA-F]{7,40})$/);
+      if (cl) {
+        const slug = decodeURIComponent(cl[1]);
+        if (!isSafeSlug(slug)) { send(400, page('Bad request', '<p>Bad request.</p>')); return; }
+        const html = ledgerPage(slug, cl[2]);
+        if (!html) { send(404, page('Not found', `<div class="back"><a href="/c/${encodeURIComponent(slug)}/history">&larr; history</a></div><p>No ledger captured at that commit.</p>`)); return; }
+        send(200, html);
+        return;
+      }
+      const ch = url.pathname.match(/^\/c\/([^/]+)\/history$/);
+      if (ch) {
+        const slug = decodeURIComponent(ch[1]);
+        if (!isSafeSlug(slug)) { send(400, page('Bad request', '<p>Bad request.</p>')); return; }
+        const html = historyPage(slug);
+        if (!html) { send(404, page('Not found', '<div class="back"><a href="/">&larr; All contacts</a></div><p>No history for this contact.</p>')); return; }
         send(200, html);
         return;
       }

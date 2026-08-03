@@ -30,7 +30,7 @@ const MALFORMED = [
 ];
 
 const SECTIONS = ['## What I know', '## Talking points', '## Timeline', '## Open questions'];
-const CITED_SECTIONS = new Set(['## Talking points']);
+const CITED_SECTIONS = new Set(['## Talking points', '## What I know']);
 // Metadata the merge is explicitly allowed to change. Everything else in the
 // block is identity data it must leave alone.
 const MUTABLE_META = new Set(['Last contact', 'Relationship', 'Birthday']);
@@ -211,17 +211,58 @@ function checkTalkingPointCap(ctx) {
   };
 }
 
-function checkProseClean(ctx) {
+// SPLIT FROM prose_sections_uncited, which used to assert that NO prose section
+// carried citations. `## What I know` is now the section Nathan reads most and the
+// one a weak model can most quietly corrupt, so it is required to carry provenance
+// (prompts/merge-v6.md onward). `## Open questions` stays plain prose — it is
+// short, speculative and self-clearing, so ids there are noise.
+const UNCITED_SECTIONS = new Set(['## Open questions']);
+
+function checkOpenQuestionsUncited(ctx) {
   const dirty = [];
   for (const [h, body] of ctx.after.sections) {
-    if (CITED_SECTIONS.has(h) || h === '## Timeline') continue;
+    if (!UNCITED_SECTIONS.has(h)) continue;
     const ids = citationIds(body);
     if (ids.size) dirty.push(`${h} (${ids.size})`);
   }
   return {
-    id: 'prose_sections_uncited', severity: 'medium',
+    id: 'open_questions_uncited', severity: 'medium',
     pass: dirty.length === 0,
     detail: dirty.length ? `citations leaked into: ${dirty.join(', ')}` : 'clean',
+  };
+}
+
+// Does new material in `## What I know` arrive WITH provenance?
+//
+// Deliberately not "every bullet must be cited": every profile carries years of
+// legacy uncited prose that predates citation-keeping, and v6 explicitly forbids
+// inventing ids for it or deleting it. So this asks the only fair question — of the
+// bullets this merge actually ADDED OR CHANGED, did any gain a checkable fact
+// without an id? An untouched uncited bullet is not a failure.
+function checkWhatIKnowCited(ctx) {
+  const before = ctx.before.sections.get('## What I know');
+  const after = ctx.after.sections.get('## What I know');
+  if (after === undefined) {
+    return { id: 'wik_cited', severity: 'medium', pass: true, detail: 'no What I know section' };
+  }
+  const priorText = before === undefined ? '' : before;
+  const priorBullets = new Set(bullets(priorText).map((b) => b.trim()));
+  const changed = bullets(after).filter((b) => !priorBullets.has(b.trim()));
+  if (!changed.length) {
+    return { id: 'wik_cited', severity: 'medium', pass: true, detail: 'section unchanged' };
+  }
+  // A bullet this merge added or rewrote should carry at least one id. Gratuitous
+  // rewording of legacy prose would also trip this, which is acceptable: merge.md
+  // already forbids it ("do not reword existing content to look productive"), so
+  // touching a bullet without attributing anything is a fault either way.
+  const uncited = changed.filter((b) => citationIds(b).size === 0);
+  return {
+    id: 'wik_cited', severity: 'medium',
+    pass: uncited.length === 0,
+    detail: uncited.length
+      ? `${uncited.length} of ${changed.length} added/changed bullet(s) carry no ⟨m…⟩: `
+        + uncited.map((b) => `"${b.trim().slice(0, 60)}…"`).join(' ')
+      : `${changed.length} added/changed bullet(s), all carry provenance`,
   };
 }
 
@@ -317,7 +358,7 @@ function checkNoop(ctx) {
 const ALL = [
   checkWriteScope, checkTimeline, checkCitedIdsFromLedger, checkCitationsResolve,
   checkCitationCarryForward, checkCitationSyntax, checkTalkingPointFormat,
-  checkTalkingPointCap, checkProseClean, checkSectionOrder, checkMetadata,
+  checkTalkingPointCap, checkOpenQuestionsUncited, checkWhatIKnowCited, checkSectionOrder, checkMetadata,
   checkNoDerivedFacts, checkLastContact, checkInjection, checkNoop,
 ];
 

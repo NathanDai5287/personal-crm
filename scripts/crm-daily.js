@@ -44,7 +44,7 @@ const path = require('path');
 const { execFileSync, execSync } = require('child_process');
 const {
   ROOT, LOGS_DIR, REFRESH_STATE, CONTACTS_DIR, GROUPS_DIR, GITDIR,
-  MERGE_MODEL, COMPACT_MODEL,
+  MERGE_MODEL, COMPACT_MODEL, MERGE_PROMPT,
 } = require('../lib/config');
 const { mergeContact } = require('./crm-merge');
 const { planAll, writeChunkLedger, chunkSummary } = require('./crm-refresh');
@@ -80,6 +80,37 @@ function gitHeadSha() {
   } catch {
     return null;
   }
+}
+
+// WHICH MODEL AND PROMPT PRODUCED THIS COMMIT. The chunk commit already records
+// what went IN (slug, date span, message rowids); these record what did the
+// work. Without them a mixed history — an Opus backfill followed by months of
+// weekly K3 merges — is indistinguishable from a uniform one, and the question
+// "is the cheap model eroding the prose" becomes unanswerable after the fact.
+// Recorded as git trailers so `git log --grep='Model: moonshotai'` works.
+//
+// The prompt is identified by CONTENT hash, not just path: prompts/merge.md is
+// production and gets overwritten when a variant is promoted, so the path alone
+// would silently conflate two different prompts.
+let promptShaCache = null;
+function mergePromptSha() {
+  if (promptShaCache !== null) return promptShaCache;
+  try {
+    const text = fs.readFileSync(MERGE_PROMPT, 'utf8');
+    promptShaCache = require('crypto').createHash('sha256').update(text, 'utf8').digest('hex').slice(0, 12);
+  } catch {
+    promptShaCache = 'unknown';
+  }
+  return promptShaCache;
+}
+
+function provenanceTrailers(runTag) {
+  const rel = path.relative(ROOT, MERGE_PROMPT).replace(/\\/g, '/');
+  // TWO newlines. Git requires a BLANK line between the subject and the body,
+  // and only parses trailers in the final paragraph. With a single newline it
+  // folds the trailer lines into the subject and %(trailers:key=Model) returns
+  // empty — the lines are there, but nothing can read them as trailers.
+  return `\n\n${[`Model: ${MERGE_MODEL}`, `Prompt: ${rel}@${mergePromptSha()}`, `Run: ${runTag}`].join('\n')}`;
 }
 
 function runNode(scriptPath, args, { timeout = 120_000 } = {}) {
@@ -145,6 +176,9 @@ function loadRefreshState() {
 
 function main() {
   const startedAt = Date.now();
+  // Same formula as the run-log id below, so a chunk commit's `Run:` trailer
+  // joins straight to the run record in the dashboard.
+  const runTag = new Date(startedAt).toISOString().replace(/[:.]/g, '-');
   const warnings = [];
   let fatal = false;
   const logLines = [`\n===== crm-daily ${DRY_RUN ? '[DRY-RUN] ' : ''}${ONLY ? `[ONLY ${ONLY}] ` : ''}run @ ${nowIso()} =====`];
@@ -327,7 +361,8 @@ function main() {
             // ONE COMMIT PER CHUNK, carrying the message span. This is what makes
             // `git log -- data/contacts/<slug>.md` a readable history of why the
             // profile says what it says.
-            const msg = `merge ${p.slug} ${chunk.label} (${chunk.count} msgs, m${chunk.ridStart}..m${chunk.ridEnd}) [${i + 1}/${total}]`;
+            const msg = `merge ${p.slug} ${chunk.label} (${chunk.count} msgs, m${chunk.ridStart}..m${chunk.ridEnd}) [${i + 1}/${total}]`
+              + provenanceTrailers(runTag);
             const commit = runNode(SCRIPTS.memoryCommit, [msg]);
             if (commit.ok) {
               detail.postSha = gitHeadSha();

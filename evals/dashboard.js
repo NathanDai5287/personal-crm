@@ -108,7 +108,8 @@ function viewCompactRun(id) {
 
   return page(`compaction ${id}`, `<nav><a href="/">← all runs</a></nav>
     <h1>Compaction · ${esc(id.replace('run-', ''))}</h1>
-    <p class="sub">Prompt <code>prompts/compact-v1.md</code> vs <code>compact-v2.md</code> · <code>${esc(dir)}</code></p>
+    <p class="sub">model <code>${esc(scored[0] && scored[0].model ? scored[0].model : 'not recorded (pre-dates model logging)')}</code>
+      · ${scored.length} calls · <code>${esc(dir)}</code></p>
     ${summary}
     <h2>Check matrix</h2>${matrix}
     <h2>Failures</h2>${failures.length ? `<table><tr><th>severity</th><th>variant</th><th>case</th><th>check</th><th>detail</th></tr>

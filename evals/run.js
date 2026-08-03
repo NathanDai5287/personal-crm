@@ -23,6 +23,7 @@ const crypto = require('crypto');
 const { mergeContact } = require('../scripts/crm-merge');
 const { buildFixtures } = require('./cases');
 const { runChecks } = require('./checks');
+const { extractThinking, formatTrace } = require('./thinking');
 const { openCrmDb } = require('../lib/signal-db');
 
 const SCRATCH = process.env.CRM_EVAL_DIR
@@ -103,6 +104,48 @@ const VARIANTS = {
     model: 'moonshotai/kimi-k3', thinking: 'max',
     user: (c, today) => VARIANTS.b.user(c, today),
   },
+  // E = C plus four worked examples, chosen by Nathan from Fable-drafted
+  // alternatives. Targets SELECTION specifically — the one dimension K3 lost
+  // 3-0 to Opus under the judge, and the one thing prose instruction failed to
+  // move (D was longer, more explicit, and scored identically to C).
+  //
+  // CONTAMINATION: the examples are built from arshia-nayebnazar and charles-wu
+  // messages, which are also eval fixtures. Cases from those two slugs are
+  // tagged heldOut:false and their scores are training-set scores. The held-out
+  // subtotal is the number that means anything.
+  e: {
+    label: 'E (C + few-shot)',
+    prompt: 'prompts/merge-v5.md',
+    user: (c, today) => VARIANTS.b.user(c, today),
+  },
+  // F = E plus provenance in `## What I know`. Nathan's call: it is the section he
+  // reads most, so it is the least acceptable place to have none. Per-claim ids on
+  // checkable facts only; characterisation prose stays uncited; legacy uncited
+  // claims are left alone rather than given borrowed ids.
+  f: {
+    label: 'F (E + cited WIK)',
+    prompt: 'prompts/merge-v6.md',
+    user: (c, today) => VARIANTS.b.user(c, today),
+  },
+  // K3 on F, to confirm the weaker model can carry the extra convention.
+  kf_high: {
+    label: 'K3+F think=high', prompt: 'prompts/merge-v6.md',
+    model: 'moonshotai/kimi-k3', thinking: 'high',
+    user: (c, today) => VARIANTS.b.user(c, today),
+  },
+  // The reasoning sweep Nathan asked for, on E rather than D — D was never
+  // promoted and the few-shot prompt is the live candidate. Same prompt, same
+  // model, thinking level is the only variable. Both PAID.
+  ke_high: {
+    label: 'K3+E think=high', prompt: 'prompts/merge-v5.md',
+    model: 'moonshotai/kimi-k3', thinking: 'high',
+    user: (c, today) => VARIANTS.b.user(c, today),
+  },
+  ke_max: {
+    label: 'K3+E think=max', prompt: 'prompts/merge-v5.md',
+    model: 'moonshotai/kimi-k3', thinking: 'max',
+    user: (c, today) => VARIANTS.b.user(c, today),
+  },
 };
 
 function sha(s) { return crypto.createHash('sha1').update(s).digest('hex'); }
@@ -173,12 +216,17 @@ function runOne(c, variantKey, runDir, globalModel, today) {
 
   const filesBefore = snapshot(sandbox);
   const started = Date.now();
+  // Sessions land OUTSIDE the sandbox: snapshot() hashes every file in the
+  // sandbox to decide what the merge touched, and session files appearing
+  // mid-run would register as writes the model never made.
+  const sessionDir = path.join(dir, 'session');
   const res = mergeContact(c.slug, {
     cwd: sandbox,
     promptFile: path.resolve(__dirname, '..', v.prompt),
     model,
     thinking: v.thinking || null,
     userMessage: v.user(c, today),
+    sessionDir,
     quiet: true,
   });
   const elapsed = Date.now() - started;
@@ -186,9 +234,25 @@ function runOne(c, variantKey, runDir, globalModel, today) {
 
   const reply = String(res.output || res.error || '').trim();
   fs.writeFileSync(path.join(dir, 'reply.txt'), reply);
+
+  // Thinking is only in the session file, never on stdout.
+  let think = { blocks: [], models: [], chars: 0 };
+  try {
+    think = extractThinking(sessionDir);
+    fs.writeFileSync(
+      path.join(dir, 'thinking.txt'),
+      formatTrace({ case: c.name, variant: variantKey, model, thinking: v.thinking }, think),
+    );
+  } catch (e) {
+    fs.writeFileSync(path.join(dir, 'thinking.txt'), `(extraction failed: ${e.message})`);
+  }
+
   const meta = {
     case: c.name, slug: c.slug, variant: variantKey, model, thinking: v.thinking || null, ok: res.ok, elapsed,
     reply: reply.slice(-400),
+    thinkingBlocks: think.blocks.length,
+    thinkingChars: think.chars,
+    thinkingReadable: think.blocks.some((b) => !b.encrypted),
     filesBefore: [...filesBefore], filesAfter: [...filesAfter],
   };
   fs.writeFileSync(path.join(dir, 'result.json'), JSON.stringify(meta, null, 2));
@@ -309,7 +373,10 @@ function main() {
       for (const v of variants) {
         process.stdout.write(`run ${pad(`${v}/${c.name}`, 24)} … `);
         const m = runOne(c, v, runDir, model, today);
-        console.log(`${m.ok ? 'ok' : 'FAILED'}  ${(m.elapsed / 1000).toFixed(0)}s`);
+        const th = m.thinkingBlocks
+          ? `  think ${m.thinkingBlocks}blk/${(m.thinkingChars / 1000).toFixed(1)}k${m.thinkingReadable ? '' : ' (enc)'}`
+          : '';
+        console.log(`${m.ok ? 'ok' : 'FAILED'}  ${(m.elapsed / 1000).toFixed(0)}s${th}`);
       }
     }
   }
@@ -325,6 +392,29 @@ function main() {
   }
   fs.writeFileSync(path.join(runDir, 'scored.json'), JSON.stringify(scored, null, 2));
   report(cases, scored);
+
+  // HELD-OUT SUBTOTAL. Variant E embeds examples built from arshia-nayebnazar
+  // and charles-wu messages, so its score on those cases is a training-set
+  // score and will flatter it. Only the held-out pool measures generalisation.
+  const heldOut = new Set(cases.filter((c) => c.heldOut).map((c) => c.name));
+  const contaminated = cases.filter((c) => !c.heldOut).map((c) => c.name);
+  if (heldOut.size && contaminated.length) {
+    console.log('\n================ HELD-OUT vs CONTAMINATED ================\n');
+    console.log(`held-out cases:     ${[...heldOut].join(', ')}`);
+    console.log(`example-source cases: ${contaminated.join(', ')}  <- E has seen these\n`);
+    console.log(`${pad('variant', 20)}${pad('held-out', 16)}${pad('example-source', 16)}`);
+    for (const v of variants) {
+      const rows = scored.filter((s) => s.variant === v);
+      const sub = (pred) => {
+        const rs = rows.filter((s) => pred(s.case));
+        const got = rs.reduce((a, s) => a + s.checks.score, 0);
+        const max = rs.reduce((a, s) => a + s.checks.maxScore, 0);
+        return max ? `${got}/${max} (${(100 * got / max).toFixed(1)}%)` : '—';
+      };
+      console.log(`${pad(VARIANTS[v].label, 20)}${pad(sub((n) => heldOut.has(n)), 16)}${pad(sub((n) => !heldOut.has(n)), 16)}`);
+    }
+  }
+
   console.log(`\nartifacts: ${runDir}`);
 }
 

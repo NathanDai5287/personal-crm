@@ -47,7 +47,10 @@ const BEFORE = `# Test Person
 // real ledger id, prior citation carried forward, Timeline untouched.
 const GOOD = BEFORE
   .replace('- **Last contact:** 2026-06-30', '- **Last contact:** 2026-07-07')
-  .replace('- Lives in Oakland; works at Anthropic.', '- Lives in Oakland; starting at Tesla in August 2026.')
+  // The Tesla fact comes from ⟨m1002⟩ and now carries it: as of prompts/merge-v6.md
+  // `## What I know` is a CITED section. The pre-existing Oakland claim stays
+  // uncited — legacy prose is never given a borrowed id.
+  .replace('- Lives in Oakland; works at Anthropic.', '- Lives in Oakland; starting at Tesla in August 2026 ⟨m1002⟩.')
   .replace('- **2026-06-30** ask how the move went ⟨m900⟩',
     '- **2026-06-30** ask how the move went ⟨m900⟩\n- **2026-07-06** ask how the new espresso machine is working out ⟨m1000⟩');
 
@@ -112,10 +115,18 @@ const MUTANTS = [
     expect: 'citation_syntax',
     after: GOOD.replace('⟨m1000⟩', '(m1000)'),
   },
+  // INVERTED from the old contract. This used to assert that an id in
+  // `## What I know` was a leak; it is now required there, so the mutant is the
+  // opposite: a new fact arriving with no provenance at all.
   {
-    name: 'citation leaked into What I know',
-    expect: 'prose_sections_uncited',
-    after: GOOD.replace('starting at Tesla in August 2026.', 'starting at Tesla in August 2026. ⟨m1002⟩'),
+    name: 'What I know fact added with no citation',
+    expect: 'wik_cited',
+    after: GOOD.replace(' ⟨m1002⟩.', '.'),
+  },
+  {
+    name: 'citation leaked into Open questions',
+    expect: 'open_questions_uncited',
+    after: `${GOOD}\n## Open questions\n- Whether the Tesla start date slipped ⟨m1002⟩\n`,
   },
   {
     name: 'talking point missing its citation',
