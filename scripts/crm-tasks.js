@@ -110,6 +110,14 @@ function extractFor(slug, ledgerPath, today) {
       rejected.push(`m${t.msg_id} not in this ledger — "${String(t.title).slice(0, 48)}"`);
       continue;
     }
+    // This is Nathan's todo list only. The prompt is told to emit `owner: "nathan"`
+    // and nothing else, so anything here is a regression — rejected loudly rather
+    // than inserted, because insertDraft's `OWNERS.has(t.owner) ? t.owner : 'nathan'`
+    // would otherwise silently relabel someone else's promise as Nathan's.
+    if (t.owner !== 'nathan') {
+      rejected.push(`owner "${t.owner}" — not Nathan's commitment: "${String(t.title).slice(0, 48)}"`);
+      continue;
+    }
     tasks.push({
       slug,
       contactName: contactName(slug),
@@ -168,8 +176,8 @@ function main() {
       console.log(`${slug}: ${res.tasks.length} commitment(s)${res.rejected.length ? `, ${res.rejected.length} rejected` : ''}`);
       for (const r of res.rejected) console.log(`   ! ${r}`);
       for (const t of res.tasks) {
-        const flag = t.owner === 'nathan' ? '' : `  [${t.owner}]`;
-        console.log(`   - ${t.title}${t.deadline ? `  (due ${t.deadline})` : ''}  ⟨m${t.msgId}⟩ ${t.confidence}${flag}`);
+        // No owner badge: everything that reaches here is Nathan's by construction.
+        console.log(`   - ${t.title}${t.deadline ? `  (due ${t.deadline})` : ''}  ⟨m${t.msgId}⟩ ${t.confidence}`);
         if (write) {
           if (TASKS.insertDraft(cdb, t) === 'inserted') totalNew += 1;
         }

@@ -51,10 +51,27 @@ const { planAll, writeChunkLedger, chunkSummary } = require('./crm-refresh');
 const { validateCitations } = require('../lib/archive');
 const { openCrmDb, openSignalDb } = require('../lib/signal-db');
 
+// REJECT UNKNOWN FLAGS BEFORE ANYTHING ELSE. Both flags here fail dangerously when
+// misspelled rather than safely: `--dry-runn` performs a REAL run against every
+// contact, and `--onlly <slug>` widens a one-contact run to all 34. Neither would
+// print a warning. There is no safe default to fall back on, so a typo must abort.
+{
+  const argv = process.argv.slice(2);
+  for (let i = 0; i < argv.length; i += 1) {
+    const a = argv[i];
+    if (!a.startsWith('--')) continue;
+    if (a === '--dry-run') continue;
+    if (a === '--only') { i += 1; continue; }
+    console.error(`crm-daily: unknown flag '${a}'`);
+    console.error('known: --dry-run, --only <slug>');
+    process.exit(2);
+  }
+}
+
 const DRY_RUN = process.argv.includes('--dry-run');
 const ONLY_IDX = process.argv.indexOf('--only');
 const ONLY = ONLY_IDX !== -1 ? process.argv[ONLY_IDX + 1] : null;
-if (ONLY_IDX !== -1 && !ONLY) {
+if (ONLY_IDX !== -1 && (!ONLY || ONLY.startsWith('--'))) {
   console.error('crm-daily: --only requires a contact slug');
   process.exit(2);
 }

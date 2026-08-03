@@ -312,6 +312,24 @@ function report(cases, scored) {
 function main() {
   const argv = process.argv.slice(2);
   const arg = (n, d) => { const i = argv.indexOf(n); return i === -1 ? d : argv[i + 1]; };
+
+  // REJECT UNKNOWN FLAGS. `arg()` looks for an exact match and returns the default
+  // otherwise, so a near-miss like `--variants e,f` (the flag is singular) was silently
+  // ignored and the run proceeded on DEFAULT_VARIANTS — twelve merges of the wrong
+  // prompts, reported as a clean result. An eval that quietly measures something other
+  // than what was asked for is worse than one that crashes.
+  const VALUE_FLAGS = ['--model', '--variant', '--case', '--score-only', '--today', '--fixtures-from'];
+  const BOOL_FLAGS = ['--allow-paid'];
+  for (let i = 0; i < argv.length; i += 1) {
+    const a = argv[i];
+    if (!a.startsWith('--')) continue;
+    if (BOOL_FLAGS.includes(a)) continue;
+    if (VALUE_FLAGS.includes(a)) { i += 1; continue; }
+    console.error(`unknown flag '${a}'`);
+    console.error(`known: ${[...VALUE_FLAGS.map((f) => `${f} <value>`), ...BOOL_FLAGS].join(', ')}`);
+    process.exit(2);
+  }
+
   const model = arg('--model', DEFAULT_MODEL);
   const onlyVariant = arg('--variant', null);
   const onlyCase = arg('--case', null);

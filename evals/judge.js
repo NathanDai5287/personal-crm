@@ -279,6 +279,20 @@ function main() {
     console.log(`${overall.winner === 'tie' ? 'tie' : overall.winner.toUpperCase()}${overall.agreed ? '' : ' (order-flipped)'}`);
   }
 
+  // A judgment over zero cases is not a tie, it is a broken invocation — but the
+  // report below renders it as a tidy `A: 0  B: 0  tie: 0` with "No unsupported claims
+  // flagged", which reads exactly like a clean result. That happened: the default pair
+  // is a,b, so judging a run containing only e and f skipped all eight cases and
+  // reported nothing wrong. Fail loudly instead.
+  if (!results.length) {
+    console.error(`\nJUDGED NOTHING: 0 of ${caseNames.length} case(s) produced a comparison for pair ${V1},${V2}.`);
+    if (failures.length) for (const f of failures.slice(0, 3)) console.error(`  ${f.case || ''}: ${String(f.error || f).slice(0, 160)}`);
+    const present = fs.readdirSync(dir).filter((d) => /^[a-z_]+$/.test(d) && fs.existsSync(path.join(dir, d)));
+    console.error(`variants present in this run: ${present.join(', ') || '(none)'}`);
+    console.error(`pass --pair <v1>,<v2> to pick a pair that exists (default is a,b).`);
+    process.exit(2);
+  }
+
   const payload = { model: MODEL, judgedAt: new Date().toISOString(), dimensions: DIMENSIONS.map(([k]) => k), pair: [V1, V2], results, failures };
   const outName = (V1 === 'a' && V2 === 'b') ? 'judge.json' : `judge-${V1}${V2}.json`;
   fs.writeFileSync(path.join(dir, outName), JSON.stringify(payload, null, 2));
