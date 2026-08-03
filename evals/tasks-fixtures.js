@@ -177,6 +177,7 @@ function checklistText(slug, name, msgs, cands) {
 function parseGold(file) {
   const yes = new Set();
   const all = new Set();
+  const due = new Map();
   let unlabelled = 0;
   for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
     const m = /^- \[([ xX])\]\s*m(\d+)/.exec(line);
@@ -184,12 +185,17 @@ function parseGold(file) {
     const id = Number(m[2]);
     all.add(id);
     if (m[1].toLowerCase() === 'x') yes.add(id);
+    // Optional, and genuinely optional — most commitments have no date. Present only
+    // when Nathan typed one, so deadline accuracy is scored on the subset that has a
+    // truth to compare against rather than penalising a correct `null`.
+    const d = /\bdue=(\d{4}-\d{2}-\d{2})/.exec(line);
+    if (d) due.set(id, d[1]);
   }
   // A checklist that is entirely unticked is far more likely to be unlabelled than to
   // be a genuine all-negative verdict, and scoring against it would report a perfect
   // precision of 0/0. The caller decides; we just report it.
   if (!yes.size) unlabelled = all.size;
-  return { yes, all, unlabelled };
+  return { yes, all, due, unlabelled };
 }
 
 function goldStatus() {
@@ -202,7 +208,7 @@ function goldStatus() {
 
 // ---- build ----------------------------------------------------------------------
 
-function build() {
+function build(force = false) {
   fs.mkdirSync(LEDGER_DIR, { recursive: true });
   fs.mkdirSync(GOLD_DIR, { recursive: true });
   const db = new DatabaseSync(CRM_DB, { readOnly: true });
@@ -210,6 +216,20 @@ function build() {
   try {
     for (const { slug, days, note } of GOLD_CONTACTS) {
       if (CONTAMINATED.has(slug)) { console.log(`${slug}: SKIPPED (contaminated)`); continue; }
+
+      // FROZEN MEANS FROZEN. The window is anchored to MAX(sent_at), which advances as
+      // new messages arrive, so a rebuild silently produces a different message set —
+      // observed: 434 msgs -> 435, 21 candidates -> 22. Preserving the checklist while
+      // regenerating the ledger underneath it is the worst of both: labels keyed to ids
+      // that may no longer be in the fixture, and new candidates that were never shown.
+      // An existing fixture is therefore never touched without --force.
+      const lfExisting = path.posix.join(LEDGER_DIR, `${slug}.txt`);
+      if (fs.existsSync(lfExisting) && !force) {
+        const gfx = path.posix.join(GOLD_DIR, `${slug}.md`);
+        const g = fs.existsSync(gfx) ? parseGold(gfx) : { yes: new Set(), all: new Set() };
+        console.log(`${slug}: frozen (${g.yes.size}/${g.all.size} labelled) — --force to rebuild and DISCARD labels`);
+        continue;
+      }
       const last = db.prepare('SELECT MAX(sent_at) t, MAX(id) i FROM messages WHERE contact_slug = ?').get(slug);
       if (!last || !last.t) { console.log(`${slug}: no messages`); continue; }
       // Anchored to the contact's own last message, never wall-clock, so rebuilding
@@ -229,12 +249,18 @@ function build() {
 
       const cands = findCandidates(msgs);
       const gf = path.posix.join(GOLD_DIR, `${slug}.md`);
-      // NEVER clobber labels that already exist — they are hand-made and the whole
-      // point of this exercise.
-      if (fs.existsSync(gf)) {
+      if (fs.existsSync(gf) && !force) {
         const g = parseGold(gf);
-        console.log(`${slug}: ledger refreshed, checklist KEPT (${g.yes.size}/${g.all.size} marked)`);
+        console.log(`${slug}: checklist kept (${g.yes.size}/${g.all.size} marked)`);
       } else {
+        // With --force the ledger has just been rewritten, so any prior labels are keyed
+        // to a fixture that no longer exists. Keep a copy rather than deleting work
+        // outright — recovering a mis-forced session by hand beats losing it.
+        if (fs.existsSync(gf)) {
+          const bak = `${gf}.${Date.now()}.bak`;
+          fs.copyFileSync(gf, bak);
+          console.log(`${slug}: prior labels saved to ${path.basename(bak)}`);
+        }
         fs.writeFileSync(gf, checklistText(slug, name, msgs, cands));
       }
       summary.push({ slug, msgs: msgs.length, cands: cands.length, window: label, note });
@@ -260,7 +286,7 @@ function main() {
     console.log(`\n${ready.length} of ${st.length} contact(s) labelled and usable as gold.`);
     return;
   }
-  build();
+  build(process.argv.includes('--force'));
 }
 
 if (require.main === module) main();
