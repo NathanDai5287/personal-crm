@@ -47,28 +47,58 @@ function readChecklist(slug) {
   if (!fs.existsSync(file)) return null;
   const lines = fs.readFileSync(file, 'utf8').split(/\r?\n/);
   const items = [];
-  let cur = null;
   for (const line of lines) {
     const m = /^- \[([ xX])\]\s*m(\d+)\s*\((\S+)\)\s*(.*)$/.exec(line);
-    if (m) {
-      const d = /\bdue=(\d{4}-\d{2}-\d{2})/.exec(line);
-      cur = {
-        id: Number(m[2]),
-        checked: m[1].toLowerCase() === 'x',
-        why: m[3],
-        text: m[4].replace(/\s*#?\s*due=\d{4}-\d{2}-\d{2}\s*$/, '').trim(),
-        due: d ? d[1] : '',
-        ctx: [],
-      };
-      items.push(cur);
-      continue;
-    }
-    const c = /^\s{4,}([ >])\s*\[([^\]]+)\]\s*m(\d+)\s+([^:]+):\s?(.*)$/.exec(line);
-    if (c && cur) {
-      cur.ctx.push({ here: c[1] === '>', when: c[2], id: Number(c[3]), who: c[4].trim(), body: c[5] });
-    }
+    if (!m) continue;
+    const d = /\bdue=(\d{4}-\d{2}-\d{2})/.exec(line);
+    items.push({
+      id: Number(m[2]),
+      checked: m[1].toLowerCase() === 'x',
+      why: m[3],
+      text: m[4].replace(/\s*due=\d{4}-\d{2}-\d{2}\s*/, '').trim(),
+      due: d ? d[1] : '',
+    });
   }
   return { file, items };
+}
+
+// CONTEXT COMES FROM THE FROZEN LEDGER, NOT THE CHECKLIST. The checklist embeds three
+// messages either side, which is right for reading the file by hand but far too little
+// to judge a bare "ok" whose antecedent is thirty messages back. Widening the embedded
+// context instead would take runqi's checklist from 582 lines to ~4,500 and make the
+// file useless for hand-editing — so the two are decoupled: the .md stays small and
+// legible, and the UI slices any window it likes out of the ledger by message id.
+const ledgerCache = new Map();
+
+function readLedger(slug) {
+  const file = path.posix.join(LEDGER_DIR, `${slug}.txt`);
+  if (!fs.existsSync(file)) return null;
+  const st = fs.statSync(file);
+  const hit = ledgerCache.get(slug);
+  if (hit && hit.mtime === st.mtimeMs) return hit.data;
+  const msgs = [];
+  for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
+    const m = /^\[([^\]]+)\]\s*⟨m(\d+)⟩\s*([^:]+):\s?([\s\S]*)$/.exec(line);
+    if (m) msgs.push({ when: m[1], id: Number(m[2]), who: m[3].trim(), body: m[4] });
+  }
+  const index = new Map(msgs.map((m, i) => [m.id, i]));
+  const data = { msgs, index };
+  // Frozen files, so this only ever reloads if someone --forces a rebuild mid-session.
+  ledgerCache.set(slug, { mtime: st.mtimeMs, data });
+  return data;
+}
+
+const CTX_BEFORE = 50;
+const CTX_AFTER = 20;
+
+function contextFor(slug, id, before = CTX_BEFORE, after = CTX_AFTER) {
+  const led = readLedger(slug);
+  if (!led) return [];
+  const at = led.index.get(id);
+  if (at === undefined) return [];
+  const lo = Math.max(0, at - before);
+  const hi = Math.min(led.msgs.length - 1, at + after);
+  return led.msgs.slice(lo, hi + 1).map((m) => ({ ...m, here: m.id === id }));
 }
 
 // Rewrite ONE candidate line. Read-modify-write per click rather than holding state in
@@ -117,10 +147,13 @@ main{max-width:1000px;margin:0 auto;padding:16px}
 .item.cur{outline:2px solid var(--acc)}
 .q{font-weight:600;margin-bottom:8px}
 .why{color:var(--dim);font-weight:400;font-size:12px;border:1px solid var(--line);border-radius:10px;padding:1px 7px;margin-left:6px}
-.ctx{margin:8px 0;border-left:2px solid var(--line);padding-left:10px}
+.ctx{margin:8px 0;border-left:2px solid var(--line);padding-left:10px;max-height:360px;overflow-y:auto;overscroll-behavior:contain}
 .ctx div{color:var(--dim);white-space:pre-wrap;word-break:break-word}
-.ctx div.here{color:var(--fg);background:#1b2030;border-radius:4px;padding:1px 4px}
+.ctx div.here{color:var(--fg);background:#1b2030;border-radius:4px;padding:1px 4px;scroll-margin-top:140px}
+.ctx div.me{color:#a9b4c4}
 .who{color:#c9a227}
+.ctxbar{display:flex;gap:8px;align-items:center;margin-top:6px}
+.ctxbar button{padding:2px 10px;font-size:12px}
 .row{display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap}
 button{font:inherit;padding:5px 14px;border-radius:6px;border:1px solid var(--line);background:#1b1f27;color:var(--fg);cursor:pointer}
 button.y.on{background:var(--yes);border-color:var(--yes);color:#fff}
@@ -148,6 +181,10 @@ function indexPage() {
   <code>node evals/tasks-run.js --variant v1,v2,v3</code>.</p></main>`;
 }
 
+function renderCtx(ctx) {
+  return ctx.map((x) => `<div class="${x.here ? 'here' : (x.who === 'Nathan' ? 'me' : '')}">[${esc(x.when)}] <span class="who">${esc(x.who)}</span>: ${esc(x.body)}</div>`).join('');
+}
+
 function contactPage(slug) {
   const c = readChecklist(slug);
   if (!c) return null;
@@ -158,7 +195,11 @@ function contactPage(slug) {
   const items = c.items.map((it, n) => `
   <div class="item${it.checked ? ' on' : ''}" id="i${it.id}" data-id="${it.id}" data-n="${n}">
     <div class="q">${n + 1}. ${esc(it.text)}<span class="why">${esc(it.why)}</span></div>
-    <div class="ctx">${it.ctx.map((x) => `<div class="${x.here ? 'here' : ''}">[${esc(x.when)}] <span class="who">${esc(x.who)}</span>: ${esc(x.body)}</div>`).join('')}</div>
+    <div class="ctx" id="ctx${it.id}">${renderCtx(contextFor(slug, it.id))}</div>
+    <div class="ctxbar">
+      <button onclick="widen(${it.id})">load 200 more before / 100 after</button>
+      <span class="hint" id="cn${it.id}"></span>
+    </div>
     <div class="row">
       <button class="y${it.checked ? ' on' : ''}" onclick="mark(${it.id},1)">commitment</button>
       <button class="n${it.checked ? '' : ' on'}" onclick="mark(${it.id},0)">no</button>
@@ -178,7 +219,29 @@ function contactPage(slug) {
   <main>${items || '<p class="hint">no candidates</p>'}</main>
   <script>
   const N = ${c.items.length};
+  const SLUG = ${JSON.stringify(slug)};
   let cur = 0;
+  // Each context box is scrolled so the candidate sits in the middle of its own pane —
+  // with 50 messages before it, the default scroll position would land you 50 messages
+  // above the line you are being asked about.
+  function centreAll(){
+    document.querySelectorAll('.ctx').forEach(box=>{
+      const h = box.querySelector('.here');
+      if(h) box.scrollTop = h.offsetTop - box.clientHeight/2 + h.clientHeight/2;
+    });
+  }
+  async function widen(id){
+    const box = document.getElementById('ctx'+id);
+    const note = document.getElementById('cn'+id);
+    note.textContent = 'loading…';
+    const r = await fetch('/api/ctx?slug='+encodeURIComponent(SLUG)+'&id='+id+'&before=250&after=120');
+    if(!r.ok){ note.textContent = 'failed'; return; }
+    const j = await r.json();
+    box.innerHTML = j.html;
+    note.textContent = j.count + ' messages shown' + (j.truncated ? ' (whole ledger)' : '');
+    const h = box.querySelector('.here');
+    if(h) box.scrollTop = h.offsetTop - box.clientHeight/2 + h.clientHeight/2;
+  }
   function paint(){
     document.querySelectorAll('.item').forEach((e,i)=>e.classList.toggle('cur', i===cur));
     const on = document.querySelectorAll('.item.on').length;
@@ -206,7 +269,9 @@ function contactPage(slug) {
     else if(e.key==='k'){go(-1);e.preventDefault()}
     else if(e.key==='y'&&id){mark(id,1);go(1);e.preventDefault()}
     else if(e.key==='n'&&id){mark(id,0);go(1);e.preventDefault()}
+    else if(e.key==='m'&&id){widen(id);e.preventDefault()}
   });
+  centreAll();
   paint();
   </script>`;
 }
@@ -233,6 +298,21 @@ const server = http.createServer((req, res) => {
       }
     });
     return;
+  }
+
+  if (url.pathname === '/api/ctx') {
+    const slug = url.searchParams.get('slug');
+    if (!GOLD_CONTACTS.some((g) => g.slug === slug)) return send(400, 'bad slug', 'text/plain');
+    const id = Number(url.searchParams.get('id'));
+    const before = Math.min(2000, Number(url.searchParams.get('before')) || CTX_BEFORE);
+    const after = Math.min(2000, Number(url.searchParams.get('after')) || CTX_AFTER);
+    const ctx = contextFor(slug, id, before, after);
+    const led = readLedger(slug);
+    return send(200, JSON.stringify({
+      html: renderCtx(ctx),
+      count: ctx.length,
+      truncated: !!led && ctx.length >= led.msgs.length,
+    }), 'application/json');
   }
 
   if (url.pathname === '/') return send(200, indexPage());
