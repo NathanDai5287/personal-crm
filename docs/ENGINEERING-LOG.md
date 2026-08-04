@@ -13,6 +13,84 @@ Newest first.
 
 ---
 
+## 2026-08-03 (night)
+
+### DECISION — a prompt may never quote its own eval fixture, and this is now enforced
+Three separate contaminations in one day, each caught only because someone went looking:
+merge-v5's examples were built from two merge fixtures; `prompts/tasks.md` was given a
+Charles exchange that was the **sole** strong candidate in the charles gold file; and the
+audit of *that* fix found the Caden and Katia examples quoting seven and eight fixture
+ids, including two of Nathan's six labelled tasks.
+
+`evals/tasks-contam.js` compares every id a prompt cites against every frozen fixture and
+exits non-zero on overlap; `evals/tasks-run.js` refuses to score unless it passes.
+**Unticked overlap fails too** — a model recalling that a line is NOT a task inflates
+precision exactly as surely as recalling that one is.
+
+The rule: quoting CONTAMINATED contacts is fine, since they are excluded from gold;
+quoting a gold fixture is not. Charles is both — contaminated below m90515, gold above —
+and needs no special case, because the fixture holds only the upper range.
+
+### DECISION — charles is gold via an id floor, not a time window
+Nathan wanted the recent charles task as a datapoint, but charles was on the contaminated
+list. Contamination turned out to have a **ceiling**: the ledger Fable read ended at
+m90514 and the highest example id in any tasks prompt was m90393. `sinceId` floors a
+fixture above that, so a contaminated contact is usable for anything the prompt author
+never saw. A contaminated contact without a floor is still refused.
+
+### SURPRISE — the candidate scan was stricter than the rule it exists to serve
+Nathan asked why ⟨m90966⟩ "i'll find the guy … who slid into our dms on insta" was not a
+strong candidate. Charles never asked; he complained — "its odd if they request we provide
+it" — which a human reads as an implied need and a regex cannot. The **prompt** already
+allowed "a clearly implied need", so the scan was the stricter of the two.
+
+Measured across the five labelled fixtures: ask-only at 6 messages lookback put 12 of 161
+candidates in the strong tier and caught 7 of Nathan's 8 ticks; ask+need at 15 puts 24
+there and catches **8 of 8**. Doubling the skim to make the tier match his judgement is
+the right trade.
+
+**The scan decides nothing.** It picks what Nathan is shown; his ticks are ground truth;
+the LLM pass is the extractor. Its only real failure mode is *not showing* a real
+commitment, because then a correct extraction is scored a false positive.
+
+### SURPRISE — `--retier` rewriting `ids=` corrupted the gold set
+Re-tiering recomputes threads, and when a rule change merged two previously separate
+entries, **both lines came out claiming the same ids** — two gold entries pointing at one
+thread, double-counting on both sides of the score. Observed on charles, where "find the
+DJ guy" (m90966) and "send the rush schedule" (m90973) are unrelated tasks minutes apart.
+
+Thread membership is part of the frozen fixture. `--retier` now rewrites only `(tier)` and
+`why=`; changing membership requires `--force`.
+
+### DECISION — different asks are different threads
+Time-and-tier clustering merged those two charles tasks. The signal that separates them is
+that their **prompting messages differ**. Candidates with no ask attached may still merge
+with each other, which is the run-on-musing case the span caps handle.
+
+### DECISION — "reviewed" is separate from any tick
+Nathan: *"i have not gone through ken chessmore yet, so those have been defaulted to no."*
+"I read it and found nothing" and "I have not opened this" were both zero ticks, and the
+difference decides whether a contact can be scored. ken-chessmore is the near-zero
+**negative control** — the cleanest precision measurement available — and under the old
+rule it could never have been used. Checklists carry `reviewed: yes|no`; the runner gates
+on that, not on ticks.
+
+### OPEN — the importance rubric disagrees with Nathan's own labels
+The prompt anchors importance **2** with "building a small app a friend asked for"; Nathan
+rated that same task **1**. Likewise the beta-link share is anchored at 1 while his
+equivalent caden share is 2. Not a bug — but an importance mismatch in eval output may be
+the PROMPT being miscalibrated rather than the model erring. Resolve by moving the anchors
+to match his labels once there are more than six.
+
+### OPEN — `prompts/tasks.md` has tripled, 9,557 -> 27,438 chars
+Four amendments, each justified alone: Nathan-only owner, ask-gate + routine + importance,
+the "make sure" opt-in + refusal rule, de-contamination. A 4,600-word prompt has its own
+failure modes — later rules carrying less weight, examples crowding out the rules they
+illustrate. v2/v3 remain ~1,600-word comparators, so the eval incidentally measures
+whether the length buys anything.
+
+---
+
 ## 2026-08-03 (evening, later)
 
 ### DECISION — tasks are ask-gated, non-routine, and carry an importance score

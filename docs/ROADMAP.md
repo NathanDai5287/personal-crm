@@ -33,12 +33,17 @@ Ordered roughly by how much they matter, not by effort.
   these are already done?". Deliberately NOT folded into `tasks.md` — different
   question, and merging them makes both harder to eval.
 - [ ] **Wire `crm-tasks.js` into `crm-daily.js`** as a step, after merge.
-- [ ] **Tasks eval — LABELS PENDING.** Harness is built (`evals/tasks-fixtures.js`,
-  `evals/tasks-run.js`); it refuses to run until gold exists. Nathan must tick the real
-  commitments with `[x]` in `data/_eval-tasks/gold/*.md` — 157 candidates across 5
-  contacts. Fixtures are frozen under `data/_eval-tasks/ledgers/`; **rebuilding one
-  invalidates its labels**, and the builder will not clobber a checklist that has any
-  tick in it.
+- [ ] **Move the importance anchors to match Nathan's labels.** The rubric anchors
+  importance 2 with "building a small app a friend asked for"; he rated that task 1. The
+  beta-link share is anchored 1; his equivalent share is 2. Wait until there are more than
+  six labelled tasks, then re-anchor from his data rather than from invented examples.
+- [ ] **Decide whether `prompts/tasks.md` is too long.** 9,557 -> 27,438 chars over four
+  amendments. v2/v3 are ~1,600-word comparators, so the eval measures this incidentally —
+  if V1 does not clearly beat them, the length is not buying anything.
+- [ ] **Grow the gold set past six tasks.** Six is enough to catch gross errors and not
+  enough to rank prompts. Uncontaminated contacts with volume remain: tiffany (2,709 msgs),
+  ritvik-irigireddy, gavin-sontag, noah-bates. Same `sinceId` trick works for any
+  contaminated contact whose prompt-visible range has a ceiling.
 - [ ] **Tasks eval, layer 2: title quality.** Precision/recall says the right *line* was
   found; it says nothing about whether "Send Katia the thing" is checkable six weeks
   later. Needs a judge over true positives only.
