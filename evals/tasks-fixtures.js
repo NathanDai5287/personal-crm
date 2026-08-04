@@ -150,7 +150,18 @@ const OPT_IN = /\b(?:i'?ll|i will|im gonna|i'?m gonna|lemme|let me)\s+make sure\
 // that i should do it, but i said no and didn't agree to it."
 const REFUSAL = /^\s*(?:nah+|no+|nope|naw|nvm|never ?mind|i'?m good|im good|hard pass|i'?ll pass)\b/i;
 
-const ASK_LOOKBACK = 6;          // messages before an assent in which an ask counts
+// A NEED stated without ever being phrased as a request. Nathan asked why
+// ⟨m90966⟩ "i'll find the guy you said who slid into our dms on insta" was not strong.
+// Charles never asked — he complained: "its odd if they request we provide it". A human
+// reads the implication instantly; the ASK regex cannot. The prompt already allows "a
+// clearly implied need", so the scan was stricter than the rule it exists to support.
+const NEED = /\bwe (?:need|gotta|have to|should|dont have|don'?t have|still need)\b|\bi need\b|\bwaiting on\b|\bno ?one has\b|\bnobody has\b|\bstill (?:no|havent|haven'?t)\b|\bwho'?s (?:doing|gonna|going to)\b|\bsomeone (?:has to|needs to|should)\b|\bis (?:odd|weird) if\b|\bhaven'?t heard\b|\bnot sure who\b/i;
+
+// Widened from 6. Measured across the five labelled fixtures: ask-only at 6 put 12 of 161
+// candidates in the strong tier and captured 7 of Nathan's 8 ticks; ask+need at 15 puts 24
+// there and captures all 8. Doubling the skim to make the strong tier contain every real
+// task is the right trade — the tier exists to match his judgement, not the regex's.
+const ASK_LOOKBACK = 15;
 const THREAD_GAP_MS = 2 * 3600 * 1000;
 // Gap-based merging chains transitively: in a conversation where every message is
 // within the gap of the previous one, a whole day collapses into a single "thread".
@@ -191,10 +202,17 @@ function findCandidates(msgs) {
 // Attach the contact ask that prompted each assent, if there is one.
 function withAsks(msgs, cands) {
   return cands.map((c) => {
+    // An explicit ask wins over an implied need when both are present, since it is the
+    // more informative line to show on the card.
     let askIdx = -1;
+    let needIdx = -1;
     for (let j = Math.max(0, c.i - ASK_LOOKBACK); j < c.i; j += 1) {
-      if (msgs[j].sender !== 'Nathan' && ASK.test(spoken(msgs[j].body))) askIdx = j;
+      if (msgs[j].sender === 'Nathan') continue;
+      const b = spoken(msgs[j].body);
+      if (ASK.test(b)) askIdx = j;
+      else if (NEED.test(b)) needIdx = j;
     }
+    if (askIdx === -1 && needIdx !== -1) askIdx = needIdx;
     const body = spoken(c.m.body);
     const routine = ROUTINE.test(body) || (askIdx >= 0 && ROUTINE.test(spoken(msgs[askIdx].body)));
     const optIn = OPT_IN.test(body);
@@ -220,7 +238,15 @@ function toThreads(msgs, cands) {
   for (const c of cands) {
     const t = msgs[c.i].sent_at;
     const last = threads[threads.length - 1];
+    // DIFFERENT ASKS ARE DIFFERENT THREADS, whatever the clock says. A thread is one
+    // request and the assent(s) to it. Two unrelated commitments minutes apart merged on
+    // charles — "find the DJ guy" (m90966) and "send the rush schedule" (m90973) — because
+    // time and tier both matched. Their prompting messages were different, and that is the
+    // signal that they are separate obligations. Candidates with no ask attached may still
+    // merge with each other, which is the run-on-musing case the span caps handle.
+    const sameAsk = last && (last.askIdx === c.askIdx || c.askIdx < 0);
     if (last && last.tier === c.tier
+        && sameAsk
         && t - last.endAt <= THREAD_GAP_MS
         && t - last.startAt <= THREAD_MAX_SPAN_MS
         && last.members.length < THREAD_MAX_MEMBERS) {
@@ -507,7 +533,14 @@ function retier() {
         const hit = all.find((t) => t.ids.some((x) => ids.includes(x)));
         if (!hit) { unmatched += 1; continue; }
         const why = hit.optIn ? 'opt-in' : hit.refused ? 'refused' : hit.askIdx >= 0 ? 'asked' : 'unprompted';
-        const rebuilt = `${m[1]}(${hit.tier}) ids=${hit.ids.join(',')} why=${why}${m[7]}`;
+        // ids= IS PART OF THE FROZEN FIXTURE AND IS NEVER REWRITTEN. Re-tiering rewrote it
+        // from the recomputed thread, and when a rule change caused two previously separate
+        // entries to merge, BOTH lines ended up claiming the same ids — two gold entries
+        // pointing at one thread, which double-counts on both sides of the score. Observed
+        // on charles: "find the DJ guy" (m90966) and "send the rush schedule" (m90973) are
+        // unrelated tasks minutes apart, and both lines came out as ids=90966,90973.
+        // Changing thread membership is a fixture change and needs --force, not --retier.
+        const rebuilt = `${m[1]}(${hit.tier})${m[4] || ` ids=${ids.join(',')}`} why=${why}${m[7]}`;
         if (rebuilt !== lines[i]) { lines[i] = rebuilt; touched += 1; }
       }
       if (touched) {

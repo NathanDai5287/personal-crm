@@ -95,7 +95,7 @@ function main() {
   const arg = (n, d) => { const i = argv.indexOf(n); return i === -1 ? d : argv[i + 1]; };
 
   const VALUE_FLAGS = ['--variant', '--case', '--model'];
-  const BOOL_FLAGS = ['--allow-paid', '--verbose'];
+  const BOOL_FLAGS = ['--allow-paid', '--verbose', '--allow-contaminated'];
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (!a.startsWith('--')) continue;
@@ -140,6 +140,16 @@ function main() {
   if (!cases.length) {
     console.error('NO REVIEWED CASES. Run `node evals/label-ui.js`, tick the real commitments,');
     console.error(`and mark each contact reviewed. Files: ${GOLD_DIR}`);
+    process.exit(2);
+  }
+
+  // REFUSE TO SCORE A CONTAMINATED SETUP. If a prompt quotes the fixture it is about to
+  // be measured on, the number it produces is a recall test wearing a precision test's
+  // clothes — and worse than no number, because it looks authoritative. This happened
+  // three times in one day, so it is enforced rather than remembered.
+  if (require('./tasks-contam').check() !== 0 && !argv.includes('--allow-contaminated')) {
+    console.error('\nREFUSING to score: see above. Pass --allow-contaminated to override');
+    console.error('(and then discount every affected case by hand).');
     process.exit(2);
   }
 
