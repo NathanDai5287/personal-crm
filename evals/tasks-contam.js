@@ -27,7 +27,10 @@ const path = require('path');
 const { ROOT } = require('../lib/config');
 const { LEDGER_DIR, GOLD_DIR } = require('./tasks-fixtures');
 
-const PROMPTS = ['prompts/tasks.md', 'prompts/tasks-v2.md', 'prompts/tasks-v3.md'];
+// tasks-trigger.md is the LIVE prompt; tasks-full.md is the retired full-ledger one, kept
+// for a possible one-off retroactive sweep. Both are checked — a retired prompt that gets
+// un-retired should not smuggle contamination back in.
+const PROMPTS = ['prompts/tasks-trigger.md', 'prompts/tasks-full.md', 'prompts/tasks-v2.md', 'prompts/tasks-v3.md'];
 
 // Ids the prompt cites, in either form it can appear: a ⟨m…⟩ ledger line inside a worked
 // example, or a "msg_id" in an expected-output block.

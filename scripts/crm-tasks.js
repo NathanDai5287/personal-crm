@@ -7,8 +7,19 @@
 //   node scripts/crm-tasks.js --all --write                # every tracked contact
 //
 // This is the third LLM call site (merge, compact, tasks). Like compact it runs with
-// NO TOOLS and reads the ledger from stdin; unlike either, it returns JSON and
-// writes to a table rather than to markdown.
+// NO TOOLS and reads from stdin; unlike either, it returns JSON and writes to a table
+// rather than to markdown.
+//
+// A REGEX DECIDES WHETHER, THE MODEL DECIDES WHAT. lib/task-trigger.js scans for Nathan
+// saying "i'll make sure to …", and only the matched lines plus their context reach the
+// model, which then works out what "it" referred to and fills in the fields. A ledger with
+// no trigger costs ZERO model calls.
+//
+// This replaced an LLM pass that judged an entire ledger for commitments. That question had
+// no stable answer — four rounds of amendments grew the prompt to 27KB and the eval still
+// landed at 80% precision / 67% recall, with every round being Nathan correcting the
+// model's taste. prompts/tasks-full.md is that prompt, retained for a one-off retroactive
+// sweep, not wired to anything.
 //
 // WHY A SEPARATE PASS instead of asking the merge for tasks: a merge edits prose and
 // is judged on prose. Bolting a JSON side-channel onto it would couple two failure
@@ -25,10 +36,11 @@ const { PI_CLI, TRACKED, CONTACTS_DIR, REFRESH_DIR, ROOT } = require('../lib/con
 const { render, loadTemplate } = require('../lib/compact-prompt');
 const { openCrmDb } = require('../lib/signal-db');
 const TASKS = require('../lib/tasks');
+const TRIGGER = require('../lib/task-trigger');
 
 // Same template mechanism as compaction, different placeholders.
 const TASK_SLOTS = ['CONTACT_NAME', 'TODAY', 'MESSAGES'];
-const PROMPT_FILE = process.env.CRM_TASKS_PROMPT || path.posix.join(ROOT, 'prompts', 'tasks.md');
+const PROMPT_FILE = process.env.CRM_TASKS_PROMPT || path.posix.join(ROOT, 'prompts', 'tasks-trigger.md');
 const MODEL = process.env.CRM_TASKS_MODEL || 'anthropic/claude-opus-5';
 const FREE_PREFIX = 'anthropic/';
 
@@ -94,15 +106,25 @@ function ledgerIds(text) {
 function extractFor(slug, ledgerPath, today, opts = {}) {
   const ledger = fs.readFileSync(ledgerPath, 'utf8');
   const ids = ledgerIds(ledger);
+
+  // THE CHEAP PATH, and the usual one. No trigger, no model call, no cost.
+  const { windows, nearMisses, total } = TRIGGER.findTriggers(ledger);
+  if (!windows.length) {
+    return { ok: true, tasks: [], rejected: [], scanned: total, triggers: 0, nearMisses };
+  }
+
   const tpl = loadTemplate(opts.promptFile || PROMPT_FILE);
   const { user, system } = render(tpl, {
     CONTACT_NAME: opts.contactName || contactName(slug),
     TODAY: today,
-    MESSAGES: ledger,
+    MESSAGES: TRIGGER.renderWindows(windows),
   }, TASK_SLOTS);
   const raw = callModel(user, system, opts.model || MODEL);
   const arr = extractArray(raw);
   if (!Array.isArray(arr)) return { ok: false, error: `unparseable reply: ${raw.slice(0, 160)}`, tasks: [] };
+  // The regex already decided these are tasks, so a short reply means the model dropped
+  // something Nathan explicitly asked to track — the one unrecoverable failure here.
+  const dropped = windows.filter((w) => !arr.some((t) => Number(t && t.msg_id) === w.msgId));
 
   const tasks = [];
   const rejected = [];
@@ -133,7 +155,10 @@ function extractFor(slug, ledgerPath, today, opts = {}) {
       msgId: mid,
     });
   }
-  return { ok: true, tasks, rejected };
+  for (const d of dropped) {
+    rejected.push(`DROPPED a trigger — model returned nothing for ⟨m${d.msgId}⟩: "${d.body.slice(0, 60)}"`);
+  }
+  return { ok: true, tasks, rejected, scanned: total, triggers: windows.length, nearMisses };
 }
 
 function main() {
@@ -177,7 +202,17 @@ function main() {
         continue;
       }
       if (!res.ok) { console.log(`${slug}: ${res.error}`); continue; }
-      console.log(`${slug}: ${res.tasks.length} commitment(s)${res.rejected.length ? `, ${res.rejected.length} rejected` : ''}`);
+      if (!res.triggers) {
+        console.log(`${slug}: no "i'll make sure" in ${res.scanned} messages — no model call`);
+      } else {
+        console.log(`${slug}: ${res.triggers} trigger(s) -> ${res.tasks.length} task(s)${res.rejected.length ? `, ${res.rejected.length} rejected` : ''}`);
+      }
+      // A near-miss is a line where Nathan said "make sure" in a form the scan does not
+      // accept. Silence here is the failure mode of the whole design: he thinks he
+      // flagged something and nothing happened. Always print them.
+      for (const nm of res.nearMisses || []) {
+        console.log(`   ~ near-miss, NOT tracked: "${String(nm.body).slice(0, 70)}"`);
+      }
       for (const r of res.rejected) console.log(`   ! ${r}`);
       res.tasks.sort((a, b) => TASKS.normImportance(b.importance) - TASKS.normImportance(a.importance));
       for (const t of res.tasks) {
