@@ -151,8 +151,11 @@ function extractFor(slug, ledgerPath, today, opts = {}) {
       description: t.description ? String(t.description) : null,
       owner: t.owner,
       deadline: t.deadline || null,
-      confidence: t.confidence,
-      importance: t.importance,
+      // Two booleans in, importance derived downstream. `actionable` is coerced rather
+      // than rejected: a missing value should cost the task one importance point, not the
+      // task itself.
+      deadline: t.deadline || null,
+      actionable: t.actionable === true,
       msgId: mid,
     });
   }
@@ -215,10 +218,11 @@ function main() {
         console.log(`   ~ near-miss, NOT tracked: "${String(nm.body).slice(0, 70)}"`);
       }
       for (const r of res.rejected) console.log(`   ! ${r}`);
-      res.tasks.sort((a, b) => TASKS.normImportance(b.importance) - TASKS.normImportance(a.importance));
+      res.tasks.sort((a, b) => TASKS.deriveImportance(b) - TASKS.deriveImportance(a));
       for (const t of res.tasks) {
         // No owner badge: everything that reaches here is Nathan's by construction.
-        console.log(`   [${TASKS.normImportance(t.importance)}] ${t.title}${t.deadline ? `  (due ${t.deadline})` : ''}  ⟨m${t.msgId}⟩ ${t.confidence}`);
+        const imp = TASKS.deriveImportance(t);
+        console.log(`   [${imp}] ${t.title}${t.deadline ? `  (due ${t.deadline})` : ''}${t.actionable ? '' : '  [blocked]'}  ⟨m${t.msgId}⟩`);
         if (write) {
           if (TASKS.insertDraft(cdb, t) === 'inserted') totalNew += 1;
         }
