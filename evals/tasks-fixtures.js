@@ -97,18 +97,59 @@ function spoken(body) {
 function isVerbose(b) { return !NEGATED.test(b) && VERBOSE.some((r) => r.test(b)); }
 function isRequest(b) { return REQUEST.some((r) => r.test(b)); }
 
+// ROUTINE COORDINATION. Literally commitments, but not todo items: arrival times,
+// habitual handovers, who is picking up whom. Nathan's own example was "im getting off
+// work at 6 and i'll come by 7". The test he gave is whether it would still matter
+// tomorrow if forgotten.
+const ROUTINE = new RegExp([
+  'come by', 'be there', 'on my way', 'omw', 'otw', 'heading (?:over|out|back|home)',
+  'get(?:ting)? off work', 'leaving (?:now|soon|work)', 'see (?:you|u|ya)', 'be home',
+  'almost there', 'running late', 'on the way', 'be over', 'head(?:ing)? (?:to|there)',
+  // Rides and pickups in both directions. "Can u pick me up at 5:30" is the same class
+  // of everyday logistics as "I'll come by at 7" — it was landing in the strong tier
+  // because only "pick you up" was covered.
+  'pick (?:you|u|me|him|her|them|us) up', 'drop (?:you|u|me|him|her|them|us) off',
+  'give (?:you|u|me) a ride', 'drive (?:you|u|me)',
+  // Standing meal/plan chatter.
+  'grab (?:food|lunch|dinner|breakfast|coffee|boba)', 'get (?:food|lunch|dinner|dinner)',
+  'wake (?:you|u|me) up', 'call (?:you|u) (?:later|tonight|tmr|tomorrow)',
+].map((s) => `\\b${s}\\b`).join('|'), 'i');
+
+// An ASK by the contact. Broader than REQUEST because it also has to catch an
+// acceptance of Nathan's offer — "want me to X?" -> "yes pls" is a request too, it just
+// arrives second. Deliberately generous: a missed ask silently drops a real commitment
+// from the gold set, and the tiering below means a false one only costs a glance.
+const ASK = /\b(?:can|could|would|will|cud|cn)\s?(?:you|u|y|ya)\b|\bpls\b|\bplease\b|\bplz\b|\bdon'?t forget\b|\bmake sure\b|\b(?:u|you) should\b|\bmind (?:sending|grabbing|picking|doing)\b|\bsend me\b|\bhelp me\b|\bremind me\b|\bneed (?:you|u|ur|your)\b|\byes pls\b|\byea do\b|\bdo it\b|\bgo ahead\b/i;
+
+const ASK_LOOKBACK = 6;          // messages before an assent in which an ask counts
+const THREAD_GAP_MS = 2 * 3600 * 1000;
+// Gap-based merging chains transitively: in a conversation where every message is
+// within the gap of the previous one, a whole day collapses into a single "thread".
+// Observed — nine candidates from "i'll become a youtuber" onward merged into one
+// unreviewable block. A thread is also capped on total span and member count.
+const THREAD_MAX_SPAN_MS = 12 * 3600 * 1000;
+const THREAD_MAX_MEMBERS = 4;
+
+// A THREAD, NOT A MESSAGE, IS THE UNIT. Nathan: "it is possible that a group of
+// messages over a long period correspond to a single todo item." His own labels proved
+// it — he ticked two separate lines (m2998, m3062) that are one commitment to build one
+// app, and the Caden thread spans four messages over two days. Labelling per message
+// asks the same question repeatedly and produces a gold set whose ids do not correspond
+// to the tasks a prompt actually emits (one per thread).
+//
+// TIERED, because 158 candidates yielding 4 marks is a labelling job nobody finishes.
+// `strong` requires an ask from the contact and is not routine — that is Nathan's own
+// stated rule ("it should be things that the other person specifically asks and i
+// confirm"). Everything else stays available as `weak` rather than being discarded,
+// because gold-set recall is what protects a correct extraction from being scored a
+// false positive.
 function findCandidates(msgs) {
   const out = [];
   let lastRequestIdx = -Infinity;
   msgs.forEach((m, i) => {
     const b = spoken(m.body);
     if (!b.trim()) return;
-    // A request from EITHER side can set up an acceptance, so this is tracked for all
-    // senders...
     if (isRequest(b)) lastRequestIdx = i;
-    // ...but only Nathan's own words can put Nathan on the hook, so only his lines are
-    // candidates. The contact's promises are never his tasks (prompts/tasks.md,
-    // "Whose commitments"), so labelling them would be busywork with a known answer.
     if (m.sender !== 'Nathan') return;
     let why = null;
     if (isVerbose(b)) why = 'undertaking';
@@ -116,6 +157,56 @@ function findCandidates(msgs) {
     if (why) out.push({ i, why, m });
   });
   return out;
+}
+
+// Attach the contact ask that prompted each assent, if there is one.
+function withAsks(msgs, cands) {
+  return cands.map((c) => {
+    let askIdx = -1;
+    for (let j = Math.max(0, c.i - ASK_LOOKBACK); j < c.i; j += 1) {
+      if (msgs[j].sender !== 'Nathan' && ASK.test(spoken(msgs[j].body))) askIdx = j;
+    }
+    const routine = ROUTINE.test(spoken(c.m.body)) || (askIdx >= 0 && ROUTINE.test(spoken(msgs[askIdx].body)));
+    return { ...c, askIdx, routine, tier: (askIdx >= 0 && !routine) ? 'strong' : 'weak' };
+  });
+}
+
+// Collapse candidates that sit inside the same conversation burst into one thread. Six
+// hours is long enough to hold a morning's back-and-forth together and short enough not
+// to merge two unrelated days.
+function toThreads(msgs, cands) {
+  const threads = [];
+  for (const c of cands) {
+    const t = msgs[c.i].sent_at;
+    const last = threads[threads.length - 1];
+    if (last && last.tier === c.tier
+        && t - last.endAt <= THREAD_GAP_MS
+        && t - last.startAt <= THREAD_MAX_SPAN_MS
+        && last.members.length < THREAD_MAX_MEMBERS) {
+      last.members.push(c);
+      last.endAt = t;
+      if (c.askIdx >= 0 && last.askIdx < 0) last.askIdx = c.askIdx;
+      continue;
+    }
+    threads.push({ tier: c.tier, members: [c], askIdx: c.askIdx, startAt: t, endAt: t });
+  }
+  // The id a prompt would cite is Nathan's assent, so the thread is keyed on the FIRST
+  // assent in it — matching what prompts/tasks.md is told to emit.
+  return threads.map((t) => ({
+    ...t,
+    id: t.members[0].m.id,
+    lo: Math.min(t.askIdx >= 0 ? t.askIdx : Infinity, ...t.members.map((m) => m.i)),
+    hi: Math.max(...t.members.map((m) => m.i)),
+    ids: t.members.map((m) => m.m.id),
+  }));
+}
+
+function buildThreads(msgs) {
+  const all = toThreads(msgs, withAsks(msgs, findCandidates(msgs)));
+  return {
+    strong: all.filter((t) => t.tier === 'strong'),
+    weak: all.filter((t) => t.tier === 'weak'),
+  };
 }
 
 // ---- rendering ------------------------------------------------------------------
@@ -137,65 +228,98 @@ function ledgerText(name, msgs, label) {
   return `${head}\n\n${lines.join('\n')}\n`;
 }
 
+function threadBlock(msgs, t) {
+  const L = [];
+  const idList = t.ids.join(',');
+  const head = msgs[t.members[0].i];
+  L.push(`- [ ] m${t.id} (${t.tier}) ids=${idList}  ${head.sender}: ${String(head.body).slice(0, 90)}`);
+  if (t.askIdx >= 0) L.push(`      ASK  m${msgs[t.askIdx].id} ${msgs[t.askIdx].sender}: ${String(msgs[t.askIdx].body).slice(0, 140)}`);
+  for (const mem of t.members) {
+    L.push(`      SAID m${mem.m.id} ${String(mem.m.body).slice(0, 140)}`);
+  }
+  L.push('');
+  return L.join('\n');
+}
+
 // Each candidate ships with the surrounding turns, because a bare "ye" is unjudgeable
 // alone — the whole question is what it is answering.
-function checklistText(slug, name, msgs, cands) {
+function checklistText(slug, name, msgs, threads) {
   const L = [
     `# Gold labels — ${name} (${slug})`,
     '',
-    'Mark `[x]` if the line creates a task **for Nathan** — a specific action he agreed',
-    'to, alone or jointly, that someone is waiting on. Leave `[ ]` otherwise.',
+    'One entry = one COMMITMENT THREAD, not one message. A thread may span several turns',
+    'and several days; tick it once.',
     '',
-    'Say NO to: promises the contact made (those are never Nathan\'s tasks), vague intent',
-    '("we should hang out"), things already done inside this ledger, and plans about',
-    'himself nobody is waiting on ("i\'ll just get their api").',
+    'Tick `[x]` when the contact asked for something and Nathan agreed to do it, and it',
+    'would still matter tomorrow if he forgot. Add `imp=1|2|3` for importance —',
+    '3 = someone is blocked or it costs real money/time, 2 = ordinary obligation,',
+    '1 = minor but real. Optionally `due=YYYY-MM-DD`; most tasks have no deadline.',
     '',
-    'Only the `[x]`/`[ ]` and the `m<id>` on each candidate line are parsed. Edit freely',
-    'otherwise — add a note after `#` if a call was hard, it is worth recording.',
+    'Say NO to: routine coordination ("I\'ll come by at 7"), things Nathan volunteered',
+    'unprompted, promises the CONTACT made, vague intent, and anything already done',
+    'inside this ledger.',
     '',
-    `${cands.length} candidates from ${msgs.length} messages.`,
+    'Parsed from each entry: the `[x]`, `m<id>`, `ids=`, `imp=`, `due=`. Edit anything else.',
+    '',
+    `STRONG: ${threads.strong.length} (contact asked, non-routine) · WEAK: ${threads.weak.length} (no ask, or routine)`,
+    `from ${msgs.length} messages.`,
     '',
     '---',
     '',
+    '## Strong candidates — review these',
+    '',
   ];
-  for (const c of cands) {
-    const lo = Math.max(0, c.i - 3);
-    const hi = Math.min(msgs.length - 1, c.i + 3);
-    L.push(`- [ ] m${c.m.id}  (${c.why})  ${c.m.sender}: ${String(c.m.body).slice(0, 100)}`);
-    for (let j = lo; j <= hi; j += 1) {
-      const mark = j === c.i ? '>' : ' ';
-      L.push(`      ${mark} [${fmt(msgs[j].sent_at)}] m${msgs[j].id} ${msgs[j].sender}: ${String(msgs[j].body).slice(0, 160)}`);
-    }
-    L.push('');
-  }
+  for (const t of threads.strong) L.push(threadBlock(msgs, t));
+  L.push('');
+  L.push('## Weak candidates — Nathan volunteered it, or it is routine');
+  L.push('');
+  L.push('Kept so a correct extraction here is not scored a false positive. Skim; most are no.');
+  L.push('');
+  for (const t of threads.weak) L.push(threadBlock(msgs, t));
   return L.join('\n');
 }
 
 // ---- gold parsing (used by tasks-run.js) ----------------------------------------
 // Tolerant on purpose: this file is hand-edited. Anything that is not a recognisable
 // candidate line is ignored rather than failing the run.
+// THREAD-AWARE. A thread is one task but spans several message ids, and a prompt may
+// legitimately cite any of them as the point of agreement. Scoring on the primary id
+// alone would mark a correct extraction wrong for choosing a different turn of the same
+// exchange, so `yes` contains EVERY id of every ticked thread and `threads` carries the
+// grouping the runner needs to count one task per thread rather than one per id.
 function parseGold(file) {
   const yes = new Set();
   const all = new Set();
   const due = new Map();
+  const importance = new Map();
+  const threads = [];
   let unlabelled = 0;
   for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
     const m = /^- \[([ xX])\]\s*m(\d+)/.exec(line);
     if (!m) continue;
     const id = Number(m[2]);
-    all.add(id);
-    if (m[1].toLowerCase() === 'x') yes.add(id);
+    const idsMatch = /\bids=([\d,]+)/.exec(line);
+    const ids = idsMatch ? idsMatch[1].split(',').map(Number).filter(Boolean) : [id];
+    const checked = m[1].toLowerCase() === 'x';
+    const tierMatch = /^- \[[ xX]\]\s*m\d+\s*\((\w+)\)/.exec(line);
+    for (const x of ids) all.add(x);
+    const imp = /\bimp=([123])/.exec(line);
     // Optional, and genuinely optional — most commitments have no date. Present only
     // when Nathan typed one, so deadline accuracy is scored on the subset that has a
     // truth to compare against rather than penalising a correct `null`.
     const d = /\bdue=(\d{4}-\d{2}-\d{2})/.exec(line);
-    if (d) due.set(id, d[1]);
+    if (checked) {
+      for (const x of ids) yes.add(x);
+      if (d) due.set(id, d[1]);
+      if (imp) importance.set(id, Number(imp[1]));
+    }
+    threads.push({ id, ids, checked, tier: tierMatch ? tierMatch[1] : 'strong', due: d ? d[1] : null, importance: imp ? Number(imp[1]) : null });
   }
   // A checklist that is entirely unticked is far more likely to be unlabelled than to
   // be a genuine all-negative verdict, and scoring against it would report a perfect
   // precision of 0/0. The caller decides; we just report it.
   if (!yes.size) unlabelled = all.size;
-  return { yes, all, due, unlabelled };
+  return { yes, all, due, importance, threads, unlabelled };
 }
 
 function goldStatus() {
@@ -247,7 +371,7 @@ function build(force = false) {
       const lf = path.posix.join(LEDGER_DIR, `${slug}.txt`);
       fs.writeFileSync(lf, ledgerText(name, msgs, label));
 
-      const cands = findCandidates(msgs);
+      const threads = buildThreads(msgs);
       const gf = path.posix.join(GOLD_DIR, `${slug}.md`);
       if (fs.existsSync(gf) && !force) {
         const g = parseGold(gf);
@@ -261,10 +385,10 @@ function build(force = false) {
           fs.copyFileSync(gf, bak);
           console.log(`${slug}: prior labels saved to ${path.basename(bak)}`);
         }
-        fs.writeFileSync(gf, checklistText(slug, name, msgs, cands));
+        fs.writeFileSync(gf, checklistText(slug, name, msgs, threads));
       }
-      summary.push({ slug, msgs: msgs.length, cands: cands.length, window: label, note });
-      console.log(`${slug}: ${msgs.length} msgs (${label}) -> ${cands.length} candidates to label`);
+      summary.push({ slug, msgs: msgs.length, cands: threads.strong.length, weak: threads.weak.length, window: label, note });
+      console.log(`${slug}: ${msgs.length} msgs (${label}) -> ${threads.strong.length} strong, ${threads.weak.length} weak`);
     }
   } finally {
     try { db.close(); } catch { /* closed */ }
@@ -290,4 +414,4 @@ function main() {
 }
 
 if (require.main === module) main();
-module.exports = { parseGold, goldStatus, findCandidates, LEDGER_DIR, GOLD_DIR, GOLD_CONTACTS, CONTAMINATED };
+module.exports = { parseGold, goldStatus, findCandidates, buildThreads, withAsks, toThreads, LEDGER_DIR, GOLD_DIR, GOLD_CONTACTS, CONTAMINATED };

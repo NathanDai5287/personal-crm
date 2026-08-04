@@ -48,15 +48,36 @@ function todayFor(ledgerFile) {
   return m ? m[2] : new Date().toISOString().slice(0, 10);
 }
 
+// SCORED PER THREAD, NOT PER MESSAGE. One commitment spans several turns — Nathan
+// pointed this out after labelling ("a group of messages over a long period correspond
+// to a single todo item") — and the prompt is told to emit one task per thread. Scoring
+// on raw message ids would count a two-turn thread as two golds, so a prompt that
+// correctly emitted one task for it would show 50% recall.
+//
+// A prompt may cite any turn of the exchange as the point of agreement, so an extraction
+// matches a thread when its msg_id is ANY of that thread's ids.
 function score(extracted, gold) {
-  const got = new Set(extracted.map((t) => t.msgId));
-  const tp = [...got].filter((id) => gold.yes.has(id));
-  const fp = [...got].filter((id) => !gold.yes.has(id));
-  const fn = [...gold.yes].filter((id) => !got.has(id));
-  const p = got.size ? tp.length / got.size : null;      // null, not 1 — see report()
-  const r = gold.yes.size ? tp.length / gold.yes.size : null;
+  const wanted = gold.threads.filter((t) => t.checked);
+  const matchedThread = new Map();       // thread primary id -> extraction
+  const fp = [];
+  for (const e of extracted) {
+    const hit = wanted.find((t) => t.ids.includes(e.msgId));
+    if (hit) {
+      // Two extractions landing in one thread: the first counts, the rest are spurious
+      // duplicates of a task already found.
+      if (matchedThread.has(hit.id)) fp.push(e.msgId);
+      else matchedThread.set(hit.id, e);
+    } else {
+      fp.push(e.msgId);
+    }
+  }
+  const tp = [...matchedThread.keys()];
+  const fn = wanted.filter((t) => !matchedThread.has(t.id)).map((t) => t.id);
+  const emitted = extracted.length;
+  const p = emitted ? tp.length / emitted : null;        // null, not 1 — see report()
+  const r = wanted.length ? tp.length / wanted.length : null;
   const f1 = (p && r) ? (2 * p * r) / (p + r) : (p === null || r === null ? null : 0);
-  return { tp, fp, fn, precision: p, recall: r, f1, emitted: got.size, goldSize: gold.yes.size };
+  return { tp, fp, fn, precision: p, recall: r, f1, emitted, goldSize: wanted.length, matchedThread };
 }
 
 // A false positive is only interesting if you can see WHY the model thought it was a
@@ -164,9 +185,10 @@ function main() {
     // the same precision, the field is telling Nathan nothing and the UI should stop
     // showing it as though it were a signal.
     for (const level of ['explicit', 'probable']) {
-      const at = rs.flatMap((r) => r.tasks
-        .filter((t) => t.confidence === level)
-        .map((t) => r.tp.includes(t.msgId)));
+      const at = rs.flatMap((r) => {
+        const won = new Set([...r.matchedThread.values()].map((e) => e.msgId));
+        return r.tasks.filter((t) => t.confidence === level).map((t) => won.has(t.msgId));
+      });
       if (!at.length) continue;
       const good = at.filter(Boolean).length;
       console.log(`  ${pad(`  confidence=${level}`, 22)}${pad('', 6)}${pad(at.length, 6)}${pad(good, 5)}${pad(at.length - good, 7)}${pad('', 6)}${pct(good / at.length)}`);

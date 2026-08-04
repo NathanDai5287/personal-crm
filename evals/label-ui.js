@@ -42,22 +42,39 @@ const PORT = Number(arg('--port', 3114));
 // The file is the source of truth and is hand-editable, so it is re-read on every
 // request rather than cached. Nathan may well have an editor open on the same file.
 
+// One item = one commitment THREAD. The checklist carries the thread's member ids and
+// the contact ask that prompted it, so the card can show the whole exchange rather than
+// asking the same question once per message.
 function readChecklist(slug) {
   const file = path.posix.join(GOLD_DIR, `${slug}.md`);
   if (!fs.existsSync(file)) return null;
   const lines = fs.readFileSync(file, 'utf8').split(/\r?\n/);
   const items = [];
+  let cur = null;
   for (const line of lines) {
-    const m = /^- \[([ xX])\]\s*m(\d+)\s*\((\S+)\)\s*(.*)$/.exec(line);
-    if (!m) continue;
-    const d = /\bdue=(\d{4}-\d{2}-\d{2})/.exec(line);
-    items.push({
-      id: Number(m[2]),
-      checked: m[1].toLowerCase() === 'x',
-      why: m[3],
-      text: m[4].replace(/\s*due=\d{4}-\d{2}-\d{2}\s*/, '').trim(),
-      due: d ? d[1] : '',
-    });
+    const m = /^- \[([ xX])\]\s*m(\d+)\s*\((\w+)\)\s*(?:ids=([\d,]+))?\s*(.*)$/.exec(line);
+    if (m) {
+      const d = /\bdue=(\d{4}-\d{2}-\d{2})/.exec(line);
+      const imp = /\bimp=([123])/.exec(line);
+      cur = {
+        id: Number(m[2]),
+        checked: m[1].toLowerCase() === 'x',
+        tier: m[3],
+        ids: (m[4] || String(m[2])).split(',').map(Number).filter(Boolean),
+        text: m[5].replace(/\s*(?:due=\d{4}-\d{2}-\d{2}|imp=[123])\s*/g, ' ').trim(),
+        due: d ? d[1] : '',
+        imp: imp ? Number(imp[1]) : 0,
+        ask: null,
+        said: [],
+      };
+      items.push(cur);
+      continue;
+    }
+    if (!cur) continue;
+    const a = /^\s+ASK\s+m(\d+)\s+([^:]+):\s?(.*)$/.exec(line);
+    if (a) { cur.ask = { id: Number(a[1]), who: a[2].trim(), body: a[3] }; continue; }
+    const s = /^\s+SAID\s+m(\d+)\s+(.*)$/.exec(line);
+    if (s) cur.said.push({ id: Number(s[1]), body: s[2] });
   }
   return { file, items };
 }
@@ -91,6 +108,20 @@ function readLedger(slug) {
 const CTX_BEFORE = 50;
 const CTX_AFTER = 20;
 
+// A thread spans from the contact's ask to Nathan's last word on it, so the window is
+// anchored to both ends rather than to a single message.
+function contextForThread(slug, it, before = CTX_BEFORE, after = CTX_AFTER) {
+  const led = readLedger(slug);
+  if (!led) return [];
+  const marks = [it.ask ? it.ask.id : null, ...it.ids].filter((x) => x !== null);
+  const idxs = marks.map((x) => led.index.get(x)).filter((x) => x !== undefined);
+  if (!idxs.length) return [];
+  const lo = Math.max(0, Math.min(...idxs) - before);
+  const hi = Math.min(led.msgs.length - 1, Math.max(...idxs) + after);
+  const set = new Set(marks);
+  return led.msgs.slice(lo, hi + 1).map((m) => ({ ...m, here: set.has(m.id) }));
+}
+
 function contextFor(slug, id, before = CTX_BEFORE, after = CTX_AFTER) {
   const led = readLedger(slug);
   if (!led) return [];
@@ -105,7 +136,7 @@ function contextFor(slug, id, before = CTX_BEFORE, after = CTX_AFTER) {
 // memory: the file may also be edited by hand mid-session, and losing someone's manual
 // labels to a stale in-memory copy would be unforgivable for a file that costs 20
 // minutes to produce.
-function writeLabel(slug, id, checked, due) {
+function writeLabel(slug, id, checked, due, imp) {
   const file = path.posix.join(GOLD_DIR, `${slug}.md`);
   const src = fs.readFileSync(file, 'utf8');
   const lines = src.split(/\r?\n/);
@@ -113,7 +144,10 @@ function writeLabel(slug, id, checked, due) {
   for (let i = 0; i < lines.length; i += 1) {
     const m = /^- \[([ xX])\]\s*m(\d+)\s*(.*)$/.exec(lines[i]);
     if (!m || Number(m[2]) !== id) continue;
-    let rest = m[3].replace(/\s*due=\d{4}-\d{2}-\d{2}/g, '');
+    // Strip both annotations and re-add, so unticking an item clears its importance and
+    // deadline rather than leaving orphaned metadata on a `[ ]` line.
+    let rest = m[3].replace(/\s*(?:due=\d{4}-\d{2}-\d{2}|imp=[123])/g, '');
+    if (checked && imp) rest = `${rest.replace(/\s+$/, '')}  imp=${imp}`;
     if (checked && due) rest = `${rest.replace(/\s+$/, '')}  due=${due}`;
     lines[i] = `- [${checked ? 'x' : ' '}] m${id} ${rest}`;
     found = true;
@@ -160,6 +194,18 @@ button.y.on{background:var(--yes);border-color:var(--yes);color:#fff}
 button.n.on{background:#464d57;border-color:#464d57}
 input[type=date]{font:inherit;background:#1b1f27;color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:4px 8px}
 .hint{color:var(--dim);font-size:12px}
+.sec{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--dim);margin:18px 0 10px;font-weight:600;cursor:pointer}
+.askq{color:#c9a227}
+.exch{margin:6px 0 8px;border-left:2px solid var(--line);padding-left:10px}
+.ln{white-space:pre-wrap;word-break:break-word;padding:1px 0}
+.ln.them{color:#e8c56a}
+.ln.mine{color:var(--fg)}
+.ln.none{color:#e06c6c;font-style:italic}
+details summary{cursor:pointer}
+.weakwrap{margin-top:8px;opacity:.85}
+.imp{display:inline-flex;gap:6px;align-items:center;margin-left:10px}
+button.i{padding:4px 11px}
+button.i.on{background:var(--acc);border-color:var(--acc);color:#fff}
 .done{color:var(--yes)}
 table{border-collapse:collapse;width:100%}
 td,th{text-align:left;padding:6px 10px;border-bottom:1px solid var(--line)}
@@ -192,21 +238,41 @@ function contactPage(slug) {
   const next = GOLD_CONTACTS[idx + 1];
   const done = c.items.filter((i) => i.checked).length;
 
-  const items = c.items.map((it, n) => `
+  const card = (it, n) => `
   <div class="item${it.checked ? ' on' : ''}" id="i${it.id}" data-id="${it.id}" data-n="${n}">
-    <div class="q">${n + 1}. ${esc(it.text)}<span class="why">${esc(it.why)}</span></div>
-    <div class="ctx" id="ctx${it.id}">${renderCtx(contextFor(slug, it.id))}</div>
-    <div class="ctxbar">
-      <button onclick="widen(${it.id})">load 200 more before / 100 after</button>
-      <span class="hint" id="cn${it.id}"></span>
+    <div class="q">${n + 1}. ${it.ask ? `<span class="askq">${esc(it.ask.who)} asked:</span> ${esc(it.ask.body)}` : esc(it.text)}</div>
+    <div class="exch">
+      ${it.ask ? `<div class="ln them">m${it.ask.id} ${esc(it.ask.who)}: ${esc(it.ask.body)}</div>` : '<div class="ln none">no request from them — Nathan volunteered this</div>'}
+      ${it.said.map((s) => `<div class="ln mine">m${s.id} Nathan: ${esc(s.body)}</div>`).join('')}
     </div>
+    <details><summary class="hint">full conversation (${it.ids.length} message${it.ids.length > 1 ? 's' : ''} in this thread)</summary>
+      <div class="ctx" id="ctx${it.id}">${renderCtx(contextForThread(slug, it))}</div>
+      <div class="ctxbar">
+        <button onclick="widen(${it.id})">load more</button>
+        <span class="hint" id="cn${it.id}"></span>
+      </div>
+    </details>
     <div class="row">
-      <button class="y${it.checked ? ' on' : ''}" onclick="mark(${it.id},1)">commitment</button>
+      <button class="y${it.checked ? ' on' : ''}" onclick="mark(${it.id},1)">task</button>
       <button class="n${it.checked ? '' : ' on'}" onclick="mark(${it.id},0)">no</button>
-      <span class="hint">deadline (optional)</span>
-      <input type="date" value="${esc(it.due)}" onchange="mark(${it.id},1,this.value)">
+      <span class="imp" id="imp${it.id}" style="${it.checked ? '' : 'display:none'}">
+        importance
+        ${[1, 2, 3].map((v) => `<button class="i${it.imp === v ? ' on' : ''}" data-v="${v}" onclick="setImp(${it.id},${v})">${v}</button>`).join('')}
+        <span class="hint">3 = someone is blocked · 1 = minor</span>
+        <input type="date" value="${esc(it.due)}" title="deadline (optional)" onchange="mark(${it.id},1,this.value)">
+      </span>
     </div>
-  </div>`).join('');
+  </div>`;
+
+  const strong = c.items.filter((i) => i.tier === 'strong');
+  const weak = c.items.filter((i) => i.tier !== 'strong');
+  const items = `
+    <h2 class="sec">Likely tasks <span class="hint">— they asked, you agreed, not routine</span></h2>
+    ${strong.length ? strong.map((it, n) => card(it, n)).join('') : '<p class="hint">none in this window</p>'}
+    <details class="weakwrap"${weak.some((w) => w.checked) ? ' open' : ''}>
+      <summary class="sec">Weaker candidates (${weak.length}) <span class="hint">— you volunteered it, or it is routine. Skim; most are no.</span></summary>
+      ${weak.map((it, n) => card(it, strong.length + n)).join('')}
+    </details>`;
 
   return `<!doctype html><meta charset="utf-8"><title>${esc(slug)} — labelling</title><style>${CSS}</style>
   <header>
@@ -250,6 +316,15 @@ function contactPage(slug) {
   }
   function go(d){ cur = Math.max(0, Math.min(N-1, cur+d)); const e=document.querySelectorAll('.item')[cur];
     if(e) e.scrollIntoView({block:'center',behavior:'smooth'}); paint(); }
+  function setImp(id, v){
+    const box = document.getElementById('imp'+id);
+    box.querySelectorAll('button.i').forEach(b=>b.classList.toggle('on', +b.dataset.v===v));
+    mark(id, 1);
+  }
+  function impOf(id){
+    const b = document.querySelector('#imp'+id+' button.i.on');
+    return b ? +b.dataset.v : 0;
+  }
   async function mark(id, val, due){
     const box = document.getElementById('i'+id);
     // Optimistic paint, reverted if the write fails — a silently dropped label is the
@@ -257,9 +332,12 @@ function contactPage(slug) {
     box.classList.toggle('on', !!val);
     box.querySelector('.y').classList.toggle('on', !!val);
     box.querySelector('.n').classList.toggle('on', !val);
+    const impBox = document.getElementById('imp'+id);
+    if(impBox) impBox.style.display = val ? '' : 'none';
     paint();
     const r = await fetch('/api/label', {method:'POST', headers:{'content-type':'application/json'},
-      body: JSON.stringify({slug:${JSON.stringify(slug)}, id, checked:!!val, due: due||box.querySelector('input').value||''})});
+      body: JSON.stringify({slug:${JSON.stringify(slug)}, id, checked:!!val,
+        due: due||(box.querySelector('input[type=date]')||{}).value||'', imp: impOf(id)})});
     if(!r.ok){ alert('save FAILED for m'+id+' — reload before continuing'); }
   }
   document.addEventListener('keydown', e=>{
@@ -291,7 +369,8 @@ const server = http.createServer((req, res) => {
       try {
         const b = JSON.parse(raw);
         if (!GOLD_CONTACTS.some((g) => g.slug === b.slug)) return send(400, 'bad slug', 'text/plain');
-        const ok = writeLabel(b.slug, Number(b.id), !!b.checked, /^\d{4}-\d{2}-\d{2}$/.test(b.due || '') ? b.due : '');
+        const imp = [1, 2, 3].includes(Number(b.imp)) ? Number(b.imp) : 0;
+        const ok = writeLabel(b.slug, Number(b.id), !!b.checked, /^\d{4}-\d{2}-\d{2}$/.test(b.due || '') ? b.due : '', imp);
         return send(ok ? 200 : 404, ok ? 'ok' : 'no such candidate', 'text/plain');
       } catch (e) {
         return send(500, String(e.message), 'text/plain');
