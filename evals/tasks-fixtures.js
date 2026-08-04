@@ -50,6 +50,14 @@ const CONTAMINATED = new Set([
 // failure mode the eval could not otherwise see.
 const GOLD_CONTACTS = [
   { slug: 'katia-jacoby', days: 7, note: 'partner — dense domestic logistics, highest commitment rate' },
+  // CHARLES IS USABLE DESPITE BEING CONTAMINATED, because contamination has a ceiling.
+  // The ledger Fable read while drafting prompts/tasks*.md ended at m90514, and the
+  // highest message id cited as a worked example anywhere in those prompts is m90393.
+  // A window floored ABOVE m90514 therefore contains nothing the prompt was written
+  // against. Nathan asked for these datapoints specifically ("he had a recent
+  // conversation with me where he gave me a task and i still haven't gotten to it") —
+  // the rush business-cards exchange at m90968-m90973, which is live and unfinished.
+  { slug: 'charles-wu', sinceId: 90515, note: 'club business — post-contamination window only (Fable read <= m90514)' },
   { slug: 'vlad-munteanu', days: 240, note: 'friend, low volume — sparse-thread control' },
   { slug: 'caden-chiang', days: 90, note: 'friend' },
   { slug: 'runqi-gao', days: 365, note: 'friend, sparse' },
@@ -121,6 +129,27 @@ const ROUTINE = new RegExp([
 // from the gold set, and the tiering below means a false one only costs a glance.
 const ASK = /\b(?:can|could|would|will|cud|cn)\s?(?:you|u|y|ya)\b|\bpls\b|\bplease\b|\bplz\b|\bdon'?t forget\b|\bmake sure\b|\b(?:u|you) should\b|\bmind (?:sending|grabbing|picking|doing)\b|\bsend me\b|\bhelp me\b|\bremind me\b|\bneed (?:you|u|ur|your)\b|\byes pls\b|\byea do\b|\bdo it\b|\bgo ahead\b/i;
 
+// NATHAN'S EXPLICIT OPT-IN. His idea: *"if i say 'i'll make sure to' (make sure is the
+// key word), then it is a signal that it is a todo item. then, in the future, when i have
+// conversations, i can just say it when i want it to be added to the todo list."*
+//
+// This is the one signal that BYPASSES the ask gate. Everywhere else a commitment needs
+// the contact to have asked, because Nathan volunteering things unprompted was the main
+// source of junk — but "make sure" IS him asking, deliberately, for it to be tracked.
+// Refusing it because nobody else requested it would defeat the entire point of having a
+// phrase you can say on purpose.
+//
+// Deliberately narrow. It must be Nathan committing ("i'll make sure to X"), not him
+// asking the contact ("make sure you X"), which is already a REQUEST pattern above.
+const OPT_IN = /\b(?:i'?ll|i will|im gonna|i'?m gonna|lemme|let me)\s+make sure\b|\bmake sure (?:to|i|that i)\b/i;
+
+// A REFUSAL, however much commitment-shaped language follows it. Ken's "dude u should
+// just do that" -> "nah bro in that year … i'll keep on interviewing and work for another
+// company" reached the STRONG tier: there was an ask, and "i'll keep on interviewing"
+// matched an undertaking pattern. But Nathan said no. Nathan flagged it himself: "he said
+// that i should do it, but i said no and didn't agree to it."
+const REFUSAL = /^\s*(?:nah+|no+|nope|naw|nvm|never ?mind|i'?m good|im good|hard pass|i'?ll pass)\b/i;
+
 const ASK_LOOKBACK = 6;          // messages before an assent in which an ask counts
 const THREAD_GAP_MS = 2 * 3600 * 1000;
 // Gap-based merging chains transitively: in a conversation where every message is
@@ -166,8 +195,20 @@ function withAsks(msgs, cands) {
     for (let j = Math.max(0, c.i - ASK_LOOKBACK); j < c.i; j += 1) {
       if (msgs[j].sender !== 'Nathan' && ASK.test(spoken(msgs[j].body))) askIdx = j;
     }
-    const routine = ROUTINE.test(spoken(c.m.body)) || (askIdx >= 0 && ROUTINE.test(spoken(msgs[askIdx].body)));
-    return { ...c, askIdx, routine, tier: (askIdx >= 0 && !routine) ? 'strong' : 'weak' };
+    const body = spoken(c.m.body);
+    const routine = ROUTINE.test(body) || (askIdx >= 0 && ROUTINE.test(spoken(msgs[askIdx].body)));
+    const optIn = OPT_IN.test(body);
+    const refused = REFUSAL.test(body);
+
+    // Precedence matters. A refusal is never a task no matter what follows it. The opt-in
+    // phrase promotes regardless of whether anyone asked — that is its purpose. Otherwise
+    // the ask gate applies.
+    let tier;
+    if (refused) tier = 'weak';
+    else if (optIn) tier = 'strong';
+    else tier = (askIdx >= 0 && !routine) ? 'strong' : 'weak';
+
+    return { ...c, askIdx, routine, optIn, refused, tier };
   });
 }
 
@@ -186,9 +227,10 @@ function toThreads(msgs, cands) {
       last.members.push(c);
       last.endAt = t;
       if (c.askIdx >= 0 && last.askIdx < 0) last.askIdx = c.askIdx;
+      if (c.optIn) last.optIn = true;
       continue;
     }
-    threads.push({ tier: c.tier, members: [c], askIdx: c.askIdx, startAt: t, endAt: t });
+    threads.push({ tier: c.tier, members: [c], askIdx: c.askIdx, optIn: c.optIn, refused: c.refused, startAt: t, endAt: t });
   }
   // The id a prompt would cite is Nathan's assent, so the thread is keyed on the FIRST
   // assent in it — matching what prompts/tasks.md is told to emit.
@@ -232,7 +274,8 @@ function threadBlock(msgs, t) {
   const L = [];
   const idList = t.ids.join(',');
   const head = msgs[t.members[0].i];
-  L.push(`- [ ] m${t.id} (${t.tier}) ids=${idList}  ${head.sender}: ${String(head.body).slice(0, 90)}`);
+  const why = t.optIn ? 'opt-in' : t.refused ? 'refused' : t.askIdx >= 0 ? 'asked' : 'unprompted';
+  L.push(`- [ ] m${t.id} (${t.tier}) ids=${idList} why=${why}  ${head.sender}: ${String(head.body).slice(0, 90)}`);
   if (t.askIdx >= 0) L.push(`      ASK  m${msgs[t.askIdx].id} ${msgs[t.askIdx].sender}: ${String(msgs[t.askIdx].body).slice(0, 140)}`);
   for (const mem of t.members) {
     L.push(`      SAID m${mem.m.id} ${String(mem.m.body).slice(0, 140)}`);
@@ -359,8 +402,10 @@ function build(force = false) {
   const db = new DatabaseSync(CRM_DB, { readOnly: true });
   const summary = [];
   try {
-    for (const { slug, days, note } of GOLD_CONTACTS) {
-      if (CONTAMINATED.has(slug)) { console.log(`${slug}: SKIPPED (contaminated)`); continue; }
+    for (const { slug, days, sinceId, note } of GOLD_CONTACTS) {
+      // A contaminated contact is allowed ONLY with an explicit id floor above
+      // everything the prompt author saw. Without one it is refused, as before.
+      if (CONTAMINATED.has(slug) && !sinceId) { console.log(`${slug}: SKIPPED (contaminated, no sinceId floor)`); continue; }
 
       // FROZEN MEANS FROZEN. The window is anchored to MAX(sent_at), which advances as
       // new messages arrive, so a rebuild silently produces a different message set —
@@ -377,12 +422,15 @@ function build(force = false) {
       }
       const last = db.prepare('SELECT MAX(sent_at) t, MAX(id) i FROM messages WHERE contact_slug = ?').get(slug);
       if (!last || !last.t) { console.log(`${slug}: no messages`); continue; }
-      // Anchored to the contact's own last message, never wall-clock, so rebuilding
-      // this file tomorrow produces the same window.
-      const from = last.t - days * DAY;
-      const msgs = db.prepare(
-        'SELECT id, sent_at, sender, body FROM messages WHERE contact_slug = ? AND sent_at >= ? AND body IS NOT NULL AND TRIM(body) <> \'\' ORDER BY id',
-      ).all(slug, from);
+      // Two ways to bound a fixture, and a contact declares exactly one:
+      //   sinceId — a hard message-id floor, used to step over a contaminated range.
+      //   days    — a time window anchored to the contact's own last message, never
+      //             wall-clock, so rebuilding this file tomorrow gives the same window.
+      const SQL_BASE = 'SELECT id, sent_at, sender, body FROM messages WHERE contact_slug = ?';
+      const SQL_TAIL = ' AND body IS NOT NULL AND TRIM(body) <> \'\' ORDER BY id';
+      const msgs = sinceId
+        ? db.prepare(`${SQL_BASE} AND id >= ?${SQL_TAIL}`).all(slug, sinceId)
+        : db.prepare(`${SQL_BASE} AND sent_at >= ?${SQL_TAIL}`).all(slug, last.t - days * DAY);
       if (!msgs.length) { console.log(`${slug}: nothing in window`); continue; }
 
       const nameRow = db.prepare('SELECT name FROM contacts WHERE file_path = ?').get(`data/contacts/${slug}.md`);
@@ -420,7 +468,67 @@ function build(force = false) {
   console.log(`\n${total} candidates across ${summary.length} contacts. Tick the real ones with [x].`);
 }
 
+// RE-TIER IN PLACE. Tier rules keep improving (the refusal rule, the opt-in override),
+// but a checklist is frozen and hand-labelled — Nathan's ticks and importance ratings
+// cost real time and must survive a rule change. --force would rebuild and discard them.
+//
+// So: recompute threads from the frozen ledger, match each existing checklist entry to a
+// recomputed thread by ID OVERLAP (not by primary id, which can shift when thread
+// boundaries change), and rewrite ONLY the `(tier)` and `why=` fields. The `[x]`, imp=,
+// due= and every context line are left exactly as they are. An entry with no match is
+// left alone and reported rather than guessed at.
+function retier() {
+  const db = new DatabaseSync(CRM_DB, { readOnly: true });
+  let changed = 0;
+  let unmatched = 0;
+  try {
+    for (const { slug } of GOLD_CONTACTS) {
+      const lf = path.posix.join(LEDGER_DIR, `${slug}.txt`);
+      const gf = path.posix.join(GOLD_DIR, `${slug}.md`);
+      if (!fs.existsSync(lf) || !fs.existsSync(gf)) continue;
+
+      // Rebuild candidate threads from the FROZEN ledger text, not from the archive, so
+      // re-tiering can never widen or shift the fixture.
+      const msgs = [];
+      for (const line of fs.readFileSync(lf, 'utf8').split(/\r?\n/)) {
+        const m = /^\[([^\]]+)\]\s*⟨m(\d+)⟩\s*([^:]+):\s?([\s\S]*)$/.exec(line);
+        if (m) msgs.push({ id: Number(m[2]), sent_at: Date.parse(m[1].replace(' ', 'T')) || 0, sender: m[3].trim(), body: m[4] });
+      }
+      if (!msgs.length) continue;
+      const th = buildThreads(msgs);
+      const all = [...th.strong, ...th.weak];
+
+      const lines = fs.readFileSync(gf, 'utf8').split(/\r?\n/);
+      let touched = 0;
+      for (let i = 0; i < lines.length; i += 1) {
+        const m = /^(- \[[ xX]\]\s*m(\d+)\s*)\((\w+)\)(\s*ids=([\d,]+))?(\s*why=\S+)?(.*)$/.exec(lines[i]);
+        if (!m) continue;
+        const ids = (m[5] || m[2]).split(',').map(Number).filter(Boolean);
+        const hit = all.find((t) => t.ids.some((x) => ids.includes(x)));
+        if (!hit) { unmatched += 1; continue; }
+        const why = hit.optIn ? 'opt-in' : hit.refused ? 'refused' : hit.askIdx >= 0 ? 'asked' : 'unprompted';
+        const rebuilt = `${m[1]}(${hit.tier}) ids=${hit.ids.join(',')} why=${why}${m[7]}`;
+        if (rebuilt !== lines[i]) { lines[i] = rebuilt; touched += 1; }
+      }
+      if (touched) {
+        const tmp = `${gf}.tmp-${process.pid}`;
+        fs.writeFileSync(tmp, lines.join('\n'));
+        fs.renameSync(tmp, gf);
+        changed += touched;
+      }
+      const g = parseGold(gf);
+      console.log(`${slug.padEnd(16)} ${touched} entr${touched === 1 ? 'y' : 'ies'} re-tiered · `
+        + `${g.threads.filter((t) => t.tier === 'strong').length} strong · `
+        + `${g.threads.filter((t) => t.checked).length} task(s) kept`);
+    }
+  } finally {
+    try { db.close(); } catch { /* closed */ }
+  }
+  console.log(`\n${changed} entries updated, ${unmatched} unmatched (left untouched). Labels preserved.`);
+}
+
 function main() {
+  if (process.argv.includes('--retier')) { retier(); return; }
   if (process.argv.includes('--status')) {
     const st = goldStatus();
     if (!st.length) { console.log('no checklists yet — run without --status first'); return; }
