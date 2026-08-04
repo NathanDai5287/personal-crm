@@ -18,8 +18,9 @@
 // This replaced an LLM pass that judged an entire ledger for commitments. That question had
 // no stable answer — four rounds of amendments grew the prompt to 27KB and the eval still
 // landed at 80% precision / 67% recall, with every round being Nathan correcting the
-// model's taste. prompts/tasks-full.md is that prompt, retained for a one-off retroactive
-// sweep, not wired to anything.
+// model's taste. That prompt and its whole eval apparatus were DELETED, not retired —
+// Nathan's call, after deciding retroactive capture is not worth having. Recoverable from
+// git history at 2303da2 if a one-off sweep is ever wanted.
 //
 // WHY A SEPARATE PASS instead of asking the merge for tasks: a merge edits prose and
 // is judged on prose. Bolting a JSON side-channel onto it would couple two failure
@@ -100,9 +101,9 @@ function ledgerIds(text) {
   return s;
 }
 
-// opts.promptFile / opts.model let the eval sweep variants without going through env
-// vars — the module-level PROMPT_FILE and MODEL are read once at require time, so
-// evals/tasks-run.js could not vary them per call otherwise.
+// opts.promptFile / opts.model override the module-level PROMPT_FILE and MODEL, which are
+// read once at require time and so cannot be varied per call by an env var. Kept for
+// testing a prompt variant against a fixture without touching the environment.
 function extractFor(slug, ledgerPath, today, opts = {}) {
   const ledger = fs.readFileSync(ledgerPath, 'utf8');
   const ids = ledgerIds(ledger);

@@ -13,6 +13,62 @@ Newest first.
 
 ---
 
+## 2026-08-04
+
+### DECISION — the full-ledger tasks pass is DELETED, not retired
+Nathan: *"lets just scan for 'make sure'. i will just say it in the future. it is not
+important that every past task is picked up"* and then *"lets remove the LLM pass that will
+scrape all messages."*
+
+Deleted: `prompts/tasks.md` (27KB, four rounds of amendments), `tasks-v2.md`, `tasks-v3.md`,
+`evals/tasks-run.js`, `evals/tasks-fixtures.js`, `evals/label-ui.js`. Recoverable from git
+at 2303da2. Kept: `lib/task-trigger.js`, `prompts/tasks-trigger.md` (1,237 words),
+`evals/tasks-contam.js` (decoupled from the deleted fixtures module), and
+`data/_eval-tasks/` — the frozen ledgers are still the only corpus the contamination guard
+can compare against, and Nathan's six hand labels document why the design changed.
+
+WHY IT DIED, since the effort was substantial. The pass asked an LLM to judge which
+commitments deserved tracking. That has no stable answer: every amendment was Nathan
+correcting the model's *taste* — whose commitments count, is it routine, is it important
+enough, was that a refusal. Taste was the wrong thing to automate. The eval built to
+settle it landed at 80% adjusted precision / 67% recall on six tasks, which is respectable
+and still not a list you would trust unreviewed.
+
+The replacement inverts the split: **a regex decides WHETHER, the model decides WHAT.**
+
+### SURPRISE — bare "make sure to X" means YOU make sure
+The first trigger pattern accepted it. Against the real archive it fires 25 times in two
+years and essentially none are tasks, because English drops the subject in imperatives:
+"make sure to drink water", "make sure to take the 280", "make sure to wear a swimsuit in
+case you get wet", "make sure to carry a firearm". A todo list of advice Nathan gave other
+people is precisely the failure the simplification was meant to escape.
+
+Requiring an explicit first-person subject: 25 -> 7. Restricting to future-commitment forms
+(`i'll` / `i will` / `imma` / `i'm gonna` + make sure) — literally what he specified: 4 over
+two years, 0.17/month. That also drops immediate self-checks ("lemme make sure walmart is
+open") and past tense ("i need to make sure that i had it on the way in"), neither of which
+is a commitment.
+
+**Measure a trigger phrase against the real corpus before shipping it.** The phrase already
+had a dominant meaning in his usage, and it was not the one we assumed.
+
+### DECISION — silence is the failure mode, so it is made loud
+A trigger design fails when Nathan thinks he flagged something and nothing happened. Two
+guards: any line containing "make sure" that does not qualify is printed as a NEAR-MISS,
+and a trigger the model returns nothing for is reported as DROPPED. The regex already
+decided it is a task, so the model is not permitted to quietly disagree.
+
+### OPEN — two costs Nathan has accepted, recorded so nobody re-litigates them
+1. **Commitments others ask for are now invisible** unless he remembers the phrase at the
+   moment of agreeing — and the moments he most needs a tracker are the ones where he agrees
+   distractedly. He traded recall on forgotten commitments for precision. Forgotten
+   commitments were arguably the product.
+2. **No discharge detection.** The old prompt suppressed commitments the ledger showed
+   fulfilled. Since tasks now only run forward, this is mostly moot — but a trigger followed
+   by "sent it" three lines later still becomes a task.
+
+---
+
 ## 2026-08-03 (night)
 
 ### DECISION — a prompt may never quote its own eval fixture, and this is now enforced

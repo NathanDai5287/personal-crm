@@ -10,8 +10,9 @@
 //
 //   - merge-v5 embedded worked examples built from arshia and charles, who are also merge
 //     fixtures. The eval had to grow a held-out/contaminated split to stay meaningful.
-//   - prompts/tasks.md was given a Charles exchange as an example while that same
-//     exchange was the SOLE strong candidate in the charles gold file.
+//   - the (now retired) full-ledger tasks prompt was given a Charles exchange as an
+//     example while that same exchange was the SOLE strong candidate in the charles gold
+//     file.
 //   - after fixing that, an audit found the Caden and Katia examples quoted seven and
 //     eight fixture ids respectively — including two of Nathan's six labelled tasks.
 //
@@ -24,13 +25,15 @@
 
 const fs = require('fs');
 const path = require('path');
-const { ROOT } = require('../lib/config');
-const { LEDGER_DIR, GOLD_DIR } = require('./tasks-fixtures');
+const { ROOT, DATA_DIR } = require('../lib/config');
 
-// tasks-trigger.md is the LIVE prompt; tasks-full.md is the retired full-ledger one, kept
-// for a possible one-off retroactive sweep. Both are checked — a retired prompt that gets
-// un-retired should not smuggle contamination back in.
-const PROMPTS = ['prompts/tasks-trigger.md', 'prompts/tasks-full.md', 'prompts/tasks-v2.md', 'prompts/tasks-v3.md'];
+// Inlined, because evals/tasks-fixtures.js is gone — it built the gold set for the retired
+// full-ledger design. The frozen ledgers stay on disk: they are still the only corpus this
+// check can compare a prompt against.
+const LEDGER_DIR = path.posix.join(DATA_DIR, '_eval-tasks', 'ledgers');
+const GOLD_DIR = path.posix.join(DATA_DIR, '_eval-tasks', 'gold');
+
+const PROMPTS = ['prompts/tasks-trigger.md'];
 
 // Ids the prompt cites, in either form it can appear: a ⟨m…⟩ ledger line inside a worked
 // example, or a "msg_id" in an expected-output block.

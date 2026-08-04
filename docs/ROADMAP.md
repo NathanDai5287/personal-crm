@@ -25,41 +25,20 @@ Ordered roughly by how much they matter, not by effort.
 
 ## Tasks / todo list
 
-- [ ] **Reconciliation pass — the fourth LLM call site.** `prompts/tasks.md` only scans
-  for kill conditions (fulfilled / cancelled / superseded) *within one chunk*, so a
-  commitment made in chunk 3 and fulfilled in chunk 40 arrives looking live. Needed
-  before tasks run over the backfill. Input is small and cheap: the accumulated draft
-  list plus the messages after each draft's `source_msg_id`, answering only "which of
-  these are already done?". Deliberately NOT folded into `tasks.md` — different
-  question, and merging them makes both harder to eval.
-- [ ] **Wire `crm-tasks.js` into `crm-daily.js`** as a step, after merge.
-- [ ] **Move the importance anchors to match Nathan's labels.** The rubric anchors
-  importance 2 with "building a small app a friend asked for"; he rated that task 1. The
-  beta-link share is anchored 1; his equivalent share is 2. Wait until there are more than
-  six labelled tasks, then re-anchor from his data rather than from invented examples.
-- [ ] **Decide whether `prompts/tasks.md` is too long.** 9,557 -> 27,438 chars over four
-  amendments. v2/v3 are ~1,600-word comparators, so the eval measures this incidentally —
-  if V1 does not clearly beat them, the length is not buying anything.
-- [ ] **Grow the gold set past six tasks.** Six is enough to catch gross errors and not
-  enough to rank prompts. Uncontaminated contacts with volume remain: tiffany (2,709 msgs),
-  ritvik-irigireddy, gavin-sontag, noah-bates. Same `sinceId` trick works for any
-  contaminated contact whose prompt-visible range has a ceiling.
-- [ ] **Tasks eval, layer 2: title quality.** Precision/recall says the right *line* was
-  found; it says nothing about whether "Send Katia the thing" is checkable six weeks
-  later. Needs a judge over true positives only.
-- [ ] **Deadline accuracy.** Not scored — gold has no deadline labels. Add an optional
-  `due=YYYY-MM-DD` annotation to checklist lines and score it when present.
-- [ ] **`owner` column is now vestigial** — always `'nathan'` after the Nathan-only
-  decision. Drop it, or keep it for a future waiting-on feature. Decide, don't drift.
-- [ ] **Actionable-vs-context split.** `merge.md` currently lumps "things to do"
-  and "things they mentioned that matter to them" into one `## Talking points`
-  section, so the todo list still shows non-actions ("Patricia finally moved out").
-  Fix is in the prompt: emit an explicit action or mark context separately.
-- [ ] **Edit tasks in the UI** — add, reword, delete by hand. Only done/undone works
-  today.
+- [ ] **Wire `crm-tasks.js` into `crm-daily.js`** as a step, after merge. Cheap now: a
+  ledger with no "i'll make sure" costs zero model calls, so this adds nothing to a normal
+  run.
+- [ ] **An eval for `prompts/tasks-trigger.md`.** The old precision/recall eval is gone with
+  the design it measured — the regex now determines recall, so there is nothing to measure
+  there. What IS worth measuring is the model's remaining job: given a trigger and its
+  context, is the title self-contained six weeks later, is the deadline right, is the
+  importance sane. That needs fixtures containing actual triggers, which do not exist yet
+  (0 across 4,541 real messages) — so it has to wait until Nathan has used the phrase a few
+  times. `evals/tasks-contam.js` survives and still guards the live prompt.
 - [ ] **Snooze / hide** a task without marking it done.
 - [ ] Decide what to do with the `reminders` table: `crm.db` has it, it has zero
   rows, nothing writes to it. Either wire it up or drop it.
+- [ ] **`owner` column is vestigial** — always `'nathan'`. Drop it or keep it deliberately.
 
 ## Manual overrides (designed, not built)
 
