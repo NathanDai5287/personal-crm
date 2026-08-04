@@ -76,7 +76,27 @@ function readChecklist(slug) {
     const s = /^\s+SAID\s+m(\d+)\s+(.*)$/.exec(line);
     if (s) cur.said.push({ id: Number(s[1]), body: s[2] });
   }
-  return { file, items };
+  const reviewed = /^reviewed:\s*yes\s*$/im.test(fs.readFileSync(file, 'utf8'));
+  return { file, items, reviewed };
+}
+
+// Flip the header marker. Separate from any tick, because a contact Nathan has read and
+// found nothing in is VALID GOLD — it is the cleanest measure of precision there is —
+// while an untouched file is not, and both have zero ticks.
+function setReviewed(slug, on) {
+  const file = path.posix.join(GOLD_DIR, `${slug}.md`);
+  let src = fs.readFileSync(file, 'utf8');
+  if (/^reviewed:\s*(yes|no)\s*$/im.test(src)) {
+    src = src.replace(/^reviewed:\s*(yes|no)\s*$/im, `reviewed: ${on ? 'yes' : 'no'}`);
+  } else {
+    const lines = src.split('\n');
+    lines.splice(1, 0, '', `reviewed: ${on ? 'yes' : 'no'}`);
+    src = lines.join('\n');
+  }
+  const tmp = `${file}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, src);
+  fs.renameSync(tmp, file);
+  return true;
 }
 
 // CONTEXT COMES FROM THE FROZEN LEDGER, NOT THE CHECKLIST. The checklist embeds three
@@ -216,13 +236,17 @@ function indexPage() {
     const c = readChecklist(slug);
     if (!c) return '';
     const done = c.items.filter((i) => i.checked).length;
+    const strong = c.items.filter((i) => i.tier === 'strong').length;
     return `<tr><td><a href="/c/${esc(slug)}">${esc(slug)}</a></td>
-      <td>${c.items.length}</td><td class="${done ? 'done' : ''}">${done}</td>
+      <td>${strong}</td><td>${c.items.length - strong}</td><td class="${done ? 'done' : ''}">${done}</td>
+      <td>${c.reviewed ? '<span class="done">reviewed</span>' : '<span class="hint">not reviewed</span>'}</td>
       <td class="hint">${esc(note)}</td></tr>`;
   }).join('');
   return `<!doctype html><meta charset="utf-8"><title>Gold labelling</title><style>${CSS}</style>
   <header><h1>Tasks gold set</h1><span class="hint">tick the lines that are real commitments of yours</span></header>
-  <main><table><tr><th>contact</th><th>candidates</th><th>marked yes</th><th></th></tr>${rows}</table>
+  <main><table><tr><th>contact</th><th>strong</th><th>weak</th><th>tasks</th><th>status</th><th></th></tr>${rows}</table>
+  <p class="hint">A contact you reviewed with <b>zero</b> tasks is still valid gold — it is
+  the cleanest measure of precision. Mark it reviewed so the eval can use it.</p>
   <p class="hint">Writes straight to <code>data/_eval-tasks/gold/*.md</code>. Then run
   <code>node evals/tasks-run.js --variant v1,v2,v3</code>.</p></main>`;
 }
@@ -280,6 +304,7 @@ function contactPage(slug) {
     <div class="bar"><i id="bar" style="width:${c.items.length ? (done / c.items.length) * 100 : 0}%"></i></div>
     <span class="prog" id="prog">${done} / ${c.items.length} marked</span>
     <span class="hint">j/k move · y yes · n no · saves instantly</span>
+    <button id="rvbtn" class="${c.reviewed ? 'y on' : ''}" onclick="toggleReviewed()">${c.reviewed ? 'reviewed ✓' : 'mark reviewed'}</button>
     ${next ? `<a href="/c/${esc(next.slug)}">next: ${esc(next.slug)} &rarr;</a>` : '<span class="done">last contact</span>'}
   </header>
   <main>${items || '<p class="hint">no candidates</p>'}</main>
@@ -307,6 +332,16 @@ function contactPage(slug) {
     note.textContent = j.count + ' messages shown' + (j.truncated ? ' (whole ledger)' : '');
     const h = box.querySelector('.here');
     if(h) box.scrollTop = h.offsetTop - box.clientHeight/2 + h.clientHeight/2;
+  }
+  let REVIEWED = ${c.reviewed ? 'true' : 'false'};
+  async function toggleReviewed(){
+    REVIEWED = !REVIEWED;
+    const b = document.getElementById('rvbtn');
+    b.textContent = REVIEWED ? 'reviewed ✓' : 'mark reviewed';
+    b.className = REVIEWED ? 'y on' : '';
+    const r = await fetch('/api/reviewed', {method:'POST', headers:{'content-type':'application/json'},
+      body: JSON.stringify({slug: SLUG, reviewed: REVIEWED})});
+    if(!r.ok) alert('failed to save reviewed state');
   }
   function paint(){
     document.querySelectorAll('.item').forEach((e,i)=>e.classList.toggle('cur', i===cur));
@@ -372,6 +407,22 @@ const server = http.createServer((req, res) => {
         const imp = [1, 2, 3].includes(Number(b.imp)) ? Number(b.imp) : 0;
         const ok = writeLabel(b.slug, Number(b.id), !!b.checked, /^\d{4}-\d{2}-\d{2}$/.test(b.due || '') ? b.due : '', imp);
         return send(ok ? 200 : 404, ok ? 'ok' : 'no such candidate', 'text/plain');
+      } catch (e) {
+        return send(500, String(e.message), 'text/plain');
+      }
+    });
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/reviewed') {
+    let raw = '';
+    req.on('data', (d) => { raw += d; if (raw.length > 1e4) req.destroy(); });
+    req.on('end', () => {
+      try {
+        const b = JSON.parse(raw);
+        if (!GOLD_CONTACTS.some((g) => g.slug === b.slug)) return send(400, 'bad slug', 'text/plain');
+        setReviewed(b.slug, !!b.reviewed);
+        return send(200, 'ok', 'text/plain');
       } catch (e) {
         return send(500, String(e.message), 'text/plain');
       }

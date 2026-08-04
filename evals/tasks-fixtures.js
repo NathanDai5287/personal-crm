@@ -247,6 +247,14 @@ function checklistText(slug, name, msgs, threads) {
   const L = [
     `# Gold labels — ${name} (${slug})`,
     '',
+    // REVIEWED IS SEPARATE FROM ANY TICK. "I read it and there is nothing here" and
+    // "I have not opened this yet" are both zero ticks, and the difference decides
+    // whether the contact can be scored at all. ken-chessmore exists precisely as a
+    // near-zero negative control — the most direct measure of precision there is — and
+    // without this line it could never be used, because an honest all-no verdict is
+    // indistinguishable from an untouched file.
+    'reviewed: no',
+    '',
     'One entry = one COMMITMENT THREAD, not one message. A thread may span several turns',
     'and several days; tick it once.',
     '',
@@ -294,6 +302,9 @@ function parseGold(file) {
   const importance = new Map();
   const threads = [];
   let unlabelled = 0;
+  // Separate from any tick. "I read it and found nothing" is a valid, useful verdict;
+  // "I have not opened this" is not — and both are zero ticks.
+  const reviewed = /^reviewed:\s*yes\s*$/im.test(fs.readFileSync(file, 'utf8'));
   for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
     const m = /^- \[([ xX])\]\s*m(\d+)/.exec(line);
     if (!m) continue;
@@ -319,14 +330,24 @@ function parseGold(file) {
   // be a genuine all-negative verdict, and scoring against it would report a perfect
   // precision of 0/0. The caller decides; we just report it.
   if (!yes.size) unlabelled = all.size;
-  return { yes, all, due, importance, threads, unlabelled };
+  return { yes, all, due, importance, threads, reviewed, unlabelled };
 }
 
 function goldStatus() {
   if (!fs.existsSync(GOLD_DIR)) return [];
   return fs.readdirSync(GOLD_DIR).filter((f) => f.endsWith('.md')).map((f) => {
     const g = parseGold(path.posix.join(GOLD_DIR, f));
-    return { slug: f.replace(/\.md$/, ''), candidates: g.all.size, marked: g.yes.size, untouched: !g.yes.size };
+    // Threads, not member ids: a two-turn thread is ONE judgement, and counting ids made
+    // caden read as "2/16 marked" when Nathan had made a single decision.
+    const strong = g.threads.filter((t) => t.tier === 'strong');
+    return {
+      slug: f.replace(/\.md$/, ''),
+      candidates: strong.length,
+      total: g.threads.length,
+      marked: g.threads.filter((t) => t.checked).length,
+      reviewed: g.reviewed,
+      untouched: !g.reviewed,
+    };
   });
 }
 
@@ -404,10 +425,15 @@ function main() {
     const st = goldStatus();
     if (!st.length) { console.log('no checklists yet — run without --status first'); return; }
     for (const s of st) {
-      console.log(`${s.slug.padEnd(22)} ${String(s.marked).padStart(3)}/${String(s.candidates).padEnd(4)} marked${s.untouched ? '   <- UNLABELLED' : ''}`);
+      console.log(`${s.slug.padEnd(22)} ${String(s.marked).padStart(2)} task(s) · ${String(s.candidates).padStart(2)} strong / ${String(s.total).padStart(3)} total`
+        + `${s.reviewed ? '   reviewed' : '   <- NOT REVIEWED'}`);
     }
-    const ready = st.filter((s) => !s.untouched);
-    console.log(`\n${ready.length} of ${st.length} contact(s) labelled and usable as gold.`);
+    const ready = st.filter((s) => s.reviewed);
+    console.log(`\n${ready.length} of ${st.length} contact(s) reviewed and usable as gold.`);
+    if (ready.length < st.length) {
+      console.log('A reviewed contact with ZERO tasks is still valid gold — it is the');
+      console.log('cleanest measure of precision there is. Mark it reviewed either way.');
+    }
     return;
   }
   build(process.argv.includes('--force'));

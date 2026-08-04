@@ -125,17 +125,21 @@ function main() {
     if (!fs.existsSync(lf) || !fs.existsSync(gf)) continue;
     const gold = parseGold(gf);
     if (!gold.all.size) continue;                 // nothing to label, not a case
-    if (!gold.yes.size) { unlabelled.push(slug); continue; }
+    // Gate on REVIEWED, not on "has ticks". A contact Nathan read and found nothing in
+    // is valid gold and is in fact the cleanest precision measurement available —
+    // ken-chessmore was chosen as exactly that negative control. Gating on ticks would
+    // silently exclude the case the eval most needs.
+    if (!gold.reviewed) { unlabelled.push(slug); continue; }
     cases.push({ slug, ledgerFile: lf, gold, today: todayFor(lf) });
   }
 
   if (unlabelled.length) {
     console.log(`skipping ${unlabelled.length} unlabelled: ${unlabelled.join(', ')}`);
-    console.log('  (every candidate still unticked — label them or they score as all-negative)\n');
+    console.log('  (open evals/label-ui.js and hit "mark reviewed" — zero tasks is a valid verdict)\n');
   }
   if (!cases.length) {
-    console.error('NO LABELLED CASES. Run `node evals/tasks-fixtures.js` then tick the real');
-    console.error(`commitments with [x] in ${GOLD_DIR}`);
+    console.error('NO REVIEWED CASES. Run `node evals/label-ui.js`, tick the real commitments,');
+    console.error(`and mark each contact reviewed. Files: ${GOLD_DIR}`);
     process.exit(2);
   }
 
