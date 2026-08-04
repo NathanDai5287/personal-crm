@@ -13,6 +13,62 @@ Newest first.
 
 ---
 
+## 2026-08-03 (evening, later)
+
+### DECISION — tasks are ask-gated, non-routine, and carry an importance score
+From Nathan after using the output: *"a lot of the todo items try to catch very
+unserious or minor things, such as 'im getting of work at 6 and i'll come by 7'… it
+should be things that the other person specifically asks and i confirm. it should not
+be me saying things off the top of my head unprompted."*
+
+`prompts/tasks.md` now requires FOUR parts, not three: a contact ask, Nathan's assent,
+someone waiting, and **not routine coordination**. An unprompted announcement yields
+nothing however concrete. The subtlety that needed spelling out: an offer Nathan makes
+that the contact then accepts still counts — *the acceptance is the request*.
+
+**Importance rescues a soft yes, never a no.** Nathan marked the Katia move-in ask as a
+task even though his assent was "i'll check later… we'll see". So a hedge fails an
+ordinary ask but passes an importance-3 one, at `probable`.
+
+Contract is now SEVEN keys. `importance` 1-3, and it is wired end to end — it was
+initially dropped on the floor by every layer below the prompt.
+`ALTER TABLE` migration (CREATE TABLE IF NOT EXISTS is a no-op on an existing table),
+`ORDER BY importance DESC`, badges on 3 and 1 only (2 is the common case and badging
+everything is noise), editable in the UI because the model's guess at what matters is
+exactly the judgement Nathan should overrule.
+
+### SURPRISE — the eval unit was wrong, and Nathan's own labels proved it
+He ticked m2998 and m3062 as separate commitments. They are one promise to build one
+app. The Caden thread is four messages over two days and he marked one of them.
+
+The gold set is now **threads, not messages**, and scoring matches an extraction to a
+thread if it cites ANY member id — a prompt may reasonably pick a different turn as the
+point of agreement. Per-message scoring would have counted his two-turn Caden thread as
+two golds and reported 50% recall for a prompt that got it exactly right.
+
+Applying his own rule mechanically: **158 candidates -> 10 with an ask -> 9 non-routine
+-> 6 threads**, with all three of his real commitments surviving. The 96% cut is the
+measurement that justified the prompt change, not a guess.
+
+Weak candidates are kept and collapsed rather than deleted: gold-set recall is what
+stops a correct extraction being scored a false positive.
+
+### SURPRISE — thread clustering by time gap chains transitively
+A conversation where each message is within the gap of the previous one collapses an
+entire day into one "thread". Observed: nine candidates merged from "i'll become a
+youtuber" onward into an unreviewable block. Gap alone is not enough — cap total span
+and member count too.
+
+### OPEN — the hardest routine-vs-real case, decided by inference
+Katia's Outside Lands thread (m90304-m90350): a direct all-caps ask, plain assent
+("im down", "aight lets go"), $300 tickets, future-dated. It passes every test yet
+Nathan labelled every hang-out plan a non-task. Resolved by ruling that a social plan is
+a task only where Nathan took on a concrete piece of making it happen — his labour is
+what they are counting on, not his attendance. **This was inferred from his labels, not
+stated by him.** Worth confirming.
+
+---
+
 ## 2026-08-03 (evening)
 
 ### DECISION — `merge-v6` (F) promoted to `prompts/merge.md`

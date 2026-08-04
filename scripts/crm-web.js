@@ -518,6 +518,12 @@ function tasksPage(editId = null) {
     + hidden({ id })
     + `<button class="btn ${cls}" type="submit">${label}</button></form>`;
 
+  // Importance is the sort key, so it has to be visible or the ordering looks arbitrary.
+  // 2 is the default and the common case, so only 3 and 1 are badged — badging every row
+  // would be noise.
+  const impBadge = (n) => (Number(n) === 3 ? '<span class="imp3">high</span>'
+    : Number(n) === 1 ? '<span class="imp1">minor</span>' : '');
+
   const srcHtml = (t) => `<div class="tsrc">`
     + (t.slug ? `from <a href="/c/${encodeURIComponent(t.slug)}">${esc(t.contact_name || t.slug)}</a>` : 'added by hand')
     + (t.source_msg_id ? ` · agreed in <a href="/m/${t.source_msg_id}">m${t.source_msg_id}</a>` : '')
@@ -526,7 +532,7 @@ function tasksPage(editId = null) {
     + `</div>`;
 
   const draftRow = (d) => `<li class="dr">`
-    + `<div class="dtitle">${esc(d.title)}</div>`
+    + `<div class="dtitle">${impBadge(d.importance)}${esc(d.title)}</div>`
     + (d.description ? `<div class="ddesc">${inline(d.description)}</div>` : '')
     + `<div class="dmeta">${esc(d.contact_name || d.slug)}${d.deadline ? ` · due ${esc(d.deadline)}` : ''}`
     + (d.source_msg_id ? ` · <a href="/m/${d.source_msg_id}">m${d.source_msg_id}</a>` : '')
@@ -542,6 +548,10 @@ function tasksPage(editId = null) {
     + `<label>Description<textarea name="description" rows="2">${esc(t.description || '')}</textarea></label>`
     + `<label>Deadline <span class="hint">YYYY-MM-DD, or blank</span>`
     + `<input name="deadline" value="${esc(t.deadline || '')}" placeholder="2026-09-01" maxlength="20"></label>`
+    + `<label>Importance <span class="hint">3 = someone is blocked · 1 = minor</span>`
+    + `<select name="importance">`
+    + [3, 2, 1].map((v) => `<option value="${v}"${Number(t.importance) === v ? ' selected' : ''}>${v}</option>`).join('')
+    + `</select></label>`
     + `<div class="dacts"><button class="btn ok" type="submit">save</button>`
     + `<a class="btn" href="/tasks">cancel</a></div></form>`;
 
@@ -551,7 +561,7 @@ function tasksPage(editId = null) {
     return `<li class="tr${t.status === 'done' ? ' isdone' : ''}">`
       + btn(t.status === 'done' ? 'reopen' : 'done', t.id, t.status === 'done' ? '☑' : '☐', 'box')
       + `<div class="tbody">`
-      + `<div class="tline"><span class="ttitle">${esc(t.title)}</span>`
+      + `<div class="tline">${impBadge(t.importance)}<span class="ttitle">${esc(t.title)}</span>`
       + (t.deadline ? `<span class="tdate${overdue ? ' od' : ''}">${esc(t.deadline)}</span>` : '')
       + (isEditing ? '' : `<a class="btn sm" href="/tasks?edit=${t.id}">edit</a>`)
       + `</div>`
@@ -564,6 +574,9 @@ function tasksPage(editId = null) {
   const addForm = `<form method="post" action="/tasks/add" class="add">`
     + `<input name="title" placeholder="Add a task yourself…" maxlength="300" required>`
     + `<input name="deadline" placeholder="due (optional)" maxlength="20" class="sm">`
+    + `<select name="importance" class="sm">`
+    + [3, 2, 1].map((v) => `<option value="${v}"${v === 2 ? ' selected' : ''}>imp ${v}</option>`).join('')
+    + `</select>`
     + `<button class="btn ok" type="submit">add</button></form>`;
 
   const st = `<style>
@@ -583,6 +596,8 @@ function tasksPage(editId = null) {
     .tdate{font-size:12px;color:var(--mut);font-variant-numeric:tabular-nums}
     .tdate.od{color:#c2410c;font-weight:600}
     .prob{color:#b45309}
+    .imp3{background:#b91c1c;color:#fff;font-size:11px;padding:1px 6px;border-radius:9px;margin-right:6px;vertical-align:1px}
+    .imp1{background:#e5e7eb;color:#6b7280;font-size:11px;padding:1px 6px;border-radius:9px;margin-right:6px;vertical-align:1px}
     .side{border-left:1px solid var(--line);padding-left:16px}
     @media(max-width:899px){.side{border-left:none;padding-left:0;border-top:1px solid var(--line);padding-top:12px}}
     li.dr{border:1px solid var(--line);border-radius:6px;padding:7px 8px;margin-bottom:8px;background:var(--card)}
@@ -1293,13 +1308,14 @@ function start() {
             const STATUS_ACTIONS = { accept: 'active', dismiss: 'dismissed', done: 'done', reopen: 'active' };
             if (action === 'add') {
               if (!p.get('title')) { send(400, page('Bad request', '<p>A title is required.</p>')); return; }
-              TASKS.addManual(cdb, { title: p.get('title'), deadline: p.get('deadline') || null });
+              TASKS.addManual(cdb, { title: p.get('title'), deadline: p.get('deadline') || null, importance: p.get('importance') });
             } else if (STATUS_ACTIONS[action] || action === 'edit') {
               const id = p.get('id');
               if (!/^\d+$/.test(String(id))) { send(400, page('Bad request', '<p>Bad request.</p>')); return; }
               if (action === 'edit') {
                 TASKS.updateTask(cdb, id, {
                   title: p.get('title'), description: p.get('description'), deadline: p.get('deadline'),
+                  importance: p.get('importance'),
                 });
               } else {
                 TASKS.setStatus(cdb, id, STATUS_ACTIONS[action]);

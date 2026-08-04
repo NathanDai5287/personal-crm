@@ -129,6 +129,7 @@ function extractFor(slug, ledgerPath, today, opts = {}) {
       owner: t.owner,
       deadline: t.deadline || null,
       confidence: t.confidence,
+      importance: t.importance,
       msgId: mid,
     });
   }
@@ -178,9 +179,10 @@ function main() {
       if (!res.ok) { console.log(`${slug}: ${res.error}`); continue; }
       console.log(`${slug}: ${res.tasks.length} commitment(s)${res.rejected.length ? `, ${res.rejected.length} rejected` : ''}`);
       for (const r of res.rejected) console.log(`   ! ${r}`);
+      res.tasks.sort((a, b) => TASKS.normImportance(b.importance) - TASKS.normImportance(a.importance));
       for (const t of res.tasks) {
         // No owner badge: everything that reaches here is Nathan's by construction.
-        console.log(`   - ${t.title}${t.deadline ? `  (due ${t.deadline})` : ''}  ⟨m${t.msgId}⟩ ${t.confidence}`);
+        console.log(`   [${TASKS.normImportance(t.importance)}] ${t.title}${t.deadline ? `  (due ${t.deadline})` : ''}  ⟨m${t.msgId}⟩ ${t.confidence}`);
         if (write) {
           if (TASKS.insertDraft(cdb, t) === 'inserted') totalNew += 1;
         }
