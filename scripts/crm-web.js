@@ -75,30 +75,41 @@ function inline(s) {
   out = out.replace(/(^|[\s(])(https?:\/\/[^\s<)]+)/g, (_, pre, u) => `${pre}<a href="${u}" target="_blank" rel="noopener">${u}</a>`);
   // _italic_ (avoid mangling inside words/URLs by requiring boundaries)
   out = out.replace(/(^|[\s(>])_([^_]+)_(?=$|[\s.,;:!?)<])/g, (_, pre, c) => `${pre}<em>${c}</em>`);
-  // Provenance citations → superscript links to /m/<id>.
+  // Provenance citations → superscript links.
   //
-  // TWO SHAPES, and only one used to work. The merge prompt emits one bracket per
-  // id — `⟨m28684⟩ ⟨m28709⟩ ⟨m28714⟩` — which is what citation_syntax enforces,
-  // but this only understood the comma form `⟨m1, m2⟩`. Each bracket matched
-  // separately, so each got its own <sup> with the index restarting, and three
-  // sources rendered as "1 1 1" instead of "1 2 3".
+  // ONE LINK PER CITATION, not per id. A citation is now a thread-scoped RANGE
+  // (docs/PROVENANCE-SPEC.md §1) — `⟨m90211-m90219 @m90215⟩` is a single source,
+  // the stretch, and `/m/<start>-<end>` renders it; `#m<primary>` tells that page
+  // which line to highlight. A degenerate `⟨m88104⟩` keeps its `/m/<id>` link, so
+  // Timeline lines and single-message citations render exactly as before.
   //
-  // Adjacent brackets are now coalesced into ONE <sup>, and the counter runs
-  // across the whole line so a bullet with citations in two places still numbers
+  // Adjacent brackets are coalesced into ONE <sup>, and the counter runs across
+  // the whole line so a bullet with citations in two places still numbers
   // 1,2,3,4 rather than 1,2 then 1,2. Trailing whitespace is deliberately not
   // consumed, so the space before following prose survives.
-  const GROUP = String.raw`⟨\s*m\d+(?:\s*,\s*m\d+)*\s*⟩`;
+  //
+  // Old comma-list citations (`⟨m1, m2⟩`) no longer match and fall through as
+  // plain text — accepted: the archive is cleared and every profile rewritten
+  // before this grammar goes live.
+  const GROUP = String.raw`⟨\s*m\d+(?:-m\d+)?(?:\s+@m\d+)?\s*⟩`;
+  const ONE = /⟨\s*m(\d+)(?:-m(\d+))?(?:\s+@m(\d+))?\s*⟩/g;
   let n = 0;
   out = out.replace(new RegExp(`${GROUP}(?:\\s*${GROUP})*`, 'g'), (run) => {
     const seen = new Set();
     const links = [];
-    for (const m of run.matchAll(/m(\d+)/g)) {
-      // The same id cited twice in one run would otherwise render as two
-      // differently-numbered links to the same message.
-      if (seen.has(m[1])) continue;
-      seen.add(m[1]);
+    for (const m of run.matchAll(ONE)) {
+      const start = m[1];
+      const end = m[2] || start;
+      const primary = m[3] || null;
+      // The same stretch cited twice in one run would otherwise render as two
+      // differently-numbered links to the same span.
+      const key = `${start}-${end}${primary ? `@${primary}` : ''}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
       n += 1;
-      links.push(`<a href="/m/${m[1]}" title="source message m${m[1]}">${n}</a>`);
+      const href = (end === start ? `/m/${start}` : `/m/${start}-${end}`) + (primary ? `#m${primary}` : '');
+      const label = end === start ? `m${start}` : `m${start}–m${end}`;
+      links.push(`<a href="${href}" title="source ${label}${primary ? `, key line m${primary}` : ''}">${n}</a>`);
     }
     return links.length ? `<sup class="cites">${links.join('')}</sup>` : run;
   });
@@ -665,6 +676,28 @@ function indexPage() {
   return page('Personal CRM', body, '/');
 }
 
+// Shared bubble renderer for both provenance views. Every bubble carries
+// `id="m<rowid>"` so a URL fragment can address one — `/m/<start>-<end>#m<primary>`
+// highlights the primary client-side, since the fragment never reaches the server.
+// `hitId` is the server-known highlight (the single message of /m/<id>).
+function msgBubbles(rows, hitId) {
+  const fmt = (ms) => new Date(ms).toISOString().slice(0, 16).replace('T', ' ');
+  return rows.map((m) => {
+    const mine = /^nathan$/i.test(m.sender);
+    const hit = m.id === hitId;
+    return `<div class="msg ${mine ? 'me' : 'them'}${hit ? ' hit' : ''}" id="m${m.id}">` +
+      `<div class="meta"><span class="who">${esc(m.sender)}</span><span class="ts">${esc(fmt(m.sent_at))}</span></div>` +
+      `<div class="body">${inline(m.body)}</div></div>`;
+  }).join('');
+}
+
+// Scroll the highlighted bubble into view. A `#m<id>` fragment, if present and
+// real, becomes the highlight; otherwise the server-marked `.hit` is used.
+const SCROLL_TO_HIT = `<script>(function(){`
+  + `var h=(location.hash||'').slice(1),t=h&&/^m\\d+$/.test(h)?document.getElementById(h):null;`
+  + `if(t)t.classList.add('hit');else t=document.querySelector('.msg.hit');`
+  + `if(t)t.scrollIntoView({block:'center'});})();</script>`;
+
 // Provenance view: one archived message, highlighted, with ±10 messages of
 // context from the same conversation — resolved from crm.db's archive (not
 // Signal's DB), so cited messages stay viewable even if Signal purges history.
@@ -683,21 +716,52 @@ function messagePage(id) {
       ? cdb.prepare('SELECT * FROM messages WHERE conv_id = ? AND (sent_at > ? OR (sent_at = ? AND id > ?)) ORDER BY sent_at ASC, id ASC LIMIT 10')
           .all(msg.conv_id, msg.sent_at, msg.sent_at, msg.id)
       : [];
-    const fmt = (ms) => new Date(ms).toISOString().slice(0, 16).replace('T', ' ');
-    const bubbles = [...before, msg, ...after].map((m) => {
-      const mine = /^nathan$/i.test(m.sender);
-      const hit = m.id === msg.id;
-      return `<div class="msg ${mine ? 'me' : 'them'}${hit ? ' hit' : ''}"${hit ? ' id="target"' : ''}>` +
-        `<div class="meta"><span class="who">${esc(m.sender)}</span><span class="ts">${esc(fmt(m.sent_at))}</span></div>` +
-        `<div class="body">${inline(m.body)}</div></div>`;
-    }).join('');
     const backHref = msg.contact_slug ? `/c/${encodeURIComponent(msg.contact_slug)}` : '/';
     const body = `<div class="back"><a href="${backHref}">&larr; back</a></div>` +
       `<div class="profile"><h1>${esc(msg.conversation || 'Conversation')}</h1>` +
       `<p class="sub">source message <code>m${msg.id}</code>, shown in context</p>` +
-      `<div class="chat">${bubbles}</div></div>` +
-      `<script>var t=document.getElementById('target');if(t)t.scrollIntoView({block:'center'});</script>`;
+      `<div class="chat">${msgBubbles([...before, msg, ...after], msg.id)}</div></div>` +
+      SCROLL_TO_HIT;
     return page(`m${msg.id} — ${msg.conversation || 'message'}`, body);
+  } finally {
+    try { cdb.close(); } catch { /* already closed */ }
+  }
+}
+
+// Provenance view for a RANGE citation: `/m/<start>-<end>`, optionally
+// `#m<primary>`.
+//
+// THREAD SCOPING IS DERIVED, NOT STORED (docs/PROVENANCE-SPEC.md §3). `m<id>` is
+// Signal's global messages.rowid — one insertion stream across every conversation
+// — so an unfiltered id span scoops up unrelated chats; a contact's own messages
+// are 2-6% of their ledger's id span. The range therefore means
+// `conv_id = thread(start) AND id BETWEEN start AND end`, resolved against the
+// ARCHIVE, and the gaps that leaves (ids of other conversations, ids never
+// mirrored) are normal rather than errors.
+function spanPage(start, end) {
+  if (end < start) return null;
+  let cdb;
+  try { cdb = openCrmDb(); } catch { return null; }
+  try {
+    let anchor = null;
+    try { anchor = cdb.prepare('SELECT * FROM messages WHERE id = ?').get(start); } catch { /* archive table not created yet */ }
+    if (!anchor) return null;
+    // A row archived before conv_id existed cannot be thread-filtered; show the
+    // one message rather than nothing.
+    const rows = anchor.conv_id
+      ? cdb.prepare('SELECT * FROM messages WHERE conv_id = ? AND id BETWEEN ? AND ? ORDER BY id')
+          .all(anchor.conv_id, start, end)
+      : [anchor];
+    const backHref = anchor.contact_slug ? `/c/${encodeURIComponent(anchor.contact_slug)}` : '/';
+    const span = `m${start}&ndash;m${end}`;
+    const body = `<div class="back"><a href="${backHref}">&larr; back</a></div>` +
+      `<div class="profile"><h1>${esc(anchor.conversation || 'Conversation')}</h1>` +
+      `<p class="sub">cited range <code>${span}</code> &middot; ` +
+      `${rows.length} message${rows.length === 1 ? '' : 's'} in this conversation` +
+      `${anchor.conv_id ? '' : ' (no conversation recorded for this row)'}</p>` +
+      `<div class="chat">${msgBubbles(rows, null)}</div></div>` +
+      SCROLL_TO_HIT;
+    return page(`m${start}-m${end} — ${anchor.conversation || 'range'}`, body);
   } finally {
     try { cdb.close(); } catch { /* already closed */ }
   }
@@ -1383,6 +1447,16 @@ function start() {
       if (mm) {
         const html = messagePage(Number(mm[1]));
         if (!html) { send(404, page('Not found', '<div class="back"><a href="/">&larr; All contacts</a></div><p>Message not in the archive (it may predate provenance tracking).</p>')); return; }
+        send(200, html);
+        return;
+      }
+      // A range citation: `/m/<start>-<end>`, optionally with a `#m<primary>`
+      // fragment the browser resolves. Cannot collide with /m/<id> above — the
+      // hyphen makes that pattern fail — but it must be tried before the 404.
+      const ms = url.pathname.match(/^\/m\/(\d+)-(\d+)$/);
+      if (ms) {
+        const html = spanPage(Number(ms[1]), Number(ms[2]));
+        if (!html) { send(404, page('Not found', '<div class="back"><a href="/">&larr; All contacts</a></div><p>That range does not start at a message in the archive.</p>')); return; }
         send(200, html);
         return;
       }

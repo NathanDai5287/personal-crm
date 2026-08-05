@@ -15,18 +15,52 @@
 // how similar B is to A. Both variants are graded against the same contract, and
 // the contract is written down here.
 
-const CITE = /⟨\s*m\d+(?:\s*,\s*m\d+)*\s*⟩/g;
+// THE CITATION GRAMMAR — docs/PROVENANCE-SPEC.md §1.
+//
+//   citation := "⟨" range [ " @" id ] "⟩"
+//   range    := id "-" id  |  id          ; the second form is start == end
+//   id       := "m" 1*DIGIT
+//
+// `⟨m90211-m90219 @m90215⟩` is a thread-scoped stretch plus the one line the
+// claim rests on. `⟨m88104⟩` is still legal — a degenerate range. Id LISTS
+// (`⟨m89166, m89167⟩`) are gone: two adjacent messages are a two-message range,
+// and genuinely separate moments get separate citations (§2).
+const CITE_SRC = String.raw`⟨\s*m\d+(?:-m\d+)?(?:\s+@m\d+)?\s*⟩`;
+const CITE = new RegExp(CITE_SRC, 'g');
 const CITE_ID = /m(\d+)/g;
+// Same grammar, capturing: 1 = start, 2 = end (absent when degenerate),
+// 3 = primary (absent when there is none).
+const CITE_PARTS = /⟨\s*m(\d+)(?:-m(\d+))?(?:\s+@m(\d+))?\s*⟩/g;
+
+// V4: a range may cover at most this many messages OF ITS OWN THREAD. Counted
+// from resolved rows, never as `end - start` — at the measured 2-6% density a
+// 356-id span can hold 8 of a contact's messages (spec §4).
+const MAX_RANGE_MESSAGES = 10;
 
 // Citation-shaped strings that are NOT the canonical form. Catches the glyph and
-// syntax drift the review flagged: ASCII angle brackets, parens, square brackets,
-// a bare number with no `m`, or an unclosed opener.
+// syntax drift the review flagged — ASCII angle brackets, parens, square
+// brackets, a bare number with no `m`, an unclosed opener — plus the near-misses
+// the range grammar newly invites: a typographic dash where the ASCII hyphen
+// belongs, `..` (the commit-subject span convention), the retired comma list, a
+// reversed range, and a range end that lost its `m`.
+//
+// An entry carries either `re` (matched against the text) or `find` (a function
+// returning the offending substrings). `find` exists because "reversed range"
+// is a numeric comparison, which no regex can make.
 const MALFORMED = [
   { re: /<\s*m\d+[^>]*>/g, why: 'ASCII <m…> instead of ⟨m…⟩' },
-  { re: /\(\s*m\d+(?:\s*,\s*m\d+)*\s*\)/g, why: 'parenthesised (m…)' },
-  { re: /\[\s*m\d+(?:\s*,\s*m\d+)*\s*\]/g, why: 'bracketed [m…]' },
-  { re: /⟨\s*\d+\s*⟩/g, why: 'missing the m prefix' },
-  { re: /⟨\s*m\d+(?:\s*,\s*m\d+)*\s*(?!\s*⟩)[^⟩\n]{0,20}$/gm, why: 'unclosed ⟨' },
+  { re: /\(\s*m\d+(?:\s*[,-]\s*m\d+)*(?:\s*@m\d+)?\s*\)/g, why: 'parenthesised (m…)' },
+  { re: /\[\s*m\d+(?:\s*[,-]\s*m\d+)*(?:\s*@m\d+)?\s*\]/g, why: 'bracketed [m…]' },
+  { re: /⟨\s*\d+(?:\s*-\s*\d+)?\s*⟩/g, why: 'missing the m prefix' },
+  { re: /⟨\s*m\d+[^⟩\n]{0,24}$/gm, why: 'unclosed ⟨' },
+  { re: /⟨\s*m\d+\s*[–—]\s*m?\d+[^⟩\n]*⟩/g, why: 'en/em-dash range separator (use ASCII -)' },
+  { re: /⟨\s*m\d+\s*\.\.\.?\s*m?\d+[^⟩\n]*⟩/g, why: '.. range separator (use ASCII -)' },
+  { re: /⟨\s*m\d+(?:\s*,\s*m\d+)+\s*⟩/g, why: 'comma-separated id list (use a range)' },
+  { re: /⟨\s*m\d+-\d+[^⟩\n]*⟩/g, why: 'range end missing its m (⟨m1-2⟩)' },
+  {
+    find: (text) => citations(text).filter((c) => c.end < c.start).map((c) => c.raw),
+    why: 'reversed range (end before start)',
+  },
 ];
 
 const SECTIONS = ['## What I know', '## Talking points', '## Timeline', '## Open questions'];
@@ -69,12 +103,79 @@ function parseProfile(text) {
   return { meta, sections, order, metaLines };
 }
 
+// ENDPOINTS AND PRIMARY ONLY — never the interior of a range. `⟨m90211-m90219⟩`
+// contributes m90211 and m90219, not the eight ids between them.
+//
+// This is load-bearing for two checks. `no_invented_citations` asks whether every
+// NEW id appears literally in the ledger; an interior id was never written by
+// anyone, so counting it would fail a perfectly honest citation whose middle
+// happens to fall in another conversation. `citation_carry_forward` asks whether
+// prior provenance survived a rewrite; interior ids would inflate both sides with
+// ids the model never chose. It holds by construction here: CITE matches only the
+// grammar's three id positions, so CITE_ID over a matched citation sees exactly
+// start, end and primary.
 function citationIds(text) {
   const out = new Set();
   for (const c of String(text).match(CITE) || []) {
     for (const m of c.matchAll(CITE_ID)) out.add(Number(m[1]));
   }
   return out;
+}
+
+// Structured citations: [{ raw, start, end, primary }]. `end === start` for the
+// degenerate form; `primary` is null when absent.
+function citations(text) {
+  const out = [];
+  for (const m of String(text).matchAll(CITE_PARTS)) {
+    const start = Number(m[1]);
+    out.push({
+      raw: m[0],
+      start,
+      end: m[2] === undefined ? start : Number(m[2]),
+      primary: m[3] === undefined ? null : Number(m[3]),
+    });
+  }
+  return out;
+}
+
+// A ledger line: `[2026-07-30 09:17] ⟨m90211⟩ (Nat & Kat 🥾🩷) Katia: …`. The
+// parenthesised label appears only for a group; its absence means the DM. This is
+// the thread signal the eval sandbox has instead of the archive (spec §4).
+const LEDGER_LINE = /^\[[^\]]+\]\s*⟨m(\d+)⟩\s*(?:\(([^)]*)\)\s*)?/;
+
+// Thread oracle built from the ledger, for a caller with no archive to resolve
+// against. Since 2026-08-04 the sandbox copies the whole project tree, but its
+// `data/crm.db` is a zero-row stand-in (evals/sandbox.js), so the ledger is still
+// the only thread signal a sandbox has. Returns the same shape as the
+// archive-backed resolver a runner may supply:
+//   { startFound, endFound, startThread, endThread, ids }
+// where `ids` are the ids of START's OWN THREAD inside [start, end] — the ledger
+// equivalent of `conv_id = thread(start) AND id BETWEEN start AND end` (spec §3).
+function makeLedgerRangeResolver(ledger) {
+  const threadOf = new Map();
+  const idsByThread = new Map();
+  for (const line of String(ledger || '').split('\n')) {
+    const m = LEDGER_LINE.exec(line);
+    if (!m) continue;
+    const id = Number(m[1]);
+    const label = m[2] === undefined ? '' : m[2]; // '' = the direct message
+    threadOf.set(id, label);
+    if (!idsByThread.has(label)) idsByThread.set(label, []);
+    idsByThread.get(label).push(id);
+  }
+  for (const ids of idsByThread.values()) ids.sort((a, b) => a - b);
+  return (start, end) => {
+    const startFound = threadOf.has(start);
+    const endFound = threadOf.has(end);
+    const startThread = startFound ? threadOf.get(start) : null;
+    return {
+      startFound,
+      endFound,
+      startThread,
+      endThread: endFound ? threadOf.get(end) : null,
+      ids: startFound ? (idsByThread.get(startThread) || []).filter((id) => id >= start && id <= end) : [],
+    };
+  };
 }
 
 function bullets(body) {
@@ -116,10 +217,24 @@ function checkTimeline(ctx) {
 }
 
 // The strongest anti-hallucination check available: any id that is NEW in the
-// profile must appear literally in the ledger this run was fed. Ids already in the
-// profile are grandfathered — they came from earlier merges over other ledgers.
+// profile must appear literally in the ledger this run was fed — at a ledger
+// LINE's id position, not merely anywhere in its text. Harvesting ⟨m…⟩ from the
+// whole ledger would accept an id typed into a message BODY, so anyone who can
+// send a message could mint provenance ("my receipt code is ⟨m999999⟩") — the
+// spoofed-provenance sibling of the injection case; compact-checks closed its
+// copy of this hole with the same line anchor. Ids already in the profile are
+// grandfathered — they came from earlier merges over other ledgers.
+function ledgerLineIds(ledger) {
+  const out = new Set();
+  for (const line of String(ledger || '').split('\n')) {
+    const m = LEDGER_LINE.exec(line);
+    if (m) out.add(Number(m[1]));
+  }
+  return out;
+}
+
 function checkCitedIdsFromLedger(ctx) {
-  const ledgerIds = citationIds(ctx.ledger);
+  const ledgerIds = ledgerLineIds(ctx.ledger);
   const added = [...ctx.afterIds].filter((id) => !ctx.beforeIds.has(id));
   const invented = added.filter((id) => !ledgerIds.has(id));
   return {
@@ -138,6 +253,86 @@ function checkCitationsResolve(ctx) {
     id: 'citations_resolve', severity: 'high',
     pass: missing.length === 0,
     detail: missing.length ? `${missing.length} unresolvable: ${missing.slice(0, 5).map((i) => `m${i}`).join(', ')}` : `${ctx.afterIds.size} id(s) resolve`,
+  };
+}
+
+// V1–V6 of docs/PROVENANCE-SPEC.md §4. A range is only meaningful when scoped to
+// the thread of its endpoints, so every rule here is about that resolved set:
+//
+//   V1  start ≤ end
+//   V2  both endpoints exist in the archive
+//   V3  thread(start) == thread(end)
+//   V4  resolved count ≤ 10          <- COUNTED, not `end - start`
+//   V5  a primary, if present, is one of the resolved rows
+//   V6  citations on the same bullet do not overlap
+//
+// V7 ("every id in a NEW citation appears literally in the ledger") is
+// `no_invented_citations` and stays there.
+//
+// TWO ORACLES. With the real archive the runner passes `resolveRange`; where there
+// is none — the sandbox's `data/crm.db` holds no rows — the ledger substitutes:
+// every line carries its id and its thread label, so V2–V5 are decidable for any
+// citation whose endpoints are in the chunk. A citation pointing OUTSIDE the chunk
+// is skipped rather than failed, exactly as citations_resolve skips when it has no
+// archive: those endpoints came from earlier ledgers this run cannot see, and
+// failing them would punish correct carry-forward.
+//
+// DELIBERATELY ABSENT: a per-bullet citation count. The 3-citation cap is per
+// CLAIM and prompt-only — nothing marks where one claim ends inside a bullet, so
+// there is no unit to count against, and a bound loose enough to pass a real
+// six-fact `What I know` bullet would catch nothing (spec §2, §4).
+function checkCitationRangeValid(ctx) {
+  const fromArchive = Boolean(ctx.resolveRange);
+  const resolve = ctx.resolveRange || makeLedgerRangeResolver(ctx.ledger);
+  const problems = [];
+  let checked = 0;
+  let skipped = 0;
+
+  for (const [heading, body] of ctx.after.sections) {
+    if (!CITED_SECTIONS.has(heading)) continue;
+
+    for (const c of citations(body)) {
+      // V1 needs no oracle, so it is decidable even for an out-of-chunk citation.
+      if (c.end < c.start) { problems.push(`${c.raw}: V1 end before start`); continue; }
+      const r = resolve(c.start, c.end);
+      if (!r.startFound || !r.endFound) {
+        if (fromArchive) problems.push(`${c.raw}: V2 endpoint absent from the archive`);
+        else skipped += 1;
+        continue;
+      }
+      checked += 1;
+      // V3 first: with the endpoints in different threads, "the thread of start"
+      // is not the range the citation meant, so counting it would be noise.
+      if (r.startThread !== r.endThread) { problems.push(`${c.raw}: V3 endpoints in different conversations`); continue; }
+      if (r.ids.length > MAX_RANGE_MESSAGES) {
+        problems.push(`${c.raw}: V4 covers ${r.ids.length} thread messages, cap ${MAX_RANGE_MESSAGES}`);
+      }
+      if (c.primary != null && !r.ids.includes(c.primary)) {
+        problems.push(`${c.raw}: V5 primary m${c.primary} is not in the resolved range`);
+      }
+    }
+
+    // V6, per bullet: two claims resting on the same lines must cite that stretch
+    // once, after the later claim, rather than repeating or nesting it.
+    for (const line of bullets(body)) {
+      const cs = citations(line).filter((c) => c.end >= c.start);
+      for (let i = 0; i < cs.length; i += 1) {
+        for (let j = i + 1; j < cs.length; j += 1) {
+          if (cs[i].start <= cs[j].end && cs[j].start <= cs[i].end) {
+            problems.push(`V6 overlapping citations on one bullet: ${cs[i].raw} and ${cs[j].raw}`);
+          }
+        }
+      }
+    }
+  }
+
+  return {
+    id: 'citation_range_valid', severity: 'high',
+    pass: problems.length === 0,
+    detail: problems.length
+      ? `${problems.length} problem(s): ${problems.slice(0, 4).join('; ')}`
+      : `${checked} range(s) valid against ${fromArchive ? 'the archive' : 'the ledger'}`
+        + `${skipped ? `, ${skipped} outside this chunk (skipped)` : ''}`,
   };
 }
 
@@ -164,9 +359,9 @@ function checkCitationCarryForward(ctx) {
 
 function checkCitationSyntax(ctx) {
   const bad = [];
-  for (const { re, why } of MALFORMED) {
-    const hits = ctx.afterText.match(re);
-    if (hits) bad.push(`${why} (${hits.length})`);
+  for (const { re, find, why } of MALFORMED) {
+    const hits = find ? find(ctx.afterText) : ctx.afterText.match(re);
+    if (hits && hits.length) bad.push(`${why} (${hits.length})`);
   }
   return {
     id: 'citation_syntax', severity: 'medium',
@@ -184,7 +379,10 @@ function checkTalkingPointFormat(ctx) {
   // has no knowable day, and stamping a false one loses the ordering signal that
   // makes the bullet useful. Only a bullet with NO date at all is undated.
   const dated = /^\s*[-*]\s+\*\*\d{4}-\d{2}(?:-\d{2})?\*\*\s+\S/;
-  const cited = /⟨\s*m\d+(?:\s*,\s*m\d+)*\s*⟩\s*$/;
+  // A bullet may end in a RUN of citations — separate moments get separate
+  // citations now that id lists are gone, so `… ⟨m85943⟩ ⟨m86109-m86132⟩` is the
+  // normal shape for a bullet resting on two exchanges.
+  const cited = new RegExp(`${CITE_SRC}(?:\\s*${CITE_SRC})*\\s*$`);
   const badDate = bs.filter((l) => !dated.test(l));
   const badCite = bs.filter((l) => !cited.test(l));
   // Undated bullets are permitted only at the end of the section.
@@ -357,6 +555,7 @@ function checkNoop(ctx) {
 
 const ALL = [
   checkWriteScope, checkTimeline, checkCitedIdsFromLedger, checkCitationsResolve,
+  checkCitationRangeValid,
   checkCitationCarryForward, checkCitationSyntax, checkTalkingPointFormat,
   checkTalkingPointCap, checkOpenQuestionsUncited, checkWhatIKnowCited, checkSectionOrder, checkMetadata,
   checkNoDerivedFacts, checkLastContact, checkInjection, checkNoop,
@@ -365,7 +564,9 @@ const ALL = [
 const WEIGHT = { high: 4, medium: 2, low: 1 };
 
 // input: { beforeText, afterText, ledger, profileRel, filesBefore, filesAfter,
-//          resolveIds?, canary?, expectNoop? }
+//          resolveIds?, resolveRange?, canary?, expectNoop? }
+// `resolveRange(start, end)` is the archive oracle for citation_range_valid; when
+// it is absent the ledger stands in (see makeLedgerRangeResolver).
 function runChecks(input) {
   const ctx = {
     ...input,
@@ -384,4 +585,7 @@ function runChecks(input) {
   return { results, score: got, maxScore: max, failed: results.filter((r) => !r.pass) };
 }
 
-module.exports = { runChecks, parseProfile, citationIds, bullets, WEIGHT, MAX_TALKING_POINTS };
+module.exports = {
+  runChecks, parseProfile, citationIds, citations, bullets, makeLedgerRangeResolver,
+  WEIGHT, MAX_TALKING_POINTS, MAX_RANGE_MESSAGES, CITE, CITE_SRC,
+};

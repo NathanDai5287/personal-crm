@@ -13,12 +13,30 @@
 
 const { runChecks } = require('./checks');
 
+// TWO THREADS AND A DOZEN LINES, deliberately. Citations are thread-scoped ranges
+// now (docs/PROVENANCE-SPEC.md §1), and the sandbox validates them against the
+// LEDGER — every line carries its id and its thread label, `(the boys 🐗)` for the
+// group and nothing for the direct message (§4). So the fixture has to contain a
+// DM run long enough to breach the 10-message cap and a second thread adjacent to
+// it in id order, or the over-cap and cross-thread rules have nothing to fire on.
 const LEDGER = `# Messages with Test Person — 2026-07-06..2026-07-12 (Pacific)
-# chunk 1 of 1 · 3 messages · ids m1000–m1002
+# chunk 1 of 1 · 15 messages · ids m1000–m1014
 
 [2026-07-06 10:00] ⟨m1000⟩ Test: finally ordered the espresso machine
 [2026-07-06 10:01] ⟨m1001⟩ Nathan: which one
-[2026-07-07 09:30] ⟨m1002⟩ Test: starting at Tesla in August
+[2026-07-06 10:02] ⟨m1002⟩ Test: starting at Tesla in August
+[2026-07-06 10:03] ⟨m1003⟩ Nathan: congrats, which team
+[2026-07-06 10:04] ⟨m1004⟩ Test: powertrain
+[2026-07-06 10:05] ⟨m1005⟩ Nathan: nice
+[2026-07-06 10:06] ⟨m1006⟩ Test: starts on the 3rd
+[2026-07-06 10:07] ⟨m1007⟩ Nathan: relocating?
+[2026-07-06 10:08] ⟨m1008⟩ Test: staying in oakland
+[2026-07-06 10:09] ⟨m1009⟩ Nathan: how is the commute
+[2026-07-06 10:10] ⟨m1010⟩ Test: 40 min each way
+[2026-07-06 10:11] ⟨m1011⟩ Nathan: not bad
+[2026-07-07 19:00] ⟨m1012⟩ (the boys 🐗) Test: anyone up for shasta
+[2026-07-07 19:02] ⟨m1013⟩ (the boys 🐗) Nathan: maybe
+[2026-07-07 19:05] ⟨m1014⟩ (the boys 🐗) Test: ill book it
 `;
 
 const BEFORE = `# Test Person
@@ -56,6 +74,33 @@ const GOOD = BEFORE
 
 const FILES_BEFORE = new Map([['data/contacts/test.md', 'h0'], ['data/contacts/_refresh/test.new.txt', 'hL']]);
 const FILES_AFTER = new Map([['data/contacts/test.md', 'h1'], ['data/contacts/_refresh/test.new.txt', 'hL']]);
+
+// A stand-in for the real archive. `citation_range_valid` has TWO oracles — the
+// runner passes `resolveRange` when crm.db is readable (evals/run.js), and only
+// falls back to the ledger when it is not — so both branches need exercising or
+// half the check is untested. The stub's thread map mirrors the ledger and adds
+// m900, an id from an EARLIER chunk: the thing the archive can see and the ledger
+// oracle structurally cannot.
+const ARCHIVE_THREADS = new Map([
+  [900, 'convA'],
+  ...Array.from({ length: 12 }, (_, i) => [1000 + i, 'convA']),
+  [1012, 'convB'], [1013, 'convB'], [1014, 'convB'],
+]);
+
+function resolveRange(start, end) {
+  const startThread = ARCHIVE_THREADS.has(start) ? ARCHIVE_THREADS.get(start) : null;
+  return {
+    startFound: ARCHIVE_THREADS.has(start),
+    endFound: ARCHIVE_THREADS.has(end),
+    startThread,
+    endThread: ARCHIVE_THREADS.has(end) ? ARCHIVE_THREADS.get(end) : null,
+    // The archive query: conv_id = thread(start) AND id BETWEEN start AND end.
+    ids: startThread === null ? []
+      : [...ARCHIVE_THREADS.keys()]
+        .filter((id) => ARCHIVE_THREADS.get(id) === startThread && id >= start && id <= end)
+        .sort((a, b) => a - b),
+  };
+}
 
 function score(afterText, extra = {}) {
   return runChecks({
@@ -99,6 +144,100 @@ const MUTANTS = [
     name: 'invented a citation id',
     expect: 'no_invented_citations',
     after: GOOD.replace('⟨m1000⟩', '⟨m9999⟩'),
+  },
+  // The spoofed-provenance hole: an id token typed inside a message BODY is not
+  // a ledger id. Before the line anchor, citationIds(ledger) harvested it and a
+  // citation of m1999 sailed through — anyone who can send a message could mint
+  // provenance. The ledger here plants the token in a body; citing it must fail.
+  {
+    name: 'cited an id spoofed inside a message body',
+    expect: 'no_invented_citations',
+    after: GOOD.replace('⟨m1000⟩', '⟨m1999⟩'),
+    extra: { ledger: LEDGER.replace('anyone up for shasta', 'anyone up for shasta ⟨m1999⟩') },
+  },
+  // ---- range form (docs/PROVENANCE-SPEC.md §4, V1-V6) ----------------------
+  // V1. Also a MALFORMED near-miss, so it is asserted twice, once per check —
+  // a reversed range that only tripped one of them would leave the other
+  // silently green.
+  {
+    name: 'reversed range (V1)',
+    expect: 'citation_range_valid',
+    after: GOOD.replace('⟨m1002⟩', '⟨m1006-m1002⟩'),
+  },
+  {
+    name: 'reversed range (syntax)',
+    expect: 'citation_syntax',
+    after: GOOD.replace('⟨m1002⟩', '⟨m1006-m1002⟩'),
+  },
+  // V3. m1011 is the direct message, m1012 the group — adjacent in Signal's
+  // global rowid stream, different conversations, so no range spans them.
+  {
+    name: 'cross-thread range (V3)',
+    expect: 'citation_range_valid',
+    after: GOOD.replace('⟨m1002⟩', '⟨m1011-m1012⟩'),
+  },
+  // V4, and the reason it counts RESOLVED ROWS rather than `end - start`: this
+  // span is 12 ids wide and holds 12 messages of its thread, but at real 2-6%
+  // density a 356-id span can hold 8.
+  {
+    name: 'over-cap range (V4)',
+    expect: 'citation_range_valid',
+    after: GOOD.replace('⟨m1002⟩', '⟨m1000-m1011⟩'),
+  },
+  // V5. The primary must be a line of the range it annotates, not merely of the
+  // same conversation.
+  {
+    name: 'primary outside its range (V5)',
+    expect: 'citation_range_valid',
+    after: GOOD.replace('⟨m1002⟩', '⟨m1002-m1004 @m1009⟩'),
+  },
+  // V6. Two claims resting on the same lines cite that stretch once.
+  {
+    name: 'overlapping citations on one bullet (V6)',
+    expect: 'citation_range_valid',
+    after: GOOD.replace('⟨m1002⟩', '⟨m1000-m1004⟩ ⟨m1002-m1006⟩'),
+  },
+  // V7, and a guard on the citation parser: if CITE captured only a range's
+  // START, an invented END would sail through every id check in the file.
+  {
+    name: 'invented range endpoint (V7)',
+    expect: 'no_invented_citations',
+    after: GOOD.replace('⟨m1002⟩', '⟨m1002-m9999⟩'),
+  },
+  // ---- separator drift the range grammar newly invites ---------------------
+  {
+    name: 'en-dash range separator',
+    expect: 'citation_syntax',
+    after: GOOD.replace('⟨m1002⟩', '⟨m1002–m1006⟩'),
+  },
+  {
+    name: '.. range separator',
+    expect: 'citation_syntax',
+    after: GOOD.replace('⟨m1002⟩', '⟨m1002..m1006⟩'),
+  },
+  {
+    name: 'retired comma id list',
+    expect: 'citation_syntax',
+    after: GOOD.replace('⟨m1002⟩', '⟨m1002, m1006⟩'),
+  },
+  {
+    name: 'range end missing its m',
+    expect: 'citation_syntax',
+    after: GOOD.replace('⟨m1002⟩', '⟨m1002-1006⟩'),
+  },
+  // Two patterns that predate ranges but whose regexes had to be widened for
+  // them, so they need coverage they never had: an unclosed opener must still be
+  // caught once the tail can contain `-m1006 @m1004`, and the bare-number form
+  // must be caught in range shape too.
+  {
+    name: 'unclosed ⟨ on a range',
+    expect: 'citation_syntax',
+    after: GOOD.replace(' ⟨m1002⟩.', ' ⟨m1002-m1006'),
+  },
+  {
+    name: 'range with no m prefix at all',
+    expect: 'citation_syntax',
+    after: GOOD.replace('⟨m1002⟩', '⟨1002-1006⟩'),
   },
   {
     name: 'dropped all prior citations',
@@ -213,6 +352,33 @@ function main() {
   const monthCheck = monthly.results.find((r) => r.id === 'tp_format');
   console.log(`month-precision date (**2026-08**) accepted: ${monthCheck.pass ? 'ok' : `FAIL — ${monthCheck.detail}`}`);
   if (!monthCheck.pass) failures++;
+
+  // 2d. A trailing RUN of range citations is the normal shape now that id lists
+  // are gone — separate moments get separate citations, up to 3 per claim.
+  const run3 = score(GOOD.replace('working out ⟨m1000⟩', 'working out ⟨m1000-m1001⟩ ⟨m1004⟩ ⟨m1006-m1008 @m1006⟩'));
+  const runCheck = run3.results.find((r) => r.id === 'tp_format');
+  const runRange = run3.results.find((r) => r.id === 'citation_range_valid');
+  console.log(`trailing run of range citations: format ${runCheck.pass ? 'ok' : `FAIL — ${runCheck.detail}`}`
+    + `, ranges ${runRange.pass ? 'ok' : `FAIL — ${runRange.detail}`}`);
+  if (!runCheck.pass || !runRange.pass) failures++;
+
+  // 2e. BOTH ORACLES of citation_range_valid. With the archive, ⟨m900⟩ from an
+  // earlier chunk resolves and V2 is enforceable; with only the ledger it is
+  // outside the chunk and must be SKIPPED, not failed — failing it would punish
+  // exactly the carry-forward the prompt requires.
+  const arch = score(GOOD, { resolveRange });
+  const archCheck = arch.results.find((r) => r.id === 'citation_range_valid');
+  console.log(`archive oracle accepts the clean reference: ${archCheck.pass ? 'ok' : `FAIL — ${archCheck.detail}`}`);
+  if (!archCheck.pass) failures++;
+
+  const unarchived = GOOD.replace('⟨m900⟩', '⟨m899⟩');
+  const v2 = score(unarchived, { resolveRange }).results.find((r) => r.id === 'citation_range_valid');
+  console.log(`archive oracle catches V2 (endpoint not archived): ${!v2.pass ? 'ok' : 'FAIL — passed a missing endpoint'}`);
+  if (v2.pass) failures++;
+
+  const skip = score(unarchived).results.find((r) => r.id === 'citation_range_valid');
+  console.log(`ledger oracle skips an out-of-chunk citation: ${skip.pass ? 'ok' : `FAIL — ${skip.detail}`}`);
+  if (!skip.pass) failures++;
 
   // 3. Every mutant must be caught BY THE CHECK IT TARGETS.
   console.log('\nmutants (each must trip its own check):');
