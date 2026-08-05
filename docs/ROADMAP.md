@@ -11,17 +11,10 @@ Ordered roughly by how much they matter, not by effort.
 
 ## Blocking a full backfill
 
-- [ ] **Compaction prompt v3.** Keep v1's coverage, fix only its two real defects:
-  the meta-commentary leak on the injection case (high severity) and the length
-  blowouts. Do NOT adopt v2 — the judge showed it drops 2.8× more durable content.
-- [ ] **New merge checks, or the arena.** F now scores 100% on every held-out case, so
-  the deterministic suite is saturated again. `wik_cited` bought exactly one prompt
-  generation of headroom, and the lesson generalises: a check written to enforce a new
-  rule will always be won by the prompt that adds that rule. Ranking the next merge
-  prompt needs human preference labels, not another check.
-- [ ] **Sandbox realism.** The eval sandbox is a `cwd` with two files; production is
-  the full project tree. Suspected tell behind K3's evaluation-awareness at
-  `thinking=max`. Until closed, every K3 eval number is an upper bound.
+(nothing — both blockers shipped 2026-08-04: compaction prompt v3, and sandbox
+realism. The K3 numbers are still upper bounds until the awareness rate is
+re-measured under the realistic sandbox; that re-measure is PAID and is listed under
+Model / cost strategy below.)
 
 ## Tasks / todo list
 
@@ -55,6 +48,10 @@ Ordered roughly by how much they matter, not by effort.
 
 ## Provenance / history
 
+- [ ] **Cap-drift warning at read time** (spec §7): a later archive backfill can push a
+  compliant range over 10 messages. `validateCitations` checks existence only — no
+  thread or count logic — so nothing reports it. Near-zero risk once the backfill is a
+  single clean pass, which is why it shipped without this.
 - [ ] **`git blame` view** — line-level authorship for the profile, tinted by model.
   Would make K3-vs-Opus prose erosion visible instead of theoretical.
 - [ ] Backfill provenance trailers are only on commits from 2026-08-03 onward, and
@@ -95,3 +92,11 @@ Ordered roughly by how much they matter, not by effort.
   cheapest-adequate ongoing model before Claude access ends. Free, never run.
 - [ ] **Non-Opus judge cross-check** to size self-preference bias in the original
   Opus-vs-K3 result (11–3 with 16 ties). Free via a Fable agent.
+- [ ] **Re-measure K3 `thinking=max` evaluation-awareness under the realistic
+  sandbox.** PAID (`ke_max`, 9 cases). The sandbox is no longer a two-file `cwd`
+  (shipped 2026-08-04), so the suspected tell is gone, but the awareness rate itself
+  is unmeasured — nobody knows whether 1-of-18 dropped, held, or ROSE. Compare
+  against `--bare-sandbox`, which reproduces the old tree, and audit the traces the
+  same way as before. Until this runs, K3 numbers stay upper bounds; if the rate
+  rises, the next suspects are AGENTS.md and `docs/ENGINEERING-LOG.md`, which the
+  sandbox now carries and which describe the eval program.
