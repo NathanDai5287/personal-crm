@@ -35,6 +35,46 @@ K3 numbers are still upper bounds until the awareness rate is re-measured under 
 realistic sandbox; that re-measure is PAID and is listed under Model / cost strategy
 below.)
 
+## Admin dashboard (planned 2026-08-05, functionality agreed)
+
+Two overarching places: `/` = the CRM you read (Contacts, Tasks), `/admin` = what the
+machine did. Existing deep links (`/c/<slug>/history`, `/c/<slug>/ledger/<sha>`, `/m/…`)
+keep working; `/status`, `/runs`, `/actions` move under `/admin/*` with redirects.
+
+- [ ] **A run log every runner writes to** — `lib/runlog.js`, monthly JSONL under
+  `logs/runs/<YYYY-MM>.jsonl`. Today only `crm-daily` records anything (2 files), so the
+  hourly sweep, compaction and the todo scan are invisible; "a log of historical runs"
+  cannot be built by reading harder. Fields: `id, kind, args, trigger, parentId,
+  startedAt, endedAt, exitCode, ok, summary, logPath, recordPath`; `kind` ∈ archive |
+  daily | merge-one | compact | todo-scan | backup; `trigger` ∈ schedule | ui | cli.
+  Written at BEGIN and again at END, so a killed run leaves a row with no `endedAt` —
+  itself the signal. `parentId` because a daily run spawns compact and a sweep.
+  Quiet hourly sweeps still get a row (hidden behind a toggle): a MISSING row is how you
+  learn Task Scheduler stopped firing, which nothing catches today.
+- [ ] **Overview page** — health strip (last sweep + stale flag past 90 min, last daily
+  run, last compaction, last todo scan, backup age, archive rows + span, Signal running)
+  over the per-contact table, with the triggers ON the row: `Archive` · `Preview`
+  (free — `--only X --dry-run`) · `Merge`. Global row: full / dry / compact / archive
+  sweep (deep checkbox).
+- [ ] **Stranded-message check on that page.** For each contact: Signal messages at or
+  below the cursor that are absent from the archive. It found 669 on 2026-08-05 and
+  nothing was reporting it. Distinguishes "the sweep ran" from "the sweep kept up".
+- [ ] **`/status` counts pending from Signal, but the pipeline plans from the ARCHIVE** —
+  so the number misses archived-but-expired messages and the page dies when Signal is
+  closed. Switch to `buildArchiveQuery`, and import `MERGE_BACKFILL_DAYS` instead of
+  re-declaring `BACKFILL_DAYS = 30` in `crm-web.js` (that mirror will start lying).
+- [ ] **Job runner**: whitelisted kinds (never raw args), output streamed to
+  `logs/jobs/<runId>.log` so it survives a server restart and the run row can link it,
+  the existing single-job lock, `Sec-Fetch-Site` CSRF guard on the new POSTs.
+- [ ] **A pipeline lock file** shared by daily + archive, so a manually triggered sweep
+  and the hourly scheduled one cannot both write `crm.db`. The scheduled loser exits 0
+  and logs "skipped, run in progress". (`PRAGMA busy_timeout` shipped 2026-08-05 and
+  makes the collision survivable; the lock makes it orderly.)
+- [ ] **Runs history pages** — all kinds, filterable; reuse the existing rich per-chunk
+  detail view for `daily`, show captured output + summary for the rest.
+- DECIDED: **destructive buttons stay CLI-only** for now — no clear-cursors, no
+  clear-data in the UI (Nathan, 2026-08-05).
+
 ## Tasks / todo list
 
 - [ ] **One trigger yielding two tasks is collapsed to one.** `builders-two` (sign up for

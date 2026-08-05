@@ -46,10 +46,16 @@ const {
 } = require('../lib/config');
 
 const DAY = 86_400_000;
-// How far back a contact with NO cursor starts. 30 days by default; set
+// How far back a contact with NO cursor starts MERGING. 30 days by default; set
 // CRM_BACKFILL_DAYS=3650 (or pass backfillDays) to merge the full archive.
 // Whatever this is, the work still arrives as ordinary week-sized chunks.
-const BACKFILL_DAYS = Number(process.env.CRM_BACKFILL_DAYS) || 30;
+//
+// NAMED FOR WHAT IT COSTS. crm-archive.js had an identically-named 30-day
+// constant meaning something completely different — how much history to COPY,
+// which is free — and the two were trivial to confuse when reading either file.
+// This one decides how many messages a model reads, i.e. dollars, which is why
+// it stayed at 30 when the archive's went to all-time (2026-08-05).
+const MERGE_BACKFILL_DAYS = Number(process.env.CRM_BACKFILL_DAYS) || 30;
 
 function loadCursors() {
   let raw = null;
@@ -122,7 +128,7 @@ function planAll(cdb, sdb, opts = {}) {
     onlySlug = null,
     includePartialWeek = false,
     now = Date.now(),
-    backfillDays = BACKFILL_DAYS,
+    backfillDays = MERGE_BACKFILL_DAYS,
     sweep = true,
   } = opts;
 
@@ -244,4 +250,4 @@ function main() {
 }
 
 if (require.main === module) main();
-module.exports = { planAll, planContact, writeChunkLedger, chunkSummary, BACKFILL_DAYS };
+module.exports = { planAll, planContact, writeChunkLedger, chunkSummary, MERGE_BACKFILL_DAYS };

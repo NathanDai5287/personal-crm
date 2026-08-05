@@ -21,14 +21,17 @@
 // trivial: cursors are written once at the end; a crash just re-sweeps.
 //
 // Usage:
-//   node scripts/crm-archive.js          # sweep everything new
-// Also exported as runSweep(cdb, sdb, {deep}) so crm-refresh.js / crm-compact.js can
+//   node scripts/crm-archive.js                        # sweep everything new
+//   node scripts/crm-archive.js --deep                 # ignore cursors, re-check all history
+//   node scripts/crm-archive.js --only <slug>          # one contact (or group:<slug>)
+//   node scripts/crm-archive.js --only <slug> --deep   # that contact's FULL history
+// Also exported as runSweep(cdb, sdb, {deep, onlySlug}) so crm-refresh.js / crm-compact.js can
 // sweep inline at the start of a daily run (no dependency on the hourly task
 // having fired recently).
 'use strict';
 const fs = require('fs');
 const { openSignalDb, openCrmDb } = require('../lib/signal-db');
-const { mirrorMessages, ensureMessagesTable } = require('../lib/archive');
+const { mirrorMessages, ensureMessagesTable, SYNTH_BAND } = require('../lib/archive');
 const { resolveSources, buildMessageQuery } = require('../lib/sources');
 const {
   loadAttachments, describeAttachments, composeBody,
@@ -39,9 +42,31 @@ const {
 } = require('../lib/config');
 
 const DAY = 86_400_000;
-// First-sweep window for a source with no cursor yet. The hourly sweep only ever
-// needs the recent past; `--deep` (below) is how you pull older history in.
-const BACKFILL_DAYS = Number(process.env.CRM_ARCHIVE_BACKFILL_DAYS) || 30;
+// FIRST-SWEEP WINDOW for a source with no cursor yet — 0 means "everything
+// Signal still holds", which is the default.
+//
+// It was 30 days, and that was wrong in a way nobody would notice: every
+// long-tracked contact already has a cursor, so the window only ever applied to
+// a NEWLY tracked person, who therefore got a 30-day archive while everyone else
+// had a year of it. Archiving is free — no model, no tokens, seconds of work —
+// so the only thing the narrow window bought was a quietly shallower history for
+// exactly the contacts whose history nothing else had captured yet.
+//
+// NOT to be confused with crm-refresh.js's MERGE_BACKFILL_DAYS, which is still
+// 30 and costs money: that one decides how many messages a MODEL reads. This one
+// only decides what gets copied into crm.db.
+const FIRST_SWEEP_DAYS = Number(process.env.CRM_ARCHIVE_BACKFILL_DAYS) || 0;
+
+// OVERLAP on the incremental bound, because Signal REUSES ROWIDS (see the long
+// note in lib/archive.js). `rowid > cursor` assumes rowids only ever go up. When
+// a disappearing-message timer deletes the highest rows, the next arrival is
+// handed a rowid BELOW the cursor and `rowid > cursor` never sees it again —
+// silent, permanent loss of exactly the messages this sweep exists to rescue.
+//
+// So the bound also takes anything sent in the last OVERLAP_HOURS regardless of
+// rowid. Re-walking a day of messages every hour is a few hundred rows and the
+// mirror is idempotent, which is a trivial price for closing that hole.
+const OVERLAP_HOURS = Number(process.env.CRM_ARCHIVE_OVERLAP_HOURS) || 36;
 
 // DEEP SWEEP: ignore cursors entirely and re-sweep every source from the
 // beginning of Signal's history, copying anything the archive is missing.
@@ -54,10 +79,39 @@ const BACKFILL_DAYS = Number(process.env.CRM_ARCHIVE_BACKFILL_DAYS) || 30;
 //
 //   node scripts/crm-archive.js --deep
 //
-// This is the "widen the archive to full history" operation: it takes the
-// archive from ~30 days to everything Signal still holds (~78k messages for
-// tracked contacts). No AI, no cost, no profile changes.
+// This is the "re-check everything" operation: every source, from the beginning
+// of Signal's history, copying whatever the archive is missing. No AI, no cost,
+// no profile changes.
 const DEEP = process.argv.includes('--deep');
+
+// --only <slug>: sweep ONE contact (or one group, as `group:<slug>`). The
+// dashboard's per-person archive button needs this, and so does "Pine uses
+// disappearing messages, pull his whole history right now" — a targeted deep
+// sweep is seconds, where a full one re-walks 83k rows.
+const ONLY = (() => {
+  const i = process.argv.indexOf('--only');
+  if (i === -1) return null;
+  const v = process.argv[i + 1];
+  if (!v || v.startsWith('--')) {
+    console.error('crm-archive: --only requires a slug');
+    process.exit(2);
+  }
+  return v;
+})();
+{
+  // Same reasoning as crm-daily's flag check: a misspelled --deepp silently
+  // performs the narrow sweep you did not ask for.
+  const known = new Set(['--deep', '--only']);
+  const argv = process.argv.slice(2);
+  for (let i = 0; i < argv.length; i += 1) {
+    if (!argv[i].startsWith('--')) continue;
+    if (argv[i] === '--only') { i += 1; continue; }
+    if (!known.has(argv[i])) {
+      console.error(`crm-archive: unknown flag '${argv[i]}'\nknown: --deep, --only <slug>`);
+      process.exit(2);
+    }
+  }
+}
 
 function loadJson(file, fallback) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; }
@@ -79,21 +133,33 @@ function buildNameMap(sdb, nicks) {
   return m;
 }
 
-// Sweep one contact's sources. Returns the number of newly-seen rows.
-function sweepContact(cdb, sdb, slug, cursors, now, nicks, deep) {
+// The incremental bound for one source, shared by contacts and groups so the
+// reuse-overlap can never be applied to one and forgotten on the other.
+function sweepBound(cursors, key, now, ranAt, deep) {
+  if (!deep && Object.prototype.hasOwnProperty.call(cursors, key)) {
+    // ...OR anything recent, whatever its rowid. See OVERLAP_HOURS above.
+    // The floor uses the last sweep's clock, not now, so a machine that was off
+    // for a week still re-checks the window it actually missed.
+    const floor = Math.max(0, (ranAt || now) - OVERLAP_HOURS * 3_600_000);
+    return { clause: '(rowid > ? OR sent_at >= ?)', params: [cursors[key] || 0, floor] };
+  }
+  return { clause: 'sent_at >= ?', params: [deep || !FIRST_SWEEP_DAYS ? 0 : now - FIRST_SWEEP_DAYS * DAY] };
+}
+
+// Sweep one contact's sources. Returns { seen, inserted, collisions }.
+const NOTHING = { seen: 0, inserted: 0, collisions: [] };
+function sweepContact(cdb, sdb, slug, cursors, now, ranAt, nicks, deep) {
   const rel = `data/contacts/${slug}.md`;
   const row = cdb.prepare('SELECT signal_id, name FROM contacts WHERE file_path = ?').get(rel);
-  if (!row || !row.signal_id) return 0;
+  if (!row || !row.signal_id) return NOTHING;
 
   const sources = resolveSources(sdb, row.signal_id);
   const key = `contact:${slug}`;
-  const bound = (!deep && Object.prototype.hasOwnProperty.call(cursors, key))
-    ? { clause: 'rowid > ?', param: cursors[key] || 0 }
-    : { clause: 'sent_at >= ?', param: deep ? 0 : now - BACKFILL_DAYS * DAY };
+  const bound = sweepBound(cursors, key, now, ranAt, deep);
   const q = buildMessageQuery(sources, row.signal_id, bound);
-  if (!q) return 0;
+  if (!q) return NOTHING;
   const msgs = sdb.prepare(q.sql).all(q.params);
-  if (msgs.length === 0) return 0;
+  if (msgs.length === 0) return NOTHING;
 
   const display = (nicks[row.signal_id] && nicks[row.signal_id].name) || row.name;
   const first = display.split(' ')[0];
@@ -110,7 +176,7 @@ function sweepContact(cdb, sdb, slug, cursors, now, nicks, deep) {
   const prev = loadPreviews(sdb, mids);
   const quo = loadQuotes(sdb, mids);
   const nameFor = (sid) => (sid === MY_SERVICE_ID ? 'Nathan' : (sid === row.signal_id ? first : null));
-  mirrorMessages(cdb, msgs.map((m) => ({
+  const stats = mirrorMessages(cdb, msgs.map((m) => ({
     id: m.rid,
     convId: m.cid,
     conversation: sources.labels[m.cid] || `DM with ${display}`,
@@ -129,25 +195,23 @@ function sweepContact(cdb, sdb, slug, cursors, now, nicks, deep) {
     enriched: Boolean(m.hasAttachments) || prev.has(m.mid) || quo.has(m.mid),
   })));
   cursors[key] = msgs.reduce((mx, m) => Math.max(mx, m.rid), cursors[key] || 0);
-  return msgs.length;
+  return stats;
 }
 
 // Sweep one tracked group's FULL conversation (all speakers).
-function sweepGroup(cdb, sdb, group, cursors, now, nameMap, deep) {
+function sweepGroup(cdb, sdb, group, cursors, now, ranAt, nameMap, deep) {
   const conv = sdb.prepare('SELECT id FROM conversations WHERE groupId = ? LIMIT 1').get([group.groupId]);
-  if (!conv) return 0;
+  if (!conv) return NOTHING;
   const key = `group:${group.slug}`;
-  const bound = (!deep && Object.prototype.hasOwnProperty.call(cursors, key))
-    ? { clause: 'rowid > ?', param: cursors[key] || 0 }
-    : { clause: 'sent_at >= ?', param: deep ? 0 : now - BACKFILL_DAYS * DAY };
+  const bound = sweepBound(cursors, key, now, ranAt, deep);
   const msgs = sdb.prepare(`
     SELECT rowid AS rid, id AS mid, body, sent_at, type, sourceServiceId AS src, hasAttachments
     FROM messages
     WHERE conversationId = ? AND (body IS NOT NULL OR hasAttachments = 1)
       AND type IN ('incoming','outgoing')
       AND ${bound.clause}
-    ORDER BY rowid ASC`).all([conv.id, bound.param]);
-  if (msgs.length === 0) return 0;
+    ORDER BY rowid ASC`).all([conv.id, ...bound.params]);
+  if (msgs.length === 0) return NOTHING;
 
   const speaker = (m) => {
     if (m.type === 'outgoing' || m.src === MY_SERVICE_ID) return 'Nathan';
@@ -160,7 +224,7 @@ function sweepGroup(cdb, sdb, group, cursors, now, nameMap, deep) {
   const quo = loadQuotes(sdb, mids);
   // In a group the quoted author can be anyone, so resolve against the full map.
   const nameFor = (sid) => (sid === MY_SERVICE_ID ? 'Nathan' : nameMap.get(sid) || null);
-  mirrorMessages(cdb, msgs.map((m) => ({
+  const stats = mirrorMessages(cdb, msgs.map((m) => ({
     id: m.rid,
     convId: conv.id,
     conversation: group.name,
@@ -178,7 +242,7 @@ function sweepGroup(cdb, sdb, group, cursors, now, nameMap, deep) {
     enriched: Boolean(m.hasAttachments) || prev.has(m.mid) || quo.has(m.mid),
   })));
   cursors[key] = msgs.reduce((mx, m) => Math.max(mx, m.rid), cursors[key] || 0);
-  return msgs.length;
+  return stats;
 }
 
 // One-time metadata backfill: rows archived before src/type existed get their
@@ -203,36 +267,92 @@ function backfillMeta(cdb, sdb) {
 
 // The whole sweep. Safe to call from other scripts (refresh/compact) before
 // they read the archive. Returns { seen, backfilledMeta }.
+// opts: { deep, onlySlug }. onlySlug narrows to one contact, or to one group when
+// prefixed `group:`; an unknown slug is an error rather than a silent no-op,
+// because "swept 0 messages" is indistinguishable from a typo.
 function runSweep(cdb, sdb, opts = {}) {
   const deep = Boolean(opts.deep);
+  const onlySlug = opts.onlySlug || null;
   const now = Date.now();
   const nicks = loadJson(NICKNAMES, {}).byServiceId || {};
   const state = loadJson(ARCHIVE_STATE, {});
   const cursors = (state && state.cursors) || {};
+  const ranAt = state && state.ranAt;
 
   ensureMessagesTable(cdb); // creates the table and adds src/type if missing
   const backfilledMeta = backfillMeta(cdb, sdb);
 
   let seen = 0;
-  const slugs = loadJson(TRACKED, {}).slugs || [];
-  for (const slug of slugs) seen += sweepContact(cdb, sdb, slug, cursors, now, nicks, deep);
+  let inserted = 0;
+  const collisions = [];
+  const per = {}; // slug -> newly inserted rows, for the run record
+  const tally = (name, s) => {
+    seen += s.seen;
+    inserted += s.inserted;
+    if (s.inserted) per[name] = s.inserted;
+    for (const c of s.collisions) collisions.push({ ...c, source: name });
+  };
 
-  const groups = loadJson(TRACKED_GROUPS, {}).groups || [];
-  if (groups.length) {
-    const nameMap = buildNameMap(sdb, nicks);
-    for (const g of groups) seen += sweepGroup(cdb, sdb, g, cursors, now, nameMap, deep);
+  let slugs = loadJson(TRACKED, {}).slugs || [];
+  let groups = loadJson(TRACKED_GROUPS, {}).groups || [];
+  if (onlySlug) {
+    const g = onlySlug.startsWith('group:') ? onlySlug.slice(6) : null;
+    slugs = g ? [] : slugs.filter((s) => s === onlySlug);
+    groups = g ? groups.filter((x) => x.slug === g) : [];
+    if (slugs.length === 0 && groups.length === 0) {
+      throw new Error(`--only ${onlySlug}: not a tracked contact or group`);
+    }
   }
 
-  atomicWriteJson(ARCHIVE_STATE, { cursors, ranAt: now });
-  return { seen, backfilledMeta };
+  for (const slug of slugs) tally(slug, sweepContact(cdb, sdb, slug, cursors, now, ranAt, nicks, deep));
+  if (groups.length) {
+    const nameMap = buildNameMap(sdb, nicks);
+    for (const g of groups) tally(`group:${g.slug}`, sweepGroup(cdb, sdb, g, cursors, now, ranAt, nameMap, deep));
+  }
+
+  // REUSE DETECTOR. An archive whose highest id is ahead of Signal's highest
+  // rowid proves rows have been deleted off the top of Signal's table, which is
+  // the precondition for rowid reuse. Reported so the condition is visible
+  // BEFORE it costs anything; the handling in lib/archive.js is what makes it
+  // survivable. A single-contact sweep still reports it — it is a property of the
+  // whole database, not of the contact.
+  let reuse = null;
+  try {
+    const a = cdb.prepare('SELECT max(id) m FROM messages').get();
+    const s = sdb.prepare('SELECT max(rowid) m FROM messages').get([]);
+    if (a && s && a.m != null && s.m != null) {
+      // Synthetic ids live in a band far above any real rowid; they are the
+      // RESULT of reuse, not evidence of it, so they must not trip the test.
+      const realMax = cdb.prepare('SELECT max(id) m FROM messages WHERE id < ?').get(SYNTH_BAND).m;
+      if (realMax != null && realMax > s.m) reuse = { archiveMax: realMax, signalMax: s.m };
+    }
+  } catch { /* detector is advisory */ }
+
+  // A single-contact sweep must not stamp `ranAt`: the overlap floor is derived
+  // from it, and moving it forward for everyone after sweeping one person would
+  // shrink everyone else's window to nothing.
+  atomicWriteJson(ARCHIVE_STATE, onlySlug ? { cursors, ranAt } : { cursors, ranAt: now });
+  return { seen, inserted, per, collisions, reuse, backfilledMeta, deep, onlySlug };
 }
 
 function main() {
   const cdb = openCrmDb();
   const sdb = openSignalDb();
   try {
-    const r = runSweep(cdb, sdb, { deep: DEEP });
-    console.log(`CRM_ARCHIVE:${DEEP ? ' [DEEP]' : ''} swept ${r.seen} message(s)${r.backfilledMeta ? `, backfilled meta on ${r.backfilledMeta} old row(s)` : ''}.`);
+    const r = runSweep(cdb, sdb, { deep: DEEP, onlySlug: ONLY });
+    const scope = `${DEEP ? ' [DEEP]' : ''}${ONLY ? ` [ONLY ${ONLY}]` : ''}`;
+    console.log(`CRM_ARCHIVE:${scope} examined ${r.seen} message(s), ${r.inserted} new` +
+      `${r.backfilledMeta ? `, backfilled meta on ${r.backfilledMeta} old row(s)` : ''}.`);
+    for (const [name, n] of Object.entries(r.per)) console.log(`  ${name}: +${n}`);
+    for (const c of r.collisions) {
+      console.log(c.dropped
+        ? `  !! REUSED ROWID m${c.rowid} (${c.source}): out of band slots, message NOT archived`
+        : `  ** reused rowid m${c.rowid} (${c.source}): arrival rehomed to m${c.id}`);
+    }
+    if (r.reuse) {
+      console.log(`  note: archive max id m${r.reuse.archiveMax} is ahead of Signal's max rowid ` +
+        `${r.reuse.signalMax} — rows have been deleted off the top, so rowid reuse is live.`);
+    }
   } finally {
     sdb.close();
     cdb.close();

@@ -1067,3 +1067,97 @@ sandbox is unmeasured, and it is the only thing that actually retires the "upper
 caveat. It needs `ke_max` on 9 cases with `--allow-paid`, ideally against a
 `--bare-sandbox` arm as the control, with the traces audited the same way. Parked on
 the roadmap under Model / cost strategy.
+
+## 2026-08-05 — the archive was never as complete as it looked
+
+Started as a one-line request ("archive since the beginning of time instead of 30 days")
+attached to the admin-dashboard plan. The one-liner was correct but it was the smallest
+of three problems in the same code path.
+
+### DECISION — the archive's first-sweep window is now ALL TIME; the merge window is still 30 days
+`crm-archive.js`'s `BACKFILL_DAYS = 30` only ever applied to a source with NO cursor, so
+its real effect was: every long-tracked contact has a year of history, and a NEWLY tracked
+person gets 30 days — precisely the contact whose history nothing else had captured yet.
+Archiving costs no model and no tokens, so the narrow window bought nothing. Now
+`FIRST_SWEEP_DAYS = 0` (all time), still overridable via `CRM_ARCHIVE_BACKFILL_DAYS`.
+
+`crm-refresh.js`'s identically-named 30-day constant was renamed `MERGE_BACKFILL_DAYS` and
+left alone. It decides how many messages a MODEL reads — the two constants read the same
+and meant opposite things, one free and one billable. Nathan: *"do c"*.
+
+### SURPRISE — 669 messages were stranded permanently behind their own cursors
+The 30-day window did not just make new contacts shallow. A first sweep took 30 days of
+history and then set the cursor to the highest rowid it saw, so everything OLDER than 30
+days sat below the cursor, where the incremental bound `rowid > cursor` can never reach it
+again. Nothing anywhere reported this; the sweep printed a healthy count every hour.
+
+Found by asking a question no code asked: for each contact, how many Signal messages at or
+below the cursor are absent from the archive? Answer: `ritvik-irigireddy` 338 of 1120,
+`darren-pai` 331 of 358 (dating from 2026-05-07 and 2026-06-24 — both just outside a
+30-day first sweep). Recovered by `--deep`, which drops to the `sent_at` bound: 669 new
+rows, archive 83,209 -> 83,878, re-checked to 0 stranded across all 20 contacts.
+
+**That query belongs in the dashboard.** It is the only detector that distinguishes "the
+sweep is running" from "the sweep is keeping up", and it is cheap.
+
+### SURPRISE — Signal reuses rowids, so a rowid-keyed archive is not append-only by itself
+`CREATE TABLE messages(rowid INTEGER PRIMARY KEY ASC, ...)` — no `AUTOINCREMENT`, and no
+`sqlite_sequence` row for the table. SQLite therefore assigns max(rowid)+1 **of the rows
+that currently exist**. Delete the highest rows — exactly what a disappearing-message timer
+does to the newest messages in the table — and the next arrival is handed a rowid the
+archive already holds under a different message. Signal's table shows 91,165 rows against a
+max rowid of 91,972: 807 rowids already deleted.
+
+Two distinct costs, both silent:
+1. **The arrival is dropped.** `INSERT OR IGNORE` keeps the older archived row, and
+   `⟨m<rowid>⟩` becomes ambiguous — the archive and Signal disagree about that id.
+2. **It never even reaches the insert.** A reused rowid is BELOW the cursor, so
+   `rowid > cursor` skips it forever. The same failure as the 669, arriving by a different
+   route, and specifically hitting the disappearing messages the sweep exists to rescue.
+
+Audited before changing anything: 83,059 archived ids still present in Signal, **0** with a
+different `sent_at`, and the archive's max id was behind Signal's. So the mechanism is live
+but has not yet cost a message. Fixed while that is still true.
+
+### DECISION — discriminate by `sent_at`, rehome collisions into a synthetic id band
+A rowid whose archived row carries a different `sent_at` is a reused id, and the arrival is
+stored at `rowid + k*1_000_000_000` instead. Chosen over a new `signal_uuid` column because
+`sent_at` is the sender's clock stamped at send time, is never rewritten, and is already on
+all 83k legacy rows — the collision check works immediately with no migration and no
+backfill. Two distinct messages sharing a rowid AND a millisecond is not a case worth
+engineering for.
+
+The band is deterministic (same message -> same synthetic id every sweep, so the mirror
+stays idempotent), sorts above every real id, and leaves existing citations untouched: the
+colliding id keeps meaning the message it always meant.
+
+The cursor gained an overlap: `(rowid > ? OR sent_at >= ranAt - 36h)`. A rowid cursor alone
+assumes rowids only ever go up. The floor comes off the LAST SWEEP's clock, not `now`, so a
+machine that was off for a week re-checks the window it actually missed.
+
+Proved on a throwaway db before touching `crm.db`: archive two messages, delete them from
+Signal, hand rowid 101 to a new message, sweep again -> both messages present (101 and
+1000000101), re-sweeping either inserts nothing, and the old message keeps id 101.
+
+### SURPRISE — one page load killed a full deep sweep
+The first `--deep` run died with `database is locked` at the first insert. `crm.db` is in
+rollback-journal mode (no `-wal` file), so any open reader blocks a writer, and
+node:sqlite's default busy timeout is **zero** — a `/status` render, which holds a read
+transaction across 20 contacts' queries, is enough. `openCrmDb()` now sets
+`PRAGMA busy_timeout = 15000`, matching what Signal's opener has always done. This is the
+hazard the dashboard plan flagged in the abstract (a manual trigger racing the hourly task),
+arriving an hour early and from the web app instead.
+
+### MEASUREMENT — Pine is complete, disappearing messages included
+Nathan: *"please archive all of pines message. he likes to use disappearing messages... it
+should have the messages as if they never disappeared"*. After `--only pine-nguyen --deep`:
+Signal holds 3,029 of his messages, the archive holds **3,063** — 0 missing, **34 rescued**
+that Signal no longer has (a 2026-07-24 stretch about K3 and Opus 5 among them), 0 duplicate
+(time, sender, text) rows. His largest archived gap is 33.9 days after 2026-02-13, which is
+a real silence, not a hole: `missing = 0` makes the archive a superset of Signal for his
+sources. Cursor at 91,972 = Signal's current max.
+
+`--only <slug>` (also `group:<slug>`) is new, and deliberately does NOT stamp `ranAt`:
+the overlap floor is derived from it, so advancing it after sweeping one person would shrink
+everyone else's window to nothing. An unknown slug throws instead of sweeping nothing,
+because "swept 0 messages" and "you typed it wrong" must not look identical.
