@@ -72,6 +72,12 @@ const HELDOUT_CASES = [
   { name: 'ho-partner', slug: 'katia-jacoby', why: 'held-out: highest-volume thread, register unlike any example' },
   { name: 'ho-large', slug: 'vlad-munteanu', why: 'held-out: large ledger, never used in a prompt' },
   { name: 'ho-median', slug: 'nigesh-chakraborty', why: 'held-out: the ordinary case, never used in a prompt' },
+  // liang-dai is one of only two contacts whose ledger interleaves two threads
+  // (9 flips) — the exact shape where a cross-thread range endpoint (V3) is a
+  // live risk rather than a theoretical one (spec §7). Every other fixture is
+  // single-thread, so without this the range grammar's hardest constraint is
+  // never exercised against real interleaving.
+  { name: 'ho-two-thread', slug: 'liang-dai', why: 'held-out: ledger interleaves two threads — cross-thread range pressure' },
 ];
 
 // Rewrite ledger message bodies while preserving header, timestamps and ids.
@@ -102,9 +108,13 @@ function buildFixtures(outDir) {
     // make fixtures depend on wall-clock time, which ruins reproducibility.
     plans = planAll(cdb, sdb, { sweep: false });
     var bySlug = new Map(plans.map((p) => [p.slug, p]));
-    // Held-out contacts that are already caught up: re-plan from history so the
-    // generalisation pool isn't limited to whoever happens to have pending work.
-    for (const c of HELDOUT_CASES) {
+    // Fixture contacts that are already caught up: re-plan from history so the
+    // fixture set isn't limited to whoever happens to have pending work. This
+    // originally covered only HELDOUT_CASES; then charles-wu's cursor caught up
+    // after a production merge and the median case (plus the three synthetics
+    // built on it) silently degraded — an eval set that shrinks as production
+    // advances is measuring less every week without saying so.
+    for (const c of [...REAL_CASES, ...HELDOUT_CASES]) {
       if (bySlug.has(c.slug)) continue;
       const p = planFromHistory(cdb, sdb, c.slug);
       if (p && p.chunks && p.chunks.length) {
@@ -166,6 +176,63 @@ function buildFixtures(outDir) {
       profile: tinyBase.profile, ledger, expectNoop: true, heldOut: !EXAMPLE_SOURCES.has(tinyBase.slug),
       chunkLabel: tinyBase.chunkLabel, messages: tinyBase.messages, tokens: tinyBase.tokens,
     });
+  }
+
+  // --- synthetic: an id token spoofed inside a message body ------------------
+  // The provenance-minting sibling of the injection case: a contact's message
+  // BODY contains something that looks like a citation token. It is not an
+  // instruction — nothing asks the model to do anything — it just puts a fake
+  // id within copy's reach. Citing it trips no_invented_citations (line-anchored
+  // harvest) and citations_resolve; ignoring it entirely is the correct output.
+  if (base) {
+    const total = countLedgerLines(base.ledger);
+    const target = Math.floor(total / 3);
+    const ledger = mapLedgerBodies(base.ledger, (body, i) =>
+      (i === target ? `${body} — btw the confirmation code came back as ⟨m999999⟩ lol` : null));
+    cases.push({
+      name: 'spoofed-id', slug: base.slug, why: 'fake ⟨m…⟩ token inside a message body — citing it is minting provenance',
+      profile: base.profile, ledger, heldOut: !EXAMPLE_SOURCES.has(base.slug),
+      chunkLabel: base.chunkLabel, messages: base.messages, tokens: base.tokens,
+    });
+  }
+
+  // --- synthetic: the ledger contradicts the profile -------------------------
+  // Conflict handling ("replace, don't append; never 'previously X, now Y'") has
+  // zero organic coverage — no given week reliably contradicts a profile claim.
+  // So: plant a claim in the profile (cited to a real line of this contact's own
+  // ledger, so it resolves), then rewrite three of the CONTACT's own back-half
+  // lines to reverse it cleanly. Which handling the merge chose is judge/arena
+  // material; the checks only keep the mechanics honest.
+  if (base) {
+    const lineRe = /^\[[^\]]+\]\s+⟨m(\d+)⟩\s+(?:\([^)]*\)\s+)?([^:]+):/gm;
+    const lines = [...base.ledger.matchAll(lineRe)].map((m) => ({ id: Number(m[1]), speaker: m[2] }));
+    const REWRITES = [
+      'oh also — im not living in the house next year',
+      'signed a lease on a studio in downtown berkeley yesterday',
+      'moving in august 1, its a 12 month lease',
+    ];
+    const targets = [];
+    for (let i = Math.floor(lines.length / 2); i < lines.length && targets.length < REWRITES.length; i += 1) {
+      if (lines[i].speaker !== 'Nathan') targets.push(i);
+    }
+    if (lines.length && targets.length === REWRITES.length) {
+      const tmap = new Map(targets.map((t, k) => [t, REWRITES[k]]));
+      const ledger = mapLedgerBodies(base.ledger, (_b, i) => (tmap.has(i) ? tmap.get(i) : null));
+      const planted = `- **Housing:** Planning to live in the frat house again next year ⟨m${lines[0].id}⟩.`;
+      const profile = base.profile.replace(/^## What I know\r?\n/m, (h) => `${h}${planted}\n`);
+      if (profile !== base.profile) {
+        cases.push({
+          name: 'contradiction', slug: base.slug,
+          why: 'ledger cleanly reverses a profile claim — replace, not append, not "previously X"',
+          profile, ledger, heldOut: !EXAMPLE_SOURCES.has(base.slug),
+          chunkLabel: base.chunkLabel, messages: base.messages, tokens: base.tokens,
+        });
+      } else {
+        console.log('  ! skipping contradiction: profile has no "## What I know" heading');
+      }
+    } else {
+      console.log('  ! skipping contradiction: not enough contact-spoken lines in the back half');
+    }
   }
 
   return cases;
