@@ -841,6 +841,13 @@ notes yielded three prompt findings no deterministic check could encode:
 3. Ties dominated (7/12): the two prompts are close, so v8 should target the
    note findings, not the grammar.
 
+AMENDS, per Nathan the next day: do not treat the exact picks as ground truth
+either — a single session's W/L is noisy preference signal, and the durable
+output of an arena session is its NOTES (reader-is-you, recurring-topics, the
+date flag that found the UTC seam), not its tally. The division of labour
+stays checks = floor, judge = screen, arena = ranking signal — "signal", not
+"oracle".
+
 ### SURPRISE — the arena's "very serious error" was the fix working, and it found a UTC seam
 Nathan flagged ho-large: both variants moved `Last contact` 2026-06-17 →
 2026-06-16, "a very serious error." Root cause: one instant, two calendar dates.
