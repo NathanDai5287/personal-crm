@@ -529,3 +529,75 @@ prompt mid-comparison).
   correct (profile was pre-seeded) but unverified
 - `lib/schema.js` facts ledger: built, unwired
 - group tracking removal (`third-woman`)
+
+---
+
+## 2026-08-04 — model + context choice for the todo trigger
+
+### SURPRISE — I predicted more context would not help, and was wrong
+Asked whether k3's phantom deadline on the katia case could be fixed with more
+context, I reasoned it could not: every decisive fact (Katia's ask, the
+commitment, the hedge) sits within ±4 lines of the trigger, and the extra 34
+prior messages are entirely off-topic — Tesla internships, a Florida weekend, a
+broken phone. I said so before running it.
+
+Then production-size context fixed it outright, for **both** models. k3's
+invented `2026-08-14` became `null`; k2.6's title went from "Help Katia move in
+on Aug 14-15" (the wrong task) to "Check availability to help Katia move in".
+
+The lesson: **having the information available is not the same as having enough
+surrounding material to calibrate against.** 25 messages of loose, hedgy planning
+talk ("we should go to florida", "or maybe over the summer") appear to teach the
+model that a casually-mentioned date in this conversation is not a commitment.
+Sufficiency of information was the wrong frame; register was the operative one.
+
+### SURPRISE — context is NOT monotonic
+Same case, same golds, one sample per cell:
+
+| context | k2.6 | k3 |
+|---|---|---|
+| 6/5 (fixture) | fields ok, title names the wrong task | deadline + importance MISS |
+| **25/8 (production)** | **all ok** | **all ok** |
+| 40/12 | fields ok, title names the wrong task | deadline + importance MISS |
+
+Both models peak at exactly the production default and degrade on either side.
+**Caveat recorded deliberately: this is 6 samples, no repeats.** The miss-hit-miss
+pattern is as consistent with sampling noise as with a real optimum, and it was
+reported that way rather than as a tuned finding.
+
+### BUG — the eval had been measuring below production size
+Fixture `before` values are 4–9; production is `BEFORE=25`. Because
+`buildFixture` sliced only 6 messages, `findTriggers`' 25-cap never bound. So the
+entire 8-fixture k2.6-vs-k3 comparison described a configuration the pipeline
+never runs. Surfaced only because Nathan asked to vary context.
+
+### BUG — the window was un-overridable, which made the question untestable
+`extractFor` called `findTriggers(ledger)` with no options, hard-capping at 25/8
+regardless of the ledger handed in. Widening a fixture past 25 was silently
+trimmed. Had this not been caught first, the honest-looking answer would have
+been "more context does not help" — from a test that never varied context. Nearly
+a false negative produced by the measuring apparatus rather than the thing
+measured.
+
+### DECISION — k2.6, on failure severity rather than score
+k2.6 and k3 tied 22/24 on the exactly-scored fields, trading one case each.
+Chose k2.6 because its failure is milder: it inflated a blocked task from
+importance 1 to 2, where k3 invented a deadline and promoted the task to 3. A
+missing distinction is recoverable; a confident wrong date gets acted on.
+
+**Cost was explicitly NOT the tiebreaker.** I had earlier framed k2.6 as "~6×
+cheaper" as if that settled it; at ~0.2 triggers/month both models cost a
+fraction of a cent per year, so the 6× is 6× of nothing. Retracted before it
+influenced the decision.
+
+### CORRECTION — k3 saw something in the fixture I had not
+At 40/12 k3's description read *"then said 'nah' — confirm whether the ask still
+stands."* Looking again at `m90034/m90035`, Katia writes "Or nag" then "Nah" —
+she is offering Nathan an out. Genuine ambiguity in the source that I missed when
+setting the gold values, found by the model, in the configuration I was arguing
+against.
+
+### OPEN — both models collapse two tasks into one
+`builders-two` returns 1 task where Nathan said it should be 2, on k2.6 AND k3.
+Identical failure across models means the prompt, not the model. This defeats the
+reason `taskKey` hashes the title at all. Not fixed; on the roadmap.

@@ -25,16 +25,17 @@ Ordered roughly by how much they matter, not by effort.
 
 ## Tasks / todo list
 
-- [ ] **Wire `crm-tasks.js` into `crm-daily.js`** as a step, after merge. Cheap now: a
-  ledger with no "i'll make sure" costs zero model calls, so this adds nothing to a normal
-  run.
-- [ ] **An eval for `prompts/tasks-trigger.md`.** The old precision/recall eval is gone with
-  the design it measured — the regex now determines recall, so there is nothing to measure
-  there. What IS worth measuring is the model's remaining job: given a trigger and its
-  context, is the title self-contained six weeks later, is the deadline right, is the
-  importance sane. That needs fixtures containing actual triggers, which do not exist yet
-  (0 across 4,541 real messages) — so it has to wait until Nathan has used the phrase a few
-  times. `evals/tasks-contam.js` survives and still guards the live prompt.
+- [ ] **One trigger yielding two tasks is collapsed to one.** `builders-two` (sign up for
+  builders + share builders.cv) returns a single task from BOTH k2.6 and k3. Identical
+  failure across two models means it is the prompt, not the model. This is the worst
+  failure mode the table has — `taskKey` includes the title hash specifically so two tasks
+  from one trigger cannot silently dedupe, and this defeats that at the source instead.
+  Fix by sending Fable at `prompts/tasks-trigger.md` with both transcripts as evidence.
+- [ ] **`evals/trigger-eval.js` fixtures still default to 4–9 messages of context**, below
+  production's 25/8. `--before/--after` exist to override, but the defaults should match
+  production or the scores describe a configuration the pipeline never runs. Raising them
+  needs a check that a wider window does not pull a SECOND trigger into a fixture, which
+  would change what `expectCount` means.
 - [ ] **Snooze / hide** a task without marking it done.
 - [ ] Decide what to do with the `reminders` table: `crm.db` has it, it has zero
   rows, nothing writes to it. Either wire it up or drop it.
