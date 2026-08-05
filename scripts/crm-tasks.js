@@ -109,7 +109,11 @@ function extractFor(slug, ledgerPath, today, opts = {}) {
   const ids = ledgerIds(ledger);
 
   // THE CHEAP PATH, and the usual one. No trigger, no model call, no cost.
-  const { windows, nearMisses, total } = TRIGGER.findTriggers(ledger);
+  // opts.window overrides the {before, after} context size. It exists so evals can vary
+  // how much context the model gets; production leaves it unset and takes the defaults in
+  // lib/task-trigger.js. Without this the window was fixed at 25/8 regardless of how large
+  // a ledger it was handed, which silently made "does more context help?" untestable.
+  const { windows, nearMisses, total } = TRIGGER.findTriggers(ledger, opts.window || {});
   if (!windows.length) {
     return { ok: true, tasks: [], rejected: [], scanned: total, triggers: 0, nearMisses };
   }
@@ -150,10 +154,9 @@ function extractFor(slug, ledgerPath, today, opts = {}) {
       title: String(t.title),
       description: t.description ? String(t.description) : null,
       owner: t.owner,
-      deadline: t.deadline || null,
-      // Two booleans in, importance derived downstream. `actionable` is coerced rather
-      // than rejected: a missing value should cost the task one importance point, not the
-      // task itself.
+      // Deadline in, importance derived downstream. `actionable` is coerced rather than
+      // rejected: a missing value should cost the task one importance point, not the task
+      // itself.
       deadline: t.deadline || null,
       actionable: t.actionable === true,
       msgId: mid,

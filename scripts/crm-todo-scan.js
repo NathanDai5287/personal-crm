@@ -42,13 +42,6 @@ const FREE_PREFIX = 'anthropic/';
 // scan still resolves. Only the TRIGGER has to be new; its context does not.
 const CONTEXT_LOOKBACK = 60;
 
-// A near-miss is only useful while Nathan still remembers writing the line — the point is
-// "you just tried to flag something and it did not take". On a first run, with no cursor,
-// every historical "make sure" qualifies and the report becomes fifty lines of noise about
-// messages from last year. Bounded by age and count.
-const NEAR_MISS_DAYS = 7;
-const NEAR_MISS_MAX = 5;
-
 function loadState() {
   try { return JSON.parse(fs.readFileSync(STATE, 'utf8')); } catch { return { cursors: {} }; }
 }
@@ -95,6 +88,11 @@ function main() {
   const onlySlug = arg('--slug', null);
 
   const state = loadState();
+  // Captured BEFORE the scan loop, which populates state.cursors as it goes. Computing it
+  // afterwards made the notice below unreachable under --write — i.e. it only ever appeared
+  // on dry runs, and never on the one run where "history was deliberately skipped" is the
+  // thing you need to be told.
+  const firstRun = !Object.keys(state.cursors || {}).length;
   const db = new DatabaseSync(CRM_DB, { readOnly: true });
   const slugs = (onlySlug ? [onlySlug] : contactsToScan(db)).filter(Boolean);
 
@@ -125,27 +123,26 @@ function main() {
     // A trigger at or below the cursor was already handled on an earlier run; it is only
     // present here to provide context.
     const fresh = res.windows.filter((w) => w.msgId > cursor);
+    // Every near-miss past the cursor, unbounded. The first-run branch above returns
+    // before this, so the cursor is what keeps the list short — no age or count cap needed,
+    // and capping would hide the case this exists to catch.
     for (const nm of res.nearMisses) {
       if (nm.id <= cursor) continue;
       const row = rows.find((r) => r.id === nm.id);
-      if (row && Date.now() - row.sent_at <= NEAR_MISS_DAYS * 86400000) nearMisses.push({ slug, ...nm, at: row.sent_at });
+      nearMisses.push({ slug, ...nm, at: row ? row.sent_at : 0 });
     }
     if (fresh.length) found.push({ slug, ledger, windows: fresh, hi: maxRow.hi });
     else if (write) state.cursors[slug] = maxRow.hi;   // nothing to do; move on
   }
 
-  const firstRun = !Object.keys(state.cursors).length && sinceOverride == null;
   console.log(`scanned ${scanned} new message(s) across ${slugs.length} contact(s)`);
-  if (firstRun) {
+  if (firstRun && sinceOverride == null) {
     console.log('FIRST RUN: recording current position only. Past triggers are deliberately');
     console.log('not backfilled — Nathan: "it is not important that every past task is picked up".');
   }
   nearMisses.sort((a, b) => b.at - a.at);
-  for (const nm of nearMisses.slice(0, NEAR_MISS_MAX)) {
+  for (const nm of nearMisses) {
     console.log(`  ~ said "make sure" but not tracked — ${nm.slug}: "${String(nm.body).slice(0, 66)}"`);
-  }
-  if (nearMisses.length > NEAR_MISS_MAX) {
-    console.log(`  ~ …and ${nearMisses.length - NEAR_MISS_MAX} more in the last ${NEAR_MISS_DAYS}d`);
   }
   if (!found.length) {
     console.log('no "i\'ll make sure" triggers — no model call, nothing to do');
@@ -194,15 +191,15 @@ function main() {
       for (const r of res.rejected) console.log(`   ! ${f.slug}: ${r}`);
       for (const t of res.tasks) {
         const imp = TASKS.deriveImportance(t);
-        // Straight to ACTIVE, not draft. The draft panel existed to review the old
-        // pipeline's guesses about WHETHER something was a task; Nathan now states that
-        // himself, so the only guesses left are the fields — and those are editable in
-        // place. Making him accept a task he explicitly asked for is a pointless click.
+        // DRAFT, not active. I had reasoned that since Nathan now decides WHETHER something
+        // is a task, accepting it again is a pointless click — he overruled that: "i still
+        // want the draft queue. i should manually accept each one." The title, deadline and
+        // both booleans are still the model's guesses, and reviewing them at the moment
+        // they appear is cheaper than discovering a wrong one later.
         const out = TASKS.insertDraft(cdb, t);
         if (out === 'inserted') {
-          TASKS.setStatus(cdb, cdb.prepare('SELECT id FROM tasks WHERE key = ?').get(TASKS.taskKey(t.slug, t.msgId, t.title)).id, 'active');
           inserted += 1;
-          console.log(`   + [${imp}] ${t.title}${t.deadline ? `  (due ${t.deadline})` : ''}${t.actionable ? '' : '  [blocked]'}`);
+          console.log(`   + draft [${imp}] ${t.title}${t.deadline ? `  (due ${t.deadline})` : ''}${t.actionable ? '' : '  [blocked]'}`);
         } else {
           console.log(`   = already had: ${t.title}`);
         }
