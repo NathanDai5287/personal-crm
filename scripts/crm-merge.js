@@ -21,6 +21,7 @@ const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
 const { ROOT, PI_CLI, MERGE_MODEL, MERGE_PROMPT } = require('../lib/config');
+const { dateKey } = require('../lib/weeks');
 
 // The default user turn. Prompt variants may replace it (see opts.userMessage):
 // one of the review's high-severity findings is that ALL run-specific context —
@@ -95,7 +96,14 @@ function normalizeLastContact(slug, cwd) {
         const h = new DatabaseSync(db, { readOnly: true });
         const r = h.prepare('select max(sent_at) t from messages where contact_slug = ?').get(slug);
         h.close();
-        if (r && r.t) latest = new Date(r.t).toISOString().slice(0, 10);
+        // PACIFIC, NOT UTC. Every date this repo prints — ledger lines, week
+        // boundaries, checkLastContact's ledgerMaxDate — is America/Los_Angeles
+        // via lib/weeks.js. toISOString() here spoke UTC, so any message after
+        // 5pm Pacific wrote a Last contact one day AHEAD of what the ledger
+        // shows. Found via the first arena session: vlad's last message is
+        // 2026-06-17T00:01Z == 2026-06-16 5:01pm Pacific, one instant, two
+        // calendar dates, and the profile carried the UTC one.
+        if (r && r.t) latest = dateKey(r.t);
       } catch { /* fall through to the ledger */ }
     }
     // No archive rows to go on, so the ledger is the best available answer — and in

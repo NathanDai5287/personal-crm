@@ -34,6 +34,17 @@ Model / cost strategy below.)
   rows, nothing writes to it. Either wire it up or drop it.
 - [ ] **`owner` column is vestigial** — always `'nathan'`. Drop it or keep it deliberately.
 
+## Merge prompt v8 (from the first arena session, 2026-08-04)
+
+- [ ] **Reader-is-you framing.** The prompt never says the profile's reader is Nathan.
+  Write Nathan as "you", and stop accruing Nathan-self facts in other people's
+  profiles — relationship state (offers, plans between the two) stays. This was
+  Nathan's strongest arena note and no check can encode it.
+- [ ] **Ban catch-all "recurring topics" bullets** — each topic earns its own bullet or
+  is dropped.
+- [ ] Rank v8 vs G in the arena on the 12-case set; the judge is a screen only — its
+  F-lean inverted Nathan's blind votes 4 times in 12.
+
 ## Manual overrides (designed, not built)
 
 - [ ] **`<!--pinned-->`** — a line the merge may never touch. For invariants:

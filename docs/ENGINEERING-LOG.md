@@ -822,6 +822,46 @@ the module's — the test context had `path`; the module did not. Fixed with the
 one-line import; re-verified through the real module: stale profile date
 2026-06-01 + ledger ending 2026-08-02 → `{from: 2026-06-01, to: 2026-08-02}`.
 
+### MEASUREMENT — first arena session: the human inverts the judge
+Nathan voted the same 12 comparisons blind: **G 4, F 1, tie 7** — against the
+judge's F 5, G 2, tie 5. Per-case agreement 8/12, and all four disagreements are
+the judge picking F where Nathan picked G or tie (large-ledger, large-profile,
+ho-partner, injection). The judge's F-lean is not Nathan's taste — treat the
+judge as a screen, never a verdict, which is what the arena was built to prove.
+Nathan explicitly liked "ranges with a center" (the `@primary` design) and G's
+detail density — the exact thing the judge scored as restraint failures. His
+notes yielded three prompt findings no deterministic check could encode:
+1. **The model doesn't know the reader is Nathan.** Profiles say "Nathan" in
+   third person and accrue Nathan-self notes inside other people's files. The
+   prompt should say the reader IS Nathan (write him as "you") and keep
+   self-facts out of contacts' profiles — relationship state (offers, plans
+   between them) stays.
+2. **No catch-all "recurring topics" bullets** — split topics into their own
+   bullets or drop them.
+3. Ties dominated (7/12): the two prompts are close, so v8 should target the
+   note findings, not the grammar.
+
+### SURPRISE — the arena's "very serious error" was the fix working, and it found a UTC seam
+Nathan flagged ho-large: both variants moved `Last contact` 2026-06-17 →
+2026-06-16, "a very serious error." Root cause: one instant, two calendar dates.
+Vlad's last message is 2026-06-17T00:01Z == **2026-06-16 5:01pm Pacific**. Every
+date this repo prints is Pacific (`lib/weeks.js` `dateKey`, ledger lines, week
+boundaries, `ledgerMaxDate`), but the profile carried the UTC date, and the
+sandbox normaliser (ledger fallback) corrected it to Pacific truth — the rewind
+was RIGHT. The actual bug was in the normaliser's archive branch:
+`toISOString().slice(0,10)` is UTC, so any last message after 5pm Pacific would
+write a date one day ahead of every ledger — a branch armed only this morning by
+the `require('path')` fix. Now `dateKey(r.t)`; both branches agree; verified on
+the vlad instant from both paths.
+
+### CORRECTION — the founding evidence for code-derived Last contact was partly a timezone artifact
+The DECISION above cites K3 "writing 2026-06-17 for a ledger ending 2026-06-16"
+as fabrication. That case was vlad — and 2026-06-17 is exactly the UTC date of
+the same final instant. K3 almost certainly echoed the UTC-polluted profile
+value rather than inventing a date. The decision stands — deriving the field in
+code is still right, now more so — but the evidence was misread, and "the model
+fabricates dates" should not be re-cited from that example.
+
 ### MEASUREMENT — first semantic F-vs-G verdict: judge leans F, arena will arbitrate
 Blind order-swapped judge over the 12-case realistic-sandbox run: overall F 5,
 G 2, tie 5 (dimensions F 14 / G 8 / tie 38). G took exactly the two fixtures
