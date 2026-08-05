@@ -114,9 +114,14 @@ function piSummarize(prompt, system) {
 }
 // The daily/weekly wording lives in CODE, not the template, because the code is
 // what knows which bucket it is building. The template decides how to frame it.
+// These are prompt v3's style strings (promoted 2026-08-04 with prompts/compact.md;
+// evals/compact-run.js STYLE_V1/STYLE_V3 keep per-variant copies so the eval's
+// control never silently tracks production): a durability filter with money named
+// as durable, a word ceiling well above v2's starvation budget, and
+// periods-not-semicolons to kill the clause pileup.
 const STYLE_INSTRUCTION = {
-  daily: "Summarize the day in ONE concise line: what was discussed/done, plus any durable facts (plans, decisions, life events). Past tense, no preamble.",
-  weekly: "Summarize the period in 1-2 concise lines: the main threads and any durable facts. Past tense, no preamble.",
+  daily: "Summarize the day in ONE line: every durable fact (plans, decisions, life events, money owed or paid) and nothing else — drop chatter, jokes, games, and one-off details that change nothing. Short past-tense sentences separated by periods, not semicolons. At most ~65 words: cut words and noise, never a durable fact.",
+  weekly: "Summarize the period in 1-2 lines: the main threads and every durable fact, nothing else. Short past-tense sentences separated by periods, not semicolons. At most ~110 words: cut words and noise, never a durable fact.",
 };
 
 // Exported so evals/ can build the exact prompt this pipeline sends without

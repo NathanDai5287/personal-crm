@@ -41,10 +41,22 @@ const STYLE_V2 = {
   daily: 'Summarize this day in at most 40 words: what happened, plus any durable facts (plans, decisions, life events).',
   weekly: 'Summarize this week in at most 70 words: the main threads and any durable facts.',
 };
+// v3 keeps v1's coverage stance and fixes only its two defects. First attempt
+// said "cut words, never facts" with no noise filter and the model kept
+// EVERYTHING (1952-char day line, 17 semicolons) — coverage-maxxing is the
+// mirror image of v2's amnesia. So: an explicit durability filter with money
+// named as durable (the exact category v2's "drop logistics" lost), a word
+// ceiling well above v2's starvation budget (~65 words ≈ the 400-char daily
+// bound; v2's 40 dropped facts), and periods-not-semicolons for the pileup.
+const STYLE_V3 = {
+  daily: 'Summarize the day in ONE line: every durable fact (plans, decisions, life events, money owed or paid) and nothing else — drop chatter, jokes, games, and one-off details that change nothing. Short past-tense sentences separated by periods, not semicolons. At most ~65 words: cut words and noise, never a durable fact.',
+  weekly: 'Summarize the period in 1-2 lines: the main threads and every durable fact, nothing else. Short past-tense sentences separated by periods, not semicolons. At most ~110 words: cut words and noise, never a durable fact.',
+};
 
 const VARIANTS = {
-  v1: { label: 'v1 (current)', prompt: 'prompts/compact-v1.md', style: STYLE_V1 },
+  v1: { label: 'v1 (old prod)', prompt: 'prompts/compact-v1.md', style: STYLE_V1 },
   v2: { label: 'v2 (rewrite)', prompt: 'prompts/compact-v2.md', style: STYLE_V2 },
+  v3: { label: 'v3 (current)', prompt: 'prompts/compact-v3.md', style: STYLE_V3 },
 };
 
 function buildPrompt(c, variantKey) {
