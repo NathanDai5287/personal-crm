@@ -18,6 +18,7 @@
 // caller. Use --dry-run to validate the argv construction independent of
 // whether `pi` can actually authenticate.
 const fs = require('fs');
+const path = require('path');
 const { execFileSync } = require('child_process');
 const { ROOT, PI_CLI, MERGE_MODEL, MERGE_PROMPT } = require('../lib/config');
 
@@ -97,9 +98,11 @@ function normalizeLastContact(slug, cwd) {
         if (r && r.t) latest = new Date(r.t).toISOString().slice(0, 10);
       } catch { /* fall through to the ledger */ }
     }
-    // No archive (the eval sandbox copies only the profile and its ledger), so
-    // the ledger is the best available answer — and there it IS the answer,
-    // because a sandbox run is a single chunk.
+    // No archive rows to go on, so the ledger is the best available answer — and in
+    // the eval sandbox it IS the answer, because a sandbox run is a single chunk.
+    // The sandbox does now carry a `data/crm.db`, but it is a zero-row stand-in
+    // (evals/sandbox.js): the query above opens it fine and returns NULL, which
+    // lands here exactly as the no-file case did. Verified 2026-08-04.
     if (!latest) {
       for (const line of fs.readFileSync(ledger, 'utf8').split('\n')) {
         const m = /^\[(\d{4}-\d{2}-\d{2})[\s\]]/.exec(line);
