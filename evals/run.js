@@ -12,18 +12,22 @@
 // REFUSES to run a paid model unless --allow-paid is passed explicitly, so no
 // accidental flag or default can spend money.
 //
-// SANDBOXING: every (variant, case) gets its own throwaway tree containing only a
-// copy of the profile and its ledger. The merge runs with cwd set there, so a
+// SANDBOXING: every (variant, case) gets its own throwaway tree — a COPY of the
+// project, with fixture profiles standing in for data/contacts/ and synthesised
+// stand-ins for the archive and the secrets. The merge runs with cwd set there, so a
 // prompt under test physically cannot damage a real profile, and "which files
-// changed" becomes an exact, cheap signal rather than a guess.
+// changed" becomes an exact, cheap signal rather than a guess. It used to be a cwd
+// with exactly two files in it, which is the tell this eval was measuring around;
+// evals/sandbox.js documents what is copied, what is stood in for, and why.
+// `--bare-sandbox` restores the old two-file tree as a control.
 
 const fs = require('fs');
 const path = require('path');
-const crypto = require('crypto');
 const { mergeContact } = require('../scripts/crm-merge');
 const { buildFixtures } = require('./cases');
 const { runChecks } = require('./checks');
 const { extractThinking, formatTrace } = require('./thinking');
+const { makeSandbox, snapshot, projectFiles, profileSet } = require('./sandbox');
 const { openCrmDb } = require('../lib/signal-db');
 
 const SCRATCH = process.env.CRM_EVAL_DIR
@@ -127,6 +131,16 @@ const VARIANTS = {
     prompt: 'prompts/merge-v6.md',
     user: (c, today) => VARIANTS.b.user(c, today),
   },
+  // G = the provenance-ranges prompt, promoted to production merge.md
+  // 2026-08-04. F is the control (same lineage minus the range grammar). The
+  // first F-vs-G run answers whether Opus emits the new grammar as reliably as
+  // the old (spec §7: drift rates are separator-specific) and hands the arena
+  // its first pair.
+  g: {
+    label: 'G (ranges)',
+    prompt: 'prompts/merge-v7.md',
+    user: (c, today) => VARIANTS.b.user(c, today),
+  },
   // K3 on F, to confirm the weaker model can carry the extra convention.
   kf_high: {
     label: 'K3+F think=high', prompt: 'prompts/merge-v6.md',
@@ -148,31 +162,9 @@ const VARIANTS = {
   },
 };
 
-function sha(s) { return crypto.createHash('sha1').update(s).digest('hex'); }
-
-// Hash every file in the sandbox so "what changed" is exact.
-function snapshot(dir) {
-  const out = new Map();
-  const walk = (d, rel) => {
-    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
-      const abs = path.join(d, e.name);
-      const r = rel ? `${rel}/${e.name}` : e.name;
-      if (e.isDirectory()) walk(abs, r);
-      else out.set(r, sha(fs.readFileSync(abs)));
-    }
-  };
-  walk(dir, '');
-  return out;
-}
-
-function makeSandbox(root, c) {
-  const contacts = path.join(root, 'data', 'contacts');
-  const refresh = path.join(contacts, '_refresh');
-  fs.mkdirSync(refresh, { recursive: true });
-  fs.writeFileSync(path.join(contacts, `${c.slug}.md`), c.profile);
-  fs.writeFileSync(path.join(refresh, `${c.slug}.new.txt`), c.ledger);
-  return path.join(contacts, `${c.slug}.md`);
-}
+// snapshot() and makeSandbox() live in evals/sandbox.js — the sandbox is now a whole
+// project tree rather than two files, and the rules about what may and may not be
+// copied into it are long enough to deserve their own file.
 
 // Resolve ⟨m…⟩ ids against the REAL archive (read-only).
 function makeResolver() {
@@ -182,7 +174,35 @@ function makeResolver() {
   return (ids) => ids.filter((id) => !stmt.get(id));
 }
 
-function scoreOne(c, variantKey, runDir, resolveIds) {
+// Resolve a RANGE citation against the real archive, for citation_range_valid.
+// `m<id>` is Signal's global rowid, so the range means the thread of its start —
+// `conv_id = thread(start) AND id BETWEEN start AND end` (docs/PROVENANCE-SPEC.md
+// §3). Without this the check falls back to the ledger, which can only judge
+// citations whose endpoints are inside the chunk under test; the archive also sees
+// the ones carried forward from earlier chunks.
+function makeRangeResolver() {
+  let db;
+  try { db = openCrmDb(); } catch { return null; }
+  const thread = db.prepare('SELECT conv_id FROM messages WHERE id = ?');
+  const span = db.prepare('SELECT id FROM messages WHERE conv_id = ? AND id BETWEEN ? AND ? ORDER BY id');
+  return (start, end) => {
+    const s = thread.get(start);
+    const e = thread.get(end);
+    // A row archived before conv_id existed cannot be thread-filtered. Report it
+    // as not found so the check SKIPS the citation rather than failing it on an
+    // archive gap the merge had no part in.
+    const startThread = s && s.conv_id != null ? s.conv_id : null;
+    return {
+      startFound: Boolean(s) && startThread !== null,
+      endFound: Boolean(e) && e.conv_id != null,
+      startThread,
+      endThread: e && e.conv_id != null ? e.conv_id : null,
+      ids: startThread === null ? [] : span.all(startThread, start, end).map((r) => r.id),
+    };
+  };
+}
+
+function scoreOne(c, variantKey, runDir, resolveIds, resolveRange) {
   const dir = path.join(runDir, variantKey, c.name);
   const meta = JSON.parse(fs.readFileSync(path.join(dir, 'result.json'), 'utf8'));
   const profileRel = `data/contacts/${c.slug}.md`;
@@ -195,6 +215,7 @@ function scoreOne(c, variantKey, runDir, resolveIds) {
     filesBefore: new Map(meta.filesBefore),
     filesAfter: new Map(meta.filesAfter),
     resolveIds,
+    resolveRange,
     canary: c.canary,
     expectNoop: c.expectNoop,
   });
@@ -206,13 +227,16 @@ function modelFor(variantKey, globalModel) {
   return VARIANTS[variantKey].model || globalModel;
 }
 
-function runOne(c, variantKey, runDir, globalModel, today) {
+// opts: { cases, bare } — `cases` is the whole fixture set, which makeSandbox uses
+// as the decoy-profile pool so data/contacts/ is not a directory of one. Omitting it
+// still works and yields a single-profile sandbox.
+function runOne(c, variantKey, runDir, globalModel, today, opts = {}) {
   const v = VARIANTS[variantKey];
   const model = modelFor(variantKey, globalModel);
   const dir = path.join(runDir, variantKey, c.name);
   const sandbox = path.join(dir, 'sandbox');
   fs.mkdirSync(sandbox, { recursive: true });
-  makeSandbox(sandbox, c);
+  makeSandbox(sandbox, c, { cases: opts.cases, bare: opts.bare });
 
   const filesBefore = snapshot(sandbox);
   const started = Date.now();
@@ -319,7 +343,7 @@ function main() {
   // prompts, reported as a clean result. An eval that quietly measures something other
   // than what was asked for is worse than one that crashes.
   const VALUE_FLAGS = ['--model', '--variant', '--case', '--score-only', '--today', '--fixtures-from'];
-  const BOOL_FLAGS = ['--allow-paid'];
+  const BOOL_FLAGS = ['--allow-paid', '--bare-sandbox'];
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (!a.startsWith('--')) continue;
@@ -335,6 +359,10 @@ function main() {
   const onlyCase = arg('--case', null);
   const scoreOnly = arg('--score-only', null);
   const today = arg('--today', new Date().toISOString().slice(0, 10));
+  // The pre-2026-08-04 two-file sandbox, kept as the control for "did the realistic
+  // tree move the score". Not a default: a bare cwd is the tell this eval was
+  // measuring around (evals/sandbox.js).
+  const bare = argv.includes('--bare-sandbox');
 
   // Default to the FREE Opus variants only. The paid and reasoning-sweep
   // variants must be asked for by name, so a bare `node evals/run.js` can never
@@ -374,6 +402,11 @@ function main() {
     cases = buildFixtures(fixturesDir);
     fs.writeFileSync(path.join(fixturesDir, 'cases.json'), JSON.stringify(cases, null, 2));
   }
+  // The decoy-profile pool is the WHOLE fixture set, captured before --case filters
+  // it. Otherwise `--case injection` would build a sandbox with one profile in
+  // data/contacts/ and quietly stop being comparable to the same case inside a full
+  // run — the sandbox a case sees must not depend on what else was selected.
+  const allCases = cases;
   if (onlyCase) cases = cases.filter((c) => c.name === onlyCase);
   const variants = selected;
 
@@ -382,7 +415,15 @@ function main() {
     const m = modelFor(v, model);
     console.log(`  ${VARIANTS[v].label.padEnd(18)} ${VARIANTS[v].prompt.padEnd(22)} ${m}${m.startsWith(FREE_PREFIX) ? '  (subscription — free)' : '  ** PAID **'}`);
   }
-  console.log(`runDir: ${runDir}\n`);
+  console.log(`runDir: ${runDir}`);
+  // Only on a real run: --score-only builds no sandbox, and printing what one would
+  // have contained would describe a tree this invocation never made.
+  if (!scoreOnly) {
+    console.log(bare
+      ? 'sandbox: BARE — profile + ledger only (the pre-2026-08-04 tree)\n'
+      : `sandbox: project copy — ${projectFiles().length} project file(s), `
+        + `${profileSet(allCases, null).size} profile(s) in data/contacts/, 1 ledger\n`);
+  }
   for (const c of cases) console.log(`  ${pad(c.name, 16)} ${pad(c.slug, 24)} ${pad(`${c.messages} msgs`, 12)} ${c.why}`);
 
   if (!scoreOnly) {
@@ -390,7 +431,7 @@ function main() {
     for (const c of cases) {
       for (const v of variants) {
         process.stdout.write(`run ${pad(`${v}/${c.name}`, 24)} … `);
-        const m = runOne(c, v, runDir, model, today);
+        const m = runOne(c, v, runDir, model, today, { cases: allCases, bare });
         const th = m.thinkingBlocks
           ? `  think ${m.thinkingBlocks}blk/${(m.thinkingChars / 1000).toFixed(1)}k${m.thinkingReadable ? '' : ' (enc)'}`
           : '';
@@ -400,10 +441,11 @@ function main() {
   }
 
   const resolveIds = makeResolver();
+  const resolveRange = makeRangeResolver();
   const scored = [];
   for (const c of cases) {
     for (const v of variants) {
-      try { scored.push(scoreOne(c, v, runDir, resolveIds)); } catch (e) {
+      try { scored.push(scoreOne(c, v, runDir, resolveIds, resolveRange)); } catch (e) {
         console.log(`score ${v}/${c.name}: ${e.message}`);
       }
     }
