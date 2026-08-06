@@ -1,0 +1,287 @@
+/* ============================================================================
+   BINDERY — the design system for personal-crm.
+   The app's real job is archival: it keeps what would otherwise expire, and
+   every claim carries a source you can pull. So the interface is a card catalog.
+   Ground is bindery gray-green (never cream), marks are oxblood and stamp-blue,
+   prose is Newsreader, data is typewritten. The signature is provenance printed
+   as a rubber-stamped call number, struck slightly off-square.
+
+   This file is the design phase's single source of truth. When the UI is wired,
+   it becomes crm-web.js's STYLE constant verbatim; nothing here depends on the
+   pipeline. Committed to ONE light identity on purpose — a bindery is paper.
+   ========================================================================== */
+:root{
+  --ground:#D7DBCE;      /* the page: bindery gray-green cloth            */
+  --card:#F5F2E9;        /* a catalog card: aged cream                    */
+  --card2:#ECE8DA;       /* a drawer / inset panel                        */
+  --paper:#FBF9F2;       /* pale inset stock (quotes, pre, barber)        */
+  --ink:#1A1D19;         /* typewriter black, slightly green-black        */
+  --soft:#565B4F;        /* secondary type                               */
+  --faint:#8A8F80;       /* tertiary / disabled                          */
+  --rule:#B4B9A8;        /* hairline rules between rows                   */
+  --cardline:#B4B9A855;  /* ruled lines printed on a card                 */
+  --row-rule:#C9CDBE;    /* table row rule                                */
+  --zebra:#00000004;     /* even-row tint                                 */
+  --hover:#2E4A6B0d;     /* row hover wash                                */
+  --dot:#0000000a;       /* the paper grain dots                          */
+  --ox:#7B2230;          /* oxblood — the "needs a human" ink            */
+  --ox-soft:#9A4451;     /* oxblood tint                                 */
+  --stamp:#2E4A6B;       /* stamp blue — "done, on the record"           */
+  --amber:#9A741C;       /* the one caution ink (aging, not yet wrong)   */
+  --tab:#C6BE9E;         /* manila tab                                    */
+  --tab-on:#F5F2E9;      /* the selected tab (= card, so it joins it)     */
+  --tab-ink:#453F2B;     /* text on an unselected tab                     */
+  --tab-hover:#CFC7A6;   /* a tab under the cursor                        */
+  --flag-bg:#F6ECD9;     /* caution cell wash                            */
+  --bad-bg:#F4E4E4;      /* fault cell wash                              */
+  --odo-bg:#EDE9DB;      /* odometer digit ground                         */
+  --odo-line:#C7CBBB;    /* odometer digit border                         */
+  --shadow:2px 3px 0 #0000000f;
+}
+/* READING LAMP — the dark identity. Not an inversion: warm paper stock under a
+   lamp on dark green-black cloth, oxblood and stamp-blue lifted just enough to
+   carry on the dark. Follows the OS by default; the toggle can pin either way. */
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --ground:#12140E; --card:#211F17; --card2:#1A1813; --paper:#191710;
+    --ink:#ECE6D6; --soft:#9C9583; --faint:#6E6857;
+    --rule:#3B382D; --cardline:#3B382D66; --row-rule:#2E2C22;
+    --zebra:#ffffff05; --hover:#84AAD012; --dot:#ffffff08;
+    --ox:#CF6B72; --ox-soft:#B85860; --stamp:#84AAD0; --amber:#CDA047;
+    --tab:#332F22; --tab-on:#211F17; --tab-ink:#C4B896; --tab-hover:#403A29;
+    --flag-bg:#2A2416; --bad-bg:#2E1B1D;
+    --odo-bg:#141209; --odo-line:#3B382D; --shadow:2px 3px 0 #00000045;
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#12140E; --card:#211F17; --card2:#1A1813; --paper:#191710;
+  --ink:#ECE6D6; --soft:#9C9583; --faint:#6E6857;
+  --rule:#3B382D; --cardline:#3B382D66; --row-rule:#2E2C22;
+  --zebra:#ffffff05; --hover:#84AAD012; --dot:#ffffff08;
+  --ox:#CF6B72; --ox-soft:#B85860; --stamp:#84AAD0; --amber:#CDA047;
+  --tab:#332F22; --tab-on:#211F17; --tab-ink:#C4B896; --tab-hover:#403A29;
+  --flag-bg:#2A2416; --bad-bg:#2E1B1D;
+  --odo-bg:#141209; --odo-line:#3B382D; --shadow:2px 3px 0 #00000045;
+}
+*{box-sizing:border-box}
+html{background:var(--ground)}
+body{
+  margin:0;color:var(--ink);background:var(--ground);
+  font:16.5px/1.55 Newsreader,Georgia,"Times New Roman",serif;
+  background-image:radial-gradient(var(--dot) 1px,transparent 1px);
+  background-size:3px 3px;-webkit-font-smoothing:antialiased;
+}
+.tw{font-family:"Courier Prime",ui-monospace,Consolas,monospace}
+h1,h2,h3,h4{margin:0;font-weight:500;letter-spacing:-.005em}
+a{color:var(--stamp);text-decoration:none}
+a:hover{color:var(--ox);text-decoration:underline;text-underline-offset:2px}
+:focus-visible{outline:2px solid var(--ox);outline-offset:2px}
+button{font:inherit;cursor:pointer}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}
+
+/* ---- page frame ---------------------------------------------------------- */
+.sheet{max-width:1180px;margin:0 auto;padding:0 22px 64px}
+.route-tag{position:fixed;top:0;right:0;z-index:20;background:var(--ink);color:var(--ground);
+  font-family:"Courier Prime",monospace;font-size:11px;letter-spacing:.14em;padding:4px 11px;
+  border-bottom-left-radius:0;text-transform:uppercase}
+.lamp{position:fixed;top:0;left:0;z-index:20;background:var(--ink);color:var(--ground);border:0;
+  font-family:"Courier Prime",monospace;font-size:11px;letter-spacing:.12em;padding:4px 11px;
+  text-transform:uppercase;cursor:pointer}
+.lamp:hover{background:var(--ox)}
+
+/* ---- masthead / drawer plate -------------------------------------------- */
+.mast{padding:26px 0 8px}
+.mast .form-no{font-family:"Courier Prime",monospace;font-size:11px;letter-spacing:.22em;
+  text-transform:uppercase;color:var(--soft)}
+.mast h1{font-size:34px;line-height:1.02;margin-top:3px}
+.mast h1 em{font-style:italic;color:var(--ox)}
+
+.tabs{display:flex;gap:3px;padding-left:8px;margin-top:16px}
+.tabs a{background:var(--tab);border:1px solid var(--rule);border-bottom:0;
+  padding:5px 13px 6px;font-family:"Courier Prime",monospace;font-size:12px;letter-spacing:.08em;
+  color:var(--tab-ink);text-transform:uppercase;position:relative;top:1px}
+.tabs a:hover{text-decoration:none;color:var(--ox);background:var(--tab-hover)}
+.tabs a.on{background:var(--tab-on);color:var(--ox);font-weight:700;border-bottom:1px solid var(--tab-on);z-index:2}
+
+.plate{background:var(--card);border:1px solid var(--rule);box-shadow:var(--shadow);
+  display:grid;grid-template-columns:1fr auto;align-items:center;gap:22px;padding:15px 22px}
+.plate .cap{font-family:"Courier Prime",monospace;font-size:11px;letter-spacing:.2em;
+  text-transform:uppercase;color:var(--soft)}
+.plate h2{font-size:26px;margin-top:1px}
+.plate h2 em{font-style:italic;color:var(--ox)}
+.counts{display:flex;gap:26px;text-align:right}
+.counts div{white-space:nowrap}
+.counts b{display:block;font-family:"Courier Prime",monospace;font-size:20px;font-weight:700;font-variant-numeric:tabular-nums}
+.counts span{font-family:"Courier Prime",monospace;font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--soft)}
+
+/* ---- the card drawer ----------------------------------------------------- */
+.drawer{background:var(--card2);border:1px solid var(--rule);border-top:0;
+  padding:16px;display:grid;gap:15px;grid-template-columns:repeat(auto-fill,minmax(330px,1fr))}
+.cd{position:relative;display:block;color:inherit;background:var(--card);
+  border:1px solid var(--rule);box-shadow:1px 2px 0 #00000012;
+  padding:14px 16px 12px 36px;min-height:158px;
+  background-image:repeating-linear-gradient(to bottom,transparent 0 25px,var(--cardline) 25px 26px);
+  background-position:0 66px;transition:box-shadow .12s,transform .12s}
+a.cd:hover{text-decoration:none;box-shadow:3px 4px 0 #00000018;transform:translateY(-1px)}
+.cd::before{content:"";position:absolute;left:14px;top:20px;width:12px;height:12px;
+  border:1px solid var(--rule);border-radius:50%;background:var(--ground);box-shadow:inset 0 1px 1px #00000018}
+.cd .call{font-family:"Courier Prime",monospace;font-size:10.5px;letter-spacing:.09em;color:var(--soft)}
+.cd h3{font-size:21px;line-height:1.12;margin:1px 0 2px}
+.cd .rel{font-style:italic;color:var(--soft);font-size:14.5px}
+.cd .fx{margin:10px 0 0;padding:0;list-style:none;font-size:14.5px;line-height:1.5}
+.cd .fx li{padding:0 0 4px}
+.cd .meta{display:flex;justify-content:space-between;align-items:flex-end;margin-top:11px;
+  font-family:"Courier Prime",monospace;font-size:10.5px;letter-spacing:.03em;color:var(--soft)}
+
+/* ---- the signature: stamped source slip & corner stamp ------------------ */
+.slip{display:inline-block;border:1.5px solid var(--stamp);color:var(--stamp);
+  font-family:"Courier Prime",monospace;font-size:10px;letter-spacing:.05em;
+  padding:0 5px;transform:rotate(-1.4deg);opacity:.88;white-space:nowrap;vertical-align:1px}
+.slip:hover{opacity:1;text-decoration:none;background:#2E4A6B12}
+.slip.ox{border-color:var(--ox);color:var(--ox);transform:rotate(1.1deg)}
+.stamp{position:absolute;right:12px;top:13px;border:2px solid var(--ox);color:var(--ox);
+  font-family:"Courier Prime",monospace;font-weight:700;font-size:10px;letter-spacing:.13em;
+  text-transform:uppercase;padding:2px 6px;transform:rotate(-7deg);opacity:.74}
+.stamp.blue{border-color:var(--stamp);color:var(--stamp);transform:rotate(5deg);opacity:.6}
+.stamp.amber{border-color:var(--amber);color:var(--amber);transform:rotate(3deg);opacity:.8}
+
+/* ---- a section head (heavy rule, catalog style) -------------------------- */
+.head{display:grid;grid-template-columns:1fr auto;align-items:end;gap:16px;
+  margin:34px 0 0;padding:14px 2px 9px;border-bottom:2px solid var(--ink)}
+.head h2{font-size:25px}
+.head .cap{font-family:"Courier Prime",monospace;font-size:11px;letter-spacing:.16em;
+  text-transform:uppercase;color:var(--soft)}
+
+/* ---- condition report (health strip) ------------------------------------ */
+.cond{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+  background:var(--rule);gap:1px;border:1px solid var(--rule)}
+.cell{background:var(--card);padding:11px 14px}
+.cell .k{font-family:"Courier Prime",monospace;font-size:10px;letter-spacing:.13em;
+  text-transform:uppercase;color:var(--soft)}
+.cell .v{font-family:"Courier Prime",monospace;font-size:22px;font-weight:700;
+  font-variant-numeric:tabular-nums;margin-top:3px;line-height:1.05}
+.cell .v small{font-size:12px;font-weight:400;color:var(--soft)}
+.cell.flag{background:var(--flag-bg)}
+.cell.flag .v{color:var(--amber)}
+.cell.bad{background:var(--bad-bg)}
+.cell.bad .v{color:var(--ox)}
+.cell .sub{font-family:"Courier Prime",monospace;font-size:10.5px;color:var(--soft);margin-top:2px}
+
+/* ---- circulation ledger (runs / roster tables) -------------------------- */
+.ledger{background:var(--card);border:1px solid var(--rule);box-shadow:var(--shadow)}
+table{width:100%;border-collapse:collapse;font-family:"Courier Prime",monospace;font-size:12.5px}
+thead th{text-align:left;padding:9px 15px;border-bottom:1px solid var(--rule);
+  font-weight:700;letter-spacing:.1em;font-size:10.5px;text-transform:uppercase;color:var(--soft)}
+tbody td{padding:8px 15px;border-bottom:1px solid var(--row-rule);vertical-align:top}
+tbody tr:last-child td{border-bottom:0}
+tbody tr:nth-child(even) td{background:var(--zebra)}
+tbody tr:hover td{background:var(--hover)}
+td.r{text-align:right;font-variant-numeric:tabular-nums}
+.person{font-family:Newsreader,serif;font-size:16px;font-weight:500}
+.person a{color:var(--ink)}
+.person a:hover{color:var(--ox)}
+.sub-slug{font-size:10px;color:var(--faint);letter-spacing:.04em}
+.waiting-hi{color:var(--ox);font-weight:700}
+
+/* rowid odometer — the actual watermark, shown as ledger digits */
+.odo{display:inline-flex;gap:1px}
+.odo b{background:var(--odo-bg);border:1px solid var(--odo-line);font-size:11px;font-weight:700;
+  padding:0 3px;color:var(--stamp)}
+
+/* status marks — a stamped word, not a colored dot */
+.mk{font-weight:700;letter-spacing:.09em;font-size:10px;text-transform:uppercase;
+  border:1.4px solid;padding:1px 5px;display:inline-block;transform:rotate(-.7deg)}
+.mk.sw{color:var(--stamp);border-color:var(--stamp)}
+.mk.rd{color:var(--ox);border-color:var(--ox)}
+.mk.held{color:var(--soft);border-color:var(--rule)}
+.mk.amber{color:var(--amber);border-color:var(--amber)}
+.hand{font-family:Newsreader,serif;font-style:italic;color:var(--soft);font-size:14px}
+
+/* ---- buttons / desk actions --------------------------------------------- */
+.acts{display:flex;flex-wrap:wrap;gap:9px;align-items:center;padding:14px 18px;
+  border-top:1px solid var(--rule)}
+.btn{font-family:"Courier Prime",monospace;font-size:11.5px;letter-spacing:.1em;
+  text-transform:uppercase;background:var(--card2);border:1.5px solid var(--ink);
+  padding:6px 13px;color:var(--ink)}
+.btn:hover{background:var(--ink);color:var(--card)}
+.btn.pr{border-color:var(--ox);color:var(--ox)}
+.btn.pr:hover{background:var(--ox);color:var(--card)}
+.btn.sm{font-size:10px;padding:2px 8px;letter-spacing:.06em}
+.btn[disabled]{border-color:var(--rule);color:var(--faint);cursor:not-allowed}
+.btn[disabled]:hover{background:var(--card2);color:var(--faint)}
+.note{font-family:Newsreader,serif;font-style:italic;color:var(--soft);font-size:14px;margin-left:auto}
+
+/* ---- profile ------------------------------------------------------------- */
+.back{font-family:"Courier Prime",monospace;font-size:12px;letter-spacing:.06em;
+  color:var(--soft);padding:22px 0 0}
+.profile{background:var(--card);border:1px solid var(--rule);box-shadow:var(--shadow);
+  padding:6px 30px 30px;margin-top:8px}
+.profile h1{font-size:31px;margin:20px 0 2px}
+.profile .rel{font-style:italic;color:var(--soft);font-size:17px}
+.profile .fields{font-family:"Courier Prime",monospace;font-size:12.5px;color:var(--soft);
+  margin:12px 0 4px;display:flex;flex-wrap:wrap;gap:5px 22px}
+.profile .fields b{color:var(--ink);font-weight:400}
+.profile h2{font-size:19px;margin:28px 0 8px;padding-bottom:6px;border-bottom:2px solid var(--ink)}
+.profile ul{list-style:none;padding:0;margin:0}
+.profile li{padding:5px 0 5px 20px;position:relative;font-size:15.5px;line-height:1.5;border-bottom:1px solid var(--cardline)}
+.profile li::before{content:"—";position:absolute;left:0;color:var(--rule)}
+.profile .dt{font-family:"Courier Prime",monospace;font-size:11.5px;font-weight:700;
+  color:var(--ox);margin-right:6px;letter-spacing:.03em}
+/* timeline ledger */
+.tl{margin-top:2px}
+.tl .row{display:grid;grid-template-columns:96px 1fr;gap:12px;padding:6px 0;border-bottom:1px solid var(--cardline);font-size:14.5px;line-height:1.45}
+.tl .row .when{font-family:"Courier Prime",monospace;font-size:11px;color:var(--soft);padding-top:2px}
+/* recent raw as pull-quotes on the card stock */
+.charge{display:flex;flex-direction:column;gap:6px;margin-top:8px}
+.q{max-width:76%;padding:7px 12px;border:1px solid var(--rule);font-size:14.5px;line-height:1.42;background:var(--paper)}
+.q.them{align-self:flex-start;border-left:3px solid var(--stamp)}
+.q.me{align-self:flex-end;border-right:3px solid var(--ox);background:var(--card2)}
+.q .who{display:block;font-family:"Courier Prime",monospace;font-size:10px;letter-spacing:.08em;
+  text-transform:uppercase;color:var(--soft);margin-bottom:2px}
+
+/* ---- special states ------------------------------------------------------ */
+.notice{background:var(--card);border:2px solid var(--ox);box-shadow:var(--shadow);
+  padding:14px 18px;margin-top:8px;position:relative}
+.notice .banner{font-family:"Courier Prime",monospace;font-weight:700;font-size:12px;
+  letter-spacing:.18em;text-transform:uppercase;color:var(--ox)}
+.notice p{margin:6px 0 0;font-size:15.5px}
+.notice.amber{border-color:var(--amber)}
+.notice.amber .banner{color:var(--amber)}
+
+.inprogress{background:var(--card);border:1px solid var(--rule);box-shadow:var(--shadow);
+  padding:15px 18px;margin-top:8px}
+.inprogress .banner{font-family:"Courier Prime",monospace;font-weight:700;font-size:12px;
+  letter-spacing:.16em;text-transform:uppercase;color:var(--stamp);display:flex;align-items:center;gap:10px}
+.barber{flex:1;height:9px;border:1px solid var(--rule);overflow:hidden;background:var(--odo-bg)}
+.barber i{display:block;height:100%;width:200%;
+  background:repeating-linear-gradient(115deg,var(--stamp) 0 9px,transparent 9px 20px);
+  opacity:.5;animation:march 1.1s linear infinite}
+@keyframes march{to{transform:translateX(-11px)}}
+.inprogress pre{font-family:"Courier Prime",monospace;font-size:12px;background:var(--paper);
+  border:1px solid var(--rule);padding:9px 11px;margin:11px 0 0;overflow-x:auto;color:var(--soft)}
+
+.quiet{background:var(--card);border:1px dashed var(--rule);padding:26px 18px;margin-top:8px;
+  text-align:center;color:var(--soft)}
+.quiet .big{font-family:"Courier Prime",monospace;font-size:12px;letter-spacing:.2em;
+  text-transform:uppercase;color:var(--faint)}
+.quiet p{margin:7px 0 0;font-style:italic}
+
+/* ---- gallery index ------------------------------------------------------- */
+.gal{display:grid;gap:15px;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));margin-top:8px}
+.gal a{display:block;background:var(--card);border:1px solid var(--rule);box-shadow:var(--shadow);
+  padding:15px 17px;color:inherit}
+.gal a:hover{text-decoration:none;box-shadow:3px 4px 0 #00000018;border-color:var(--ox)}
+.gal .no{font-family:"Courier Prime",monospace;font-size:10.5px;letter-spacing:.14em;
+  text-transform:uppercase;color:var(--soft)}
+.gal h3{font-size:20px;margin:3px 0 5px}
+.gal p{margin:0;font-size:14.5px;color:var(--soft);font-style:italic}
+.gal .rt{font-family:"Courier Prime",monospace;font-size:11px;color:var(--stamp);margin-top:9px}
+.foot{margin-top:30px;padding-top:8px;border-top:1px solid var(--rule);
+  font-family:"Courier Prime",monospace;font-size:11px;letter-spacing:.05em;color:var(--soft)}
+
+@media (max-width:760px){
+  .plate{grid-template-columns:1fr}.counts{gap:16px;flex-wrap:wrap}
+  .drawer{grid-template-columns:1fr}
+  .head{grid-template-columns:1fr}
+}
+@media (prefers-reduced-motion:reduce){.barber i{animation:none;opacity:.32}}
