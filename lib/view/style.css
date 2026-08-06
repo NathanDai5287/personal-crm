@@ -277,6 +277,7 @@ td.r{text-align:right;font-variant-numeric:tabular-nums}
 .q.me{align-self:flex-end;border-right:3px solid var(--ox);background:var(--card2)}
 .q .who{display:block;font-family:"Courier Prime",monospace;font-size:10px;letter-spacing:.08em;
   text-transform:uppercase;color:var(--soft);margin-bottom:2px}
+.q.hit{outline:2px solid var(--ox);outline-offset:2px}
 
 /* ---- special states ------------------------------------------------------ */
 .notice{background:var(--card);border:2px solid var(--ox);box-shadow:var(--shadow);

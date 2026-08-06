@@ -6,13 +6,11 @@
 // from the 2026-08-05 archive audit where known, plausible elsewhere.
 
 const HEALTH = {
-  kept: 83878, tracked: 36, rescued: 819, stranded: 0,
-  lastSweep: '00:14', lastSweepAgo: '27 min', sweepStale: false,
-  lastRead: 'Aug 3', lastCompact: 'Aug 3', lastTodoScan: '23:14',
-  backupAge: '4 h 2 m', backupStale: false,
-  hourlyToday: 24, hourlyExpected: 24,
-  span: '2025-07-29 → 2026-08-05',
-  signalRunning: true,
+  kept: '83,878', span: '2025-07-29 → 2026-08-06', tracked: 36,
+  stranded: 0, strandedSub: 'none',
+  lastSweep: '27m', lastSweepSub: 'ago · hourly', sweepStale: false,
+  waiting: 127, waitingSub: 'in 6 people',
+  backupAge: '4h', backupSub: 'fresh · 17.5 MB', backupStale: false,
 };
 
 // contacts: {slug, name, first, rel, last, held, waiting, cursor, facts:[{t,cite}], stamp}

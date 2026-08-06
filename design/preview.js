@@ -7,10 +7,17 @@
 //
 //   node design/preview.js     # http://localhost:8799/
 const http = require('http');
-const { h } = require('../lib/view/h');
+const { h, render } = require('../lib/view/h');
 const { page } = require('../lib/view/shell');
 const V = require('../lib/view/pages');
 const F = require('./fixtures');
+
+// fixtures carry facts as { t, cite }; the real app passes rendered HTML, so
+// map them here to match what lib/view/pages.people expects.
+const previewContacts = F.CONTACTS.map((c) => ({
+  ...c,
+  facts: c.facts.map((f) => render(h('span', {}, f.t, ' ', V.Slip(f.cite)))),
+}));
 
 const PORT = 8799;
 
@@ -84,7 +91,7 @@ function placeholder(slug) {
 }
 
 const ROUTES = {
-  '/': () => V.people(F.CONTACTS),
+  '/': () => V.people(previewContacts),
   '/preview': directory,
   '/tasks': () => V.tasks(F.TODO),
   '/admin': () => V.admin({ health: F.HEALTH, roster: F.CONTACTS, dials: F.RUN_DIALS }),

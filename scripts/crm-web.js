@@ -21,9 +21,14 @@ const {
   TRACKED, REFRESH_STATE, LOGS_DIR, GITDIR,
 } = require('../lib/config');
 const { openCrmDb, openSignalDb } = require('../lib/signal-db');
-const { resolveSources, buildMessageQuery } = require('../lib/sources');
+const { resolveSources, buildMessageQuery, buildArchiveQuery } = require('../lib/sources');
 const { validateCitations } = require('../lib/archive');
 const TASKS = require('../lib/tasks');
+const { STYLE: BINDERY_CSS, FONTS, THEME_INIT, THEME_JS } = require('../lib/view/shell');
+const { render, raw } = require('../lib/view/h');
+const V = require('../lib/view/pages');
+const { renderProfile, inline: mdInline } = require('../lib/view/markdown');
+const ARCHIVE_STATE_FILE = path.posix.join(path.posix.dirname(TRACKED), 'crm-archive-state.json');
 
 const RUNS_DIR = path.join(LOGS_DIR, 'runs');
 const DAY = 86_400_000;
@@ -114,87 +119,6 @@ function inline(s) {
     return links.length ? `<sup class="cites">${links.join('')}</sup>` : run;
   });
   return out;
-}
-
-const CHAT_RE = /^\[([^\]]+)\]\s+(?:⟨m(\d+)⟩\s+)?(?:\(([^)]+)\)\s+)?([^:]+):\s?(.*)$/;
-
-// Render a full profile Markdown document to HTML.
-function renderMarkdown(md) {
-  const lines = md.split(/\r?\n/);
-  const html = [];
-  let i = 0;
-  let listOpen = false;
-  let chatOpen = false;
-  const closeList = () => { if (listOpen) { html.push('</ul>'); listOpen = false; } };
-  const closeChat = () => { if (chatOpen) { html.push('</div>'); chatOpen = false; } };
-
-  while (i < lines.length) {
-    const line = lines[i];
-    const trimmed = line.trim();
-
-    if (trimmed === '') { closeList(); closeChat(); i++; continue; }
-
-    // Chat transcript line: [ts] (group) Speaker: text
-    const chat = trimmed.match(CHAT_RE);
-    if (chat) {
-      closeList();
-      const [, ts, mid, group, speakerRaw, text] = chat;
-      const speaker = speakerRaw.trim();
-      const mine = /^nathan$/i.test(speaker);
-      if (!chatOpen) { html.push('<div class="chat">'); chatOpen = true; }
-      // When the line carries a ⟨m…⟩ id, the timestamp links to the message's
-      // provenance view (that message in its original conversation context).
-      const tsHtml = mid ? `<a class="ts" href="/m/${mid}" title="view in context">${esc(ts)}</a>` : `<span class="ts">${esc(ts)}</span>`;
-      html.push(
-        `<div class="msg ${mine ? 'me' : 'them'}">` +
-          `<div class="meta"><span class="who">${esc(speaker)}</span>` +
-          (group ? `<span class="grp">${esc(group)}</span>` : '') +
-          tsHtml + `</div>` +
-          `<div class="body">${inline(text)}</div>` +
-        `</div>`
-      );
-      i++;
-      continue;
-    }
-    closeChat();
-
-    // Headings
-    const h = trimmed.match(/^(#{1,6})\s+(.*)$/);
-    if (h) {
-      closeList();
-      const level = h[1].length;
-      html.push(`<h${level}>${inline(h[2])}</h${level}>`);
-      i++;
-      continue;
-    }
-
-    // Horizontal rule
-    if (/^(-{3,}|\*{3,}|_{3,})$/.test(trimmed)) { closeList(); html.push('<hr>'); i++; continue; }
-
-    // List item
-    const li = trimmed.match(/^[-*]\s+(.*)$/);
-    if (li) {
-      if (!listOpen) { html.push('<ul>'); listOpen = true; }
-      html.push(`<li>${inline(li[1])}</li>`);
-      i++;
-      continue;
-    }
-
-    // Paragraph (gather consecutive non-structural lines)
-    closeList();
-    const para = [trimmed];
-    i++;
-    while (i < lines.length) {
-      const t = lines[i].trim();
-      if (t === '' || /^(#{1,6})\s/.test(t) || /^[-*]\s/.test(t) || CHAT_RE.test(t) || /^(-{3,}|\*{3,}|_{3,})$/.test(t)) break;
-      para.push(t);
-      i++;
-    }
-    html.push(`<p>${inline(para.join(' '))}</p>`);
-  }
-  closeList();
-  closeChat();
-  return html.join('\n');
 }
 
 // Pull a few metadata fields from the leading "- **Key:** value" bullets.
@@ -346,118 +270,37 @@ function listContacts() {
 // ---------------------------------------------------------------------------
 // HTML shell
 // ---------------------------------------------------------------------------
-const STYLE = `
-:root{--bg:#f7f7f8;--card:#fff;--ink:#1c1c1e;--mut:#6b6b70;--line:#e5e5ea;--accent:#3b6ef5;--me:#e7f0ff;--them:#f0f0f2;}
-@media (prefers-color-scheme:dark){:root{--bg:#0f0f11;--card:#1a1a1d;--ink:#ececf0;--mut:#9a9aa2;--line:#2a2a30;--accent:#6ea0ff;--me:#1e2f52;--them:#232327;}}
-*{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}
-a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
-.wrap{max-width:820px;margin:0 auto;padding:28px 20px 80px}
-header.top{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:20px}
-header.top h1{font-size:20px;margin:0}
-.sub{color:var(--mut);font-size:13px}
-.grid{display:grid;gap:12px}
-.pcard{display:block;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 16px;transition:border-color .15s}
-.pcard:hover{border-color:var(--accent);text-decoration:none}
-.pcard .nm{font-weight:600;font-size:17px}
-.pcard .rl{color:var(--accent);font-size:13px;margin-left:8px}
-.pcard .mt{color:var(--mut);font-size:13px;margin-top:4px;display:flex;gap:14px;flex-wrap:wrap}
-.profile{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:8px 26px 26px}
-.profile h1{font-size:26px;margin:18px 0 6px}
-.profile h2{font-size:18px;margin:28px 0 8px;padding-bottom:6px;border-bottom:1px solid var(--line)}
-.profile h3{font-size:15px;margin:20px 0 6px;color:var(--mut);text-transform:uppercase;letter-spacing:.03em}
-.profile ul{padding-left:20px}.profile li{margin:5px 0}
-.profile p{margin:10px 0}
-.profile code{background:var(--them);padding:1px 5px;border-radius:5px;font-size:.9em}
-.profile hr{border:0;border-top:1px solid var(--line);margin:18px 0}
-.chat{display:flex;flex-direction:column;gap:6px;margin:12px 0}
-.msg{max-width:80%;padding:7px 11px;border-radius:14px;font-size:14px}
-.msg .meta{display:flex;gap:8px;align-items:baseline;font-size:11px;color:var(--mut);margin-bottom:2px}
-.msg .who{font-weight:600;color:var(--ink)}
-.msg .grp{background:var(--them);padding:0 6px;border-radius:6px}
-.msg.me{align-self:flex-end;background:var(--me);border-bottom-right-radius:4px}
-.msg.them{align-self:flex-start;background:var(--them);border-bottom-left-radius:4px}
-.msg .body{white-space:pre-wrap;word-break:break-word}
-.back{font-size:13px;color:var(--mut)}
-sup.cites{font-size:10px;letter-spacing:1px;margin-left:2px}
-sup.cites a{color:var(--mut);border:1px solid var(--line);border-radius:4px;padding:0 3px;margin-left:2px}
-sup.cites a:hover{color:var(--accent);border-color:var(--accent);text-decoration:none}
-.msg .meta a.ts{color:var(--mut)}
-.msg .meta a.ts:hover{color:var(--accent)}
-.msg.hit{outline:2px solid var(--accent);outline-offset:1px}
-.sub{color:var(--mut);font-size:13px}
-.radar{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:12px 16px;margin-bottom:18px}
-.radar .rhead{font-weight:600;font-size:14px;margin-bottom:6px}
-.radar ul{list-style:none;margin:0;padding:0}
-.radar li{display:flex;gap:10px;align-items:baseline;padding:4px 0;font-size:14px;border-top:1px solid var(--line)}
-.radar li:first-child{border-top:0}
-.radar .rdate{flex:0 0 46px;font-size:12px;color:var(--mut);font-variant-numeric:tabular-nums}
-.radar .rdate.up{color:var(--accent);font-weight:600}
-.radar a{font-weight:600;flex-shrink:0}
-.radar .rtext{color:var(--ink)}
-nav.main{display:flex;gap:16px;margin-bottom:18px;font-size:14px;border-bottom:1px solid var(--line);padding-bottom:10px}
-nav.main a{color:var(--mut)}nav.main a.cur{color:var(--accent);font-weight:600}
-table.tbl{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden;font-size:14px}
-table.tbl th{font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut);text-align:left}
-table.tbl th,table.tbl td{padding:8px 12px;border-bottom:1px solid var(--line)}
+// Legacy classes still used by detail views not yet on the Bindery components
+// (run detail, diffs, the tasks header). Written against Bindery's theme
+// variables so they adapt to light/dark; shrinks as pages move over.
+const LEGACY_CSS = `
+.sub{color:var(--soft);font-size:13px}
+table.tbl{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--rule);font-size:13px}
+table.tbl th{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--soft);text-align:left}
+table.tbl th,table.tbl td{padding:8px 12px;border-bottom:1px solid var(--rule)}
 table.tbl tr:last-child td{border-bottom:0}
 table.tbl td.num{font-variant-numeric:tabular-nums;text-align:right}
-.ok{color:#2e9e5b}.bad{color:#d4453a}.skip{color:var(--mut)}
-.badge{display:inline-block;font-size:11px;padding:1px 7px;border-radius:8px;background:var(--them);color:var(--mut)}
-.badge.hot{background:var(--me);color:var(--accent);font-weight:600}
-pre.log{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;font-size:12px;overflow-x:auto;white-space:pre-wrap;word-break:break-word}
-pre.diff{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;font-size:12px;overflow-x:auto}
-pre.diff .add{color:#2e9e5b}pre.diff .del{color:#d4453a}pre.diff .hunk{color:var(--accent)}pre.diff .ctx{color:var(--mut)}
-details.step{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 12px;margin:6px 0}
+.ok{color:#2e9e5b}.bad{color:var(--ox)}.skip{color:var(--faint)}
+.badge{display:inline-block;font-size:11px;padding:1px 7px;border-radius:8px;background:var(--card2);color:var(--soft)}
+.badge.hot{background:var(--stamp);color:#fff;font-weight:600}
+pre.log{background:var(--paper);border:1px solid var(--rule);padding:12px 14px;font-size:12px;overflow-x:auto;white-space:pre-wrap;word-break:break-word;color:var(--ink)}
+pre.diff{background:var(--paper);border:1px solid var(--rule);padding:12px 14px;font-size:12px;overflow-x:auto;color:var(--ink)}
+pre.diff .add{color:#2e9e5b}pre.diff .del{color:var(--ox)}pre.diff .hunk{color:var(--stamp)}pre.diff .ctx{color:var(--soft)}
+details.step{background:var(--card);border:1px solid var(--rule);border-radius:8px;padding:8px 12px;margin:6px 0}
 details.step summary{cursor:pointer;display:flex;gap:10px;align-items:baseline}
 details.step summary .nm{font-weight:600}
-details.step summary .ms{color:var(--mut);font-size:12px;margin-left:auto}
-.actions form{display:inline-block;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin:0 10px 10px 0;vertical-align:top}
-.actions button{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:7px 14px;font-size:14px;cursor:pointer}
-.actions button:disabled{opacity:.5;cursor:not-allowed}
-.actions select{padding:6px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--ink)}
-.actions .cap{font-size:12px;color:var(--mut);margin-top:6px;max-width:220px}
+details.step summary .ms{color:var(--soft);font-size:12px;margin-left:auto}
 `;
 
-const NAV = [
-  ['/', 'Contacts'],
-  ['/tasks', 'Tasks'],
-  ['/status', 'Status'],
-  ['/runs', 'Runs'],
-  ['/actions', 'Actions'],
-];
-
-function page(title, bodyHtml, current = '') {
-  const nav = `<nav class="main">${NAV.map(([href, label]) =>
-    `<a href="${href}" class="${href === current ? 'cur' : ''}">${label}</a>`).join('')}</nav>`;
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">` +
-    `<title>${esc(title)}</title><style>${STYLE}</style></head><body><div class="wrap">${nav}${bodyHtml}</div></body></html>`;
-}
-
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-function fmtDateShort(iso) {
-  const m = iso.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  return m ? `${MONTHS[Number(m[2]) - 1]} ${Number(m[3])}` : iso;
-}
-
-// Flatten every contact's talking points into one radar list: upcoming events
-// first (soonest first), then recent mentions (newest first), then undated.
-function radarItems(contacts) {
-  const today = new Date().toISOString().slice(0, 10);
-  const upcoming = [];
-  const recent = [];
-  const undated = [];
-  for (const c of contacts) {
-    for (const tp of c.talkingPoints.slice(0, 4)) { // cap per contact so no one floods the radar
-      const item = { ...tp, name: c.name, slug: c.slug };
-      if (!tp.date) undated.push(item);
-      else if (tp.date >= today) upcoming.push(item);
-      else recent.push(item);
-    }
-  }
-  upcoming.sort((a, b) => a.date.localeCompare(b.date));
-  recent.sort((a, b) => b.date.localeCompare(a.date));
-  return [...upcoming, ...recent, ...undated].slice(0, 15);
+// Bindery shell. Bindery pages pass a body that already includes the nav tabs;
+// legacy pages pass `current` and get the tabs prepended.
+function page(title, bodyHtml, current) {
+  const nav = current ? render(V.Tabs(current)) : '';
+  return '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+    + '<meta name="viewport" content="width=device-width,initial-scale=1">'
+    + `<title>${esc(title)}</title>${THEME_INIT}${FONTS}<style>${BINDERY_CSS}${LEGACY_CSS}</style></head>`
+    + '<body><button class="lamp" onclick="__lamp()">☾ dark</button>'
+    + `<div class="sheet">${nav}${bodyHtml}</div>${THEME_JS}</body></html>`;
 }
 
 // ---- tasks -----------------------------------------------------------------
@@ -650,30 +493,38 @@ function tasksPage(editId = null) {
 }
 
 
+// Real contacts mapped to the shape lib/view's people/admin pages expect. Facts
+// are the top talking points, rendered to HTML so their ⟨m…⟩ slips survive.
+// `waiting` is archived-but-not-yet-ingested (id past the merge cursor); a
+// contact with no cursor has their whole history waiting (a backfill).
+function contactList() {
+  const cdb = openCrmDb();
+  try {
+    const cursors = loadCursors();
+    const held = new Map();
+    for (const r of cdb.prepare("SELECT contact_slug slug, COUNT(*) n FROM messages WHERE contact_slug IS NOT NULL GROUP BY contact_slug").all()) {
+      held.set(r.slug, r.n);
+    }
+    const past = cdb.prepare('SELECT COUNT(*) n FROM messages WHERE contact_slug = ? AND id > ?');
+    const total = cdb.prepare('SELECT COUNT(*) n FROM messages WHERE contact_slug = ?');
+    return listContacts().map((c) => {
+      const hasCursor = Object.prototype.hasOwnProperty.call(cursors, c.slug);
+      const cursor = hasCursor ? (cursors[c.slug] || 0) : null;
+      const waiting = hasCursor ? past.get(c.slug, cursor).n : total.get(c.slug).n;
+      const facts = c.talkingPoints.slice(0, 3).map((tp) => mdInline((tp.date ? `**${tp.date}** ` : '') + tp.text));
+      return {
+        slug: c.slug, name: c.name, rel: c.relationship, last: c.last,
+        held: held.get(c.slug) || 0, waiting, cursor, facts,
+        stamp: waiting > 0 ? `${waiting} waiting` : null, stampBlue: true,
+      };
+    });
+  } finally {
+    cdb.close();
+  }
+}
+
 function indexPage() {
-  const contacts = listContacts();
-  const short = (s) => (s.length > 48 ? `${s.slice(0, 47).trimEnd()}…` : s);
-
-  const radar = radarItems(contacts);
-  const today = new Date().toISOString().slice(0, 10);
-  const radarHtml = radar.length
-    ? `<div class="radar"><div class="rhead">📌 Radar — things to bring up</div><ul>` +
-      radar.map((r) =>
-        `<li><span class="rdate ${r.date && r.date >= today ? 'up' : ''}">${r.date ? esc(fmtDateShort(r.date)) : '·'}</span>` +
-        `<a href="/c/${encodeURIComponent(r.slug)}">${esc(r.name.split(' ')[0])}</a><span class="rtext">${inline(r.text)}</span></li>`
-      ).join('') +
-      `</ul></div>`
-    : '';
-
-  const cards = contacts.map((c) =>
-    `<a class="pcard" href="/c/${encodeURIComponent(c.slug)}">` +
-      `<div><span class="nm">${esc(c.name)}</span>${c.relationship ? `<span class="rl">${esc(short(c.relationship))}</span>` : ''}</div>` +
-      `<div class="mt">${c.last ? `<span>Last contact ${esc(c.last)}</span>` : ''}${c.messages ? `<span>${esc(c.messages)}</span>` : ''}` +
-      `${c.talkingPoints.length ? `<span>📌 ${c.talkingPoints.length} talking point${c.talkingPoints.length === 1 ? '' : 's'}</span>` : ''}</div>` +
-    `</a>`
-  ).join('');
-  const body = `<header class="top"><h1>Personal CRM</h1><span class="sub">${contacts.length} contacts</span></header>${radarHtml}<div class="grid">${cards}</div>`;
-  return page('Personal CRM', body, '/');
+  return page('People — personal-crm', render(V.people(contactList()).body));
 }
 
 // Shared bubble renderer for both provenance views. Every bubble carries
@@ -684,10 +535,9 @@ function msgBubbles(rows, hitId) {
   const fmt = (ms) => new Date(ms).toISOString().slice(0, 16).replace('T', ' ');
   return rows.map((m) => {
     const mine = /^nathan$/i.test(m.sender);
-    const hit = m.id === hitId;
-    return `<div class="msg ${mine ? 'me' : 'them'}${hit ? ' hit' : ''}" id="m${m.id}">` +
-      `<div class="meta"><span class="who">${esc(m.sender)}</span><span class="ts">${esc(fmt(m.sent_at))}</span></div>` +
-      `<div class="body">${inline(m.body)}</div></div>`;
+    const hit = m.id === hitId ? ' hit' : '';
+    return `<div class="q ${mine ? 'me' : 'them'}${hit}" id="m${m.id}">` +
+      `<span class="who">${esc(m.sender)} · ${esc(fmt(m.sent_at))}</span>${mdInline(m.body)}</div>`;
   }).join('');
 }
 
@@ -695,7 +545,7 @@ function msgBubbles(rows, hitId) {
 // real, becomes the highlight; otherwise the server-marked `.hit` is used.
 const SCROLL_TO_HIT = `<script>(function(){`
   + `var h=(location.hash||'').slice(1),t=h&&/^m\\d+$/.test(h)?document.getElementById(h):null;`
-  + `if(t)t.classList.add('hit');else t=document.querySelector('.msg.hit');`
+  + `if(t)t.classList.add('hit');else t=document.querySelector('.q.hit');`
   + `if(t)t.scrollIntoView({block:'center'});})();</script>`;
 
 // Provenance view: one archived message, highlighted, with ±10 messages of
@@ -720,9 +570,9 @@ function messagePage(id) {
     const body = `<div class="back"><a href="${backHref}">&larr; back</a></div>` +
       `<div class="profile"><h1>${esc(msg.conversation || 'Conversation')}</h1>` +
       `<p class="sub">source message <code>m${msg.id}</code>, shown in context</p>` +
-      `<div class="chat">${msgBubbles([...before, msg, ...after], msg.id)}</div></div>` +
+      `<div class="charge">${msgBubbles([...before, msg, ...after], msg.id)}</div></div>` +
       SCROLL_TO_HIT;
-    return page(`m${msg.id} — ${msg.conversation || 'message'}`, body);
+    return page(`m${msg.id} — ${msg.conversation || 'message'}`, body, '/');
   } finally {
     try { cdb.close(); } catch { /* already closed */ }
   }
@@ -759,9 +609,9 @@ function spanPage(start, end) {
       `<p class="sub">cited range <code>${span}</code> &middot; ` +
       `${rows.length} message${rows.length === 1 ? '' : 's'} in this conversation` +
       `${anchor.conv_id ? '' : ' (no conversation recorded for this row)'}</p>` +
-      `<div class="chat">${msgBubbles(rows, null)}</div></div>` +
+      `<div class="charge">${msgBubbles(rows, null)}</div></div>` +
       SCROLL_TO_HIT;
-    return page(`m${start}-m${end} — ${anchor.conversation || 'range'}`, body);
+    return page(`m${start}-m${end} — ${anchor.conversation || 'range'}`, body, '/');
   } finally {
     try { cdb.close(); } catch { /* already closed */ }
   }
@@ -773,10 +623,10 @@ function profilePage(slug) {
   try { md = fs.readFileSync(file, 'utf8'); } catch { return null; }
   const titleLine = md.split(/\r?\n/).find((l) => l.startsWith('# '));
   const name = titleLine ? titleLine.slice(2).trim() : slug;
-  const body = `<div class="back"><a href="/">&larr; All contacts</a>`
+  const body = `<div class="back"><a href="/">&larr; All people</a>`
     + ` &middot; <a href="/c/${encodeURIComponent(slug)}/history">History &rarr;</a></div>`
-    + `<div class="profile">${renderMarkdown(md)}</div>`;
-  return page(name, body);
+    + `<div class="profile">${renderProfile(md)}</div>`;
+  return page(name, body, '/');
 }
 
 // ---------------------------------------------------------------------------
@@ -817,97 +667,94 @@ function fmtWhen(ts) {
   return new Date(ts).toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
 }
 
-function statusPage() {
-  const slugs = loadTrackedSlugs();
-  const cursors = loadCursors();
-  const runs = loadRuns();
-  // Latest successful merge per contact, from the run records.
-  const lastMerged = {};
-  for (const run of runs) {
-    for (const c of run.contacts || []) {
-      if (c.ok && !lastMerged[c.slug]) lastMerged[c.slug] = { when: run.startedAt, count: c.count };
-    }
-  }
+function fmtAgo(ms) {
+  const m = Math.max(0, Math.round(ms / 60000));
+  if (m < 60) return `${m}m`;
+  if (m < 60 * 48) return `${Math.round(m / 60)}h`;
+  return `${Math.round(m / (60 * 24))}d`;
+}
 
-  let cdb = null;
-  let sdb = null;
-  const rows = [];
+function loadArchiveState() {
+  try { return JSON.parse(fs.readFileSync(ARCHIVE_STATE_FILE, 'utf8')); } catch { return {}; }
+}
+
+function backupAgeMs(now) {
+  const dir = 'C:/Users/natha/Programming/personal-crm-backups';
   try {
-    cdb = openCrmDb();
-    sdb = openSignalDb();
-    const now = Date.now();
-    for (const slug of slugs) {
-      const rel = `data/contacts/${slug}.md`;
-      const row = { slug, name: slug, mode: '—', cursor: null, pending: null, lastMerged: lastMerged[slug] || null, citations: null, note: '' };
-      const contact = cdb.prepare('SELECT signal_id, name FROM contacts WHERE file_path = ?').get(rel);
-      if (!contact || !contact.signal_id) { row.note = 'no Signal id linked'; rows.push(row); continue; }
-      row.name = contact.name || slug;
-      const hasCursor = Object.prototype.hasOwnProperty.call(cursors, slug);
-      row.mode = hasCursor ? 'incremental' : 'backfill (30d)';
-      row.cursor = hasCursor ? cursors[slug] : null;
-      const bound = hasCursor
-        ? { clause: 'rowid > ?', param: cursors[slug] || 0 }
-        : { clause: 'sent_at >= ?', param: now - BACKFILL_DAYS * DAY };
-      const sources = resolveSources(sdb, contact.signal_id);
-      const q = buildMessageQuery(sources, contact.signal_id, bound);
-      row.pending = q ? sdb.prepare(`SELECT COUNT(*) AS n FROM (${q.sql})`).get(q.params).n : 0;
-      try {
-        const md = fs.readFileSync(path.posix.join(CONTACTS_DIR, `${slug}.md`), 'utf8');
-        row.citations = validateCitations(cdb, md);
-      } catch { /* profile missing or archive not created */ }
-      rows.push(row);
-    }
-  } catch (e) {
-    return page('Status', `<h1>Status</h1><p class="bad">Failed to read databases: ${esc(String(e).slice(0, 300))}</p>`, '/status');
+    const dbs = fs.readdirSync(dir).filter((f) => f.endsWith('.db'));
+    if (!dbs.length) return null;
+    return now - Math.max(...dbs.map((f) => fs.statSync(path.posix.join(dir, f)).mtimeMs));
+  } catch { return null; }
+}
+
+function dial(label, cadence, sinceMs, intervalMs) {
+  const remaining = intervalMs - sinceMs;
+  const overdue = remaining < 0;
+  return {
+    label, cadence,
+    since: `${fmtAgo(sinceMs)} ago`,
+    center: overdue ? `+${fmtAgo(-remaining)}` : fmtAgo(remaining),
+    centerSub: overdue ? 'overdue' : 'til next',
+    fraction: sinceMs / intervalMs, overdue,
+  };
+}
+
+function adminData() {
+  const now = Date.now();
+  const roster = contactList();
+  let kept = 0;
+  let span = '—';
+  const cdb = openCrmDb();
+  try {
+    const r = cdb.prepare('SELECT COUNT(*) n, MIN(sent_at) a, MAX(sent_at) b FROM messages').get();
+    kept = r.n || 0;
+    if (r.a) span = `${new Date(r.a).toISOString().slice(0, 10)} → ${new Date(r.b).toISOString().slice(0, 10)}`;
   } finally {
-    try { if (sdb) sdb.close(); } catch { /* ignore */ }
-    try { if (cdb) cdb.close(); } catch { /* ignore */ }
+    cdb.close();
   }
-  rows.sort((a, b) => (b.pending || 0) - (a.pending || 0));
+  const arch = loadArchiveState();
+  const sweepMs = arch.ranAt ? now - arch.ranAt : null;
+  const runs = loadRuns();
+  const dailyMs = runs.length ? now - runs[0].startedAt : null;
+  const backupMs = backupAgeMs(now);
+  const waiting = roster.reduce((s, x) => s + x.waiting, 0);
+  const inPeople = roster.filter((x) => x.waiting > 0).length;
+  const HOUR = 3600000;
+  const health = {
+    kept: kept.toLocaleString(), span, tracked: roster.length,
+    stranded: '—', strandedSub: 'deep-sweep to verify',
+    lastSweep: sweepMs == null ? '—' : fmtAgo(sweepMs), lastSweepSub: sweepMs == null ? 'never run' : 'ago · hourly',
+    sweepStale: sweepMs != null && sweepMs > 90 * 60000,
+    waiting: waiting.toLocaleString(), waitingSub: `in ${inPeople} ${inPeople === 1 ? 'person' : 'people'}`,
+    backupAge: backupMs == null ? '—' : fmtAgo(backupMs), backupSub: 'off-machine', backupStale: backupMs != null && backupMs > 8 * DAY,
+  };
+  const dials = [
+    dial('Archive sweep', 'hourly', sweepMs == null ? HOUR : sweepMs, HOUR),
+    dial('Daily pipeline', '04:00 Pacific', dailyMs == null ? DAY : dailyMs, DAY),
+    dial('Weekly ingest', 'Mondays', dailyMs == null ? 7 * DAY : Math.min(dailyMs, 7 * DAY), 7 * DAY),
+  ];
+  return { health, roster, dials };
+}
 
-  const totalPending = rows.reduce((s, r) => s + (r.pending || 0), 0);
-  const tr = rows.map((r) => {
-    const cite = r.citations
-      ? (r.citations.missing.length
-        ? `<span class="bad">${r.citations.missing.length}/${r.citations.cited} missing</span>`
-        : (r.citations.cited ? `<span class="ok">${r.citations.cited} ok</span>` : '<span class="skip">none</span>'))
-      : '<span class="skip">—</span>';
-    return `<tr><td><a href="/c/${encodeURIComponent(r.slug)}">${esc(r.name)}</a>${r.note ? ` <span class="bad">(${esc(r.note)})</span>` : ''}</td>` +
-      `<td><span class="badge${r.mode.startsWith('backfill') ? ' hot' : ''}">${esc(r.mode)}</span></td>` +
-      `<td class="num">${r.pending == null ? '—' : `<strong>${r.pending}</strong>`}</td>` +
-      `<td class="num">${r.cursor == null ? '—' : r.cursor}</td>` +
-      `<td>${r.lastMerged ? `${esc(fmtWhen(r.lastMerged.when))} (${r.lastMerged.count} msgs)` : '<span class="skip">never</span>'}</td>` +
-      `<td>${cite}</td></tr>`;
-  }).join('');
-
-  const body = `<header class="top"><h1>Pipeline status</h1>` +
-    `<span class="sub">${rows.length} tracked · ${totalPending} unmerged message${totalPending === 1 ? '' : 's'} waiting</span></header>` +
-    `<p class="sub">“Unmerged” is computed live against Signal's database using the same source rules the pipeline uses — this is exactly what the next run would process. Backfill = first-ever run for that contact (last ${BACKFILL_DAYS} days); incremental = everything since their cursor.</p>` +
-    `<table class="tbl"><tr><th>Contact</th><th>Next run mode</th><th>Unmerged</th><th>Cursor</th><th>Last merged</th><th>Citations</th></tr>${tr}</table>`;
-  return page('Status — Personal CRM', body, '/status');
+function statusPage() {
+  return page('Pipeline — personal-crm', render(V.admin(adminData()).body));
 }
 
 // ---------------------------------------------------------------------------
 // Screen A — /runs, /runs/<id>, /runs/<id>/diff/<slug>
 // ---------------------------------------------------------------------------
 function runsPage() {
-  const runs = loadRuns();
-  const tr = runs.map((r) => {
-    const failures = (r.mergeFailures || []).length;
-    const warn = (r.warnings || []).length;
-    return `<tr><td><a href="/runs/${encodeURIComponent(r.id)}">${esc(fmtWhen(r.startedAt))}</a></td>` +
-      `<td><span class="badge">${esc(runMode(r))}</span></td>` +
-      `<td class="num">${fmtMs(r.durationMs)}</td>` +
-      `<td class="num">${r.contactsWithActivity ?? ''}</td>` +
-      `<td class="num">${(r.merged || []).length}</td>` +
-      `<td class="num">${failures ? `<span class="bad">${failures}</span>` : '0'}</td>` +
-      `<td class="num">${warn ? `<span class="bad">${warn}</span>` : '0'}</td></tr>`;
-  }).join('');
-  const body = `<header class="top"><h1>Runs</h1><span class="sub">${runs.length} recorded</span></header>` +
-    (runs.length
-      ? `<table class="tbl"><tr><th>Started</th><th>Mode</th><th>Duration</th><th>Activity</th><th>Merged</th><th>Failures</th><th>Warnings</th></tr>${tr}</table>`
-      : '<p class="sub">No recorded runs yet — records are written by every non-dry run from now on.</p>');
-  return page('Runs — Personal CRM', body, '/runs');
+  const records = loadRuns().map((r) => ({
+    t: fmtWhen(r.startedAt),
+    pass: r.dryRun ? 'plan' : (r.only ? 'ingest (one)' : 'daily'),
+    scope: r.only || 'everyone',
+    examined: String(r.messagesMerged ?? r.contactsWithActivity ?? ''),
+    held: `${(r.merged || []).length} ppl`,
+    took: fmtMs(r.durationMs),
+    mark: (r.mergeFailures || []).length ? 'rd' : 'sw',
+    note: (r.warnings || []).length ? `${r.warnings.length} warning(s)` : `${r.chunksMerged ?? 0} chunk(s) ingested`,
+  }));
+  return page('Runs — personal-crm', render(V.runs(records).body));
 }
 
 function runDetailPage(id) {
@@ -1397,8 +1244,8 @@ function start() {
         });
         return;
       }
-      if (url.pathname === '/status') { send(200, statusPage()); return; }
-      if (url.pathname === '/runs') { send(200, runsPage()); return; }
+      if (url.pathname === '/status' || url.pathname === '/admin') { send(200, statusPage()); return; }
+      if (url.pathname === '/runs' || url.pathname === '/admin/runs') { send(200, runsPage()); return; }
       const rdiff = url.pathname.match(/^\/runs\/([^/]+)\/diff\/([^/]+)$/);
       if (rdiff) {
         const id = decodeURIComponent(rdiff[1]);
