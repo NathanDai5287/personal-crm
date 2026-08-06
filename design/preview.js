@@ -14,9 +14,9 @@ const F = require('./fixtures');
 
 const PORT = 8799;
 
-const INPROGRESS_LOG = `[4] merge nigesh-chakraborty 3/6 (week of Jul 14, 812 msgs): ok, cursor → 90420
-[4] citation check: 41 cited ids, all resolve
-[4] merge nigesh-chakraborty 4/6 (week of Jul 21, 903 msgs): …`;
+const INPROGRESS_LOG = `[ingest] nigesh-chakraborty 3/6 (week of Jul 14, 812 msgs): ok, cursor → 90420
+[ingest] citation check: 41 cited ids, all resolve
+[ingest] nigesh-chakraborty 4/6 (week of Jul 21, 903 msgs): …`;
 
 function Notice(kind, banner, ...content) {
   return h('div', { class: `notice${kind ? ' ' + kind : ''}` },
@@ -39,7 +39,7 @@ function statesSheet() {
       'Stale at 8 days. Do not start a backfill until this is fresh. ', h('a', { href: '#' }, 'Back up now →')),
     V.Head('Pass in progress', 'a run is charged out'),
     h('div', { class: 'inprogress' },
-      h('div', { class: 'banner' }, 'Reading · nigesh-chakraborty · chunk 3 of 6', h('span', { class: 'barber' }, h('i', {}))),
+      h('div', { class: 'banner' }, 'Ingesting · nigesh-chakraborty · chunk 3 of 6', h('span', { class: 'barber' }, h('i', {}))),
       h('pre', {}, INPROGRESS_LOG)),
     V.Head('Returned to desk', 'a run failed'),
     Notice('', 'Returned · sweep could not take the archive',
@@ -87,7 +87,7 @@ const ROUTES = {
   '/': () => V.people(F.CONTACTS),
   '/preview': directory,
   '/tasks': () => V.tasks(F.TODO),
-  '/admin': () => V.admin({ health: F.HEALTH, roster: F.CONTACTS }),
+  '/admin': () => V.admin({ health: F.HEALTH, roster: F.CONTACTS, dials: F.RUN_DIALS }),
   '/admin/runs': () => V.runs(F.RUNS),
   '/states': statesSheet,
   '/c/pine-nguyen': () => V.profile(F.PROFILE),
@@ -95,6 +95,7 @@ const ROUTES = {
 
 function resolve(pathname) {
   if (ROUTES[pathname]) return ROUTES[pathname]();
+  if (pathname.startsWith('/admin/jobs/')) return V.job(F.JOB);
   if (pathname.startsWith('/m/')) return V.message(F.MESSAGE_CONTEXT);
   if (pathname.startsWith('/c/')) return placeholder(pathname.slice(3));
   return null;

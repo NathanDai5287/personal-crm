@@ -108,8 +108,8 @@ const RUNS = [
   { t:'00:13:02', pass:'sweep', scope:'pine-nguyen', examined:'3,029', held:'99', took:'6 s', mark:'sw', note:'34 of his exist nowhere else' },
   { t:'00:11:47', pass:'deep sweep', scope:'everyone', examined:'—', held:'—', took:'3 s', mark:'held', note:'a page load had the file open' },
   { t:'00:13:40', pass:'backup', scope:'archive', examined:'83,878', held:'—', took:'11 s', mark:'sw', note:'17.5 MB, three kept' },
-  { t:'Aug 3 · 16:49', pass:'read', scope:'nigesh-chakraborty', examined:'4,323', held:'6 ch.', took:'14 m', mark:'rd', note:'six weeks, one week at a time · opus-5' },
-  { t:'Jul 30 · 04:33', pass:'read', scope:'everyone', examined:'2,190', held:'11 ch.', took:'38 m', mark:'rd', note:'scheduled weekly pass' },
+  { t:'Aug 3 · 16:49', pass:'ingest', scope:'nigesh-chakraborty', examined:'4,323', held:'6 ch.', took:'14 m', mark:'rd', note:'six weeks, one week at a time · opus-5' },
+  { t:'Jul 30 · 04:33', pass:'ingest', scope:'everyone', examined:'2,190', held:'11 ch.', took:'38 m', mark:'rd', note:'scheduled weekly pass' },
   { t:'hourly ×23', pass:'sweep', scope:'everyone', examined:'—', held:'0', took:'<2 s', mark:'held', note:'nothing new since midnight' },
 ];
 
@@ -143,6 +143,27 @@ const PROFILE = {
   ],
 };
 
+const RUN_DIALS = [
+  { label: 'Archive sweep', cadence: 'hourly', since: '27m ago', center: '33m', centerSub: 'til next', fraction: 27 / 60, overdue: false },
+  { label: 'Daily pipeline', cadence: '04:00 Pacific', since: '9h ago', center: '15h', centerSub: 'til next', fraction: 9 / 24, overdue: false },
+  { label: 'Weekly ingest', cadence: 'Mondays', since: '2d ago', center: '5d', centerSub: 'til next', fraction: 2 / 7, overdue: false },
+];
+
+const JOB = {
+  id: 'demo', kind: 'Ingest', scope: 'ken-chessmore', status: 'running',
+  startedAt: '00:41:12', elapsed: '3m 20s', step: 'chunk 3 of 4', model: 'anthropic/claude-opus-5',
+  log: `[backup] wrote crm-2026-08-06T0041.db (17.6 MB)
+[snapshot] pre-ingest: ok
+[plan] ken-chessmore: 1823 msgs / 4 chunk(s) [backfill — no cursor]
+[ingest] ken-chessmore 1/4 (2025-08-18..2026-01-05, 730 msgs): ok, cursor -> 22361
+[ingest] citation check 1/4: 28 cited ids, all resolve
+[ingest] commit ken-chessmore 2025-08 wk (m9365..m22361) [1/4]: ok
+[ingest] ken-chessmore 2/4 (2026-01-12..2026-03-02, 152 msgs): ok, cursor -> 29827
+[ingest] citation check 2/4: 9 cited ids, all resolve
+[ingest] commit ken-chessmore 2026-01 wk (m23902..m29827) [2/4]: ok
+[ingest] ken-chessmore 3/4 (2026-03-02..2026-06-15, 925 msgs): running…`,
+};
+
 const MESSAGE_CONTEXT = [
   { who: 'Pine', me: false, id: 89508, t: 'work is insane rn' },
   { who: 'Pine', me: false, id: 89510, t: 'have you tried kimi k3 model', hit: true },
@@ -153,4 +174,4 @@ const MESSAGE_CONTEXT = [
   { who: 'Nathan', me: true, id: 89515, t: 'is it in claude code' },
 ];
 
-module.exports = { HEALTH, CONTACTS, TODO, RUNS, PROFILE, MESSAGE_CONTEXT };
+module.exports = { HEALTH, CONTACTS, TODO, RUNS, PROFILE, RUN_DIALS, JOB, MESSAGE_CONTEXT };
