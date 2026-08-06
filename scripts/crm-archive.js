@@ -82,36 +82,12 @@ const OVERLAP_HOURS = Number(process.env.CRM_ARCHIVE_OVERLAP_HOURS) || 36;
 // This is the "re-check everything" operation: every source, from the beginning
 // of Signal's history, copying whatever the archive is missing. No AI, no cost,
 // no profile changes.
-const DEEP = process.argv.includes('--deep');
-
-// --only <slug>: sweep ONE contact (or one group, as `group:<slug>`). The
-// dashboard's per-person archive button needs this, and so does "Pine uses
-// disappearing messages, pull his whole history right now" — a targeted deep
-// sweep is seconds, where a full one re-walks 83k rows.
-const ONLY = (() => {
-  const i = process.argv.indexOf('--only');
-  if (i === -1) return null;
-  const v = process.argv[i + 1];
-  if (!v || v.startsWith('--')) {
-    console.error('crm-archive: --only requires a slug');
-    process.exit(2);
-  }
-  return v;
-})();
-{
-  // Same reasoning as crm-daily's flag check: a misspelled --deepp silently
-  // performs the narrow sweep you did not ask for.
-  const known = new Set(['--deep', '--only']);
-  const argv = process.argv.slice(2);
-  for (let i = 0; i < argv.length; i += 1) {
-    if (!argv[i].startsWith('--')) continue;
-    if (argv[i] === '--only') { i += 1; continue; }
-    if (!known.has(argv[i])) {
-      console.error(`crm-archive: unknown flag '${argv[i]}'\nknown: --deep, --only <slug>`);
-      process.exit(2);
-    }
-  }
-}
+// CLI flags (--deep, --only <slug>) are parsed and validated at the bottom of
+// this file, INSIDE the `require.main === module` guard — never here at module
+// top level. crm-refresh.js / crm-compact.js require this module for runSweep(),
+// and parsing the PARENT process's argv on import would exit on a flag that is
+// meaningful to the parent but unknown to the sweep — e.g. `crm-daily.js
+// --dry-run` was crashing here before it ever reached the daily pipeline.
 
 function loadJson(file, fallback) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; }
@@ -335,12 +311,12 @@ function runSweep(cdb, sdb, opts = {}) {
   return { seen, inserted, per, collisions, reuse, backfilledMeta, deep, onlySlug };
 }
 
-function main() {
+function main({ deep, only }) {
   const cdb = openCrmDb();
   const sdb = openSignalDb();
   try {
-    const r = runSweep(cdb, sdb, { deep: DEEP, onlySlug: ONLY });
-    const scope = `${DEEP ? ' [DEEP]' : ''}${ONLY ? ` [ONLY ${ONLY}]` : ''}`;
+    const r = runSweep(cdb, sdb, { deep, onlySlug: only });
+    const scope = `${deep ? ' [DEEP]' : ''}${only ? ` [ONLY ${only}]` : ''}`;
     console.log(`CRM_ARCHIVE:${scope} examined ${r.seen} message(s), ${r.inserted} new` +
       `${r.backfilledMeta ? `, backfilled meta on ${r.backfilledMeta} old row(s)` : ''}.`);
     for (const [name, n] of Object.entries(r.per)) console.log(`  ${name}: +${n}`);
@@ -359,5 +335,28 @@ function main() {
   }
 }
 
-if (require.main === module) main();
+if (require.main === module) {
+  const argv = process.argv.slice(2);
+  // A misspelled --deepp silently performs the narrow sweep you did not ask for,
+  // so an unknown flag aborts rather than falling through to a default.
+  const known = new Set(['--deep', '--only']);
+  for (let i = 0; i < argv.length; i += 1) {
+    if (!argv[i].startsWith('--')) continue;
+    if (argv[i] === '--only') { i += 1; continue; }
+    if (!known.has(argv[i])) {
+      console.error(`crm-archive: unknown flag '${argv[i]}'\nknown: --deep, --only <slug>`);
+      process.exit(2);
+    }
+  }
+  // --only <slug>: sweep ONE contact (or one group, as `group:<slug>`) — the
+  // dashboard's per-person archive button and targeted "pull his whole history
+  // right now" both need this, where a full sweep re-walks 83k rows.
+  const onlyIdx = argv.indexOf('--only');
+  let only = null;
+  if (onlyIdx !== -1) {
+    only = argv[onlyIdx + 1];
+    if (!only || only.startsWith('--')) { console.error('crm-archive: --only requires a slug'); process.exit(2); }
+  }
+  main({ deep: argv.includes('--deep'), only });
+}
 module.exports = { runSweep };

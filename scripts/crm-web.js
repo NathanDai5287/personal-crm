@@ -18,7 +18,7 @@ const crypto = require('crypto');
 const { spawn, execFileSync } = require('child_process');
 const {
   ROOT, CONTACTS_DIR, WEB_PORT, WEB_USER, WEB_PASSWORD_FILE,
-  TRACKED, REFRESH_STATE, LOGS_DIR, GITDIR,
+  TRACKED, REFRESH_STATE, LOGS_DIR, GITDIR, MERGE_MODEL,
 } = require('../lib/config');
 const { openCrmDb, openSignalDb } = require('../lib/signal-db');
 const { resolveSources, buildMessageQuery, buildArchiveQuery } = require('../lib/sources');
@@ -629,6 +629,41 @@ function profilePage(slug) {
   return page(name, body, '/');
 }
 
+// ---- rename a contact's display name ---------------------------------------
+// The roster name is the profile's `# ` title line (listContacts reads it), so a
+// rename is a one-line rewrite of data/contacts/<slug>.md. The slug, archive
+// (crm.db contact_slug), cursors, and git history are all keyed off the slug and
+// are deliberately untouched — this changes what you SEE, not the identity.
+function renamePage(slug) {
+  const file = path.posix.join(CONTACTS_DIR, `${slug}.md`);
+  let md;
+  try { md = fs.readFileSync(file, 'utf8'); } catch { return null; }
+  const titleLine = md.split(/\r?\n/).find((l) => l.startsWith('# '));
+  const name = titleLine ? titleLine.slice(2).trim() : slug;
+  const v = V.rename({ slug, name });
+  return page(v.title, render(v.body));
+}
+
+function renameContact(slug, newName) {
+  const file = path.posix.join(CONTACTS_DIR, `${slug}.md`);
+  let md;
+  try { md = fs.readFileSync(file, 'utf8'); } catch { return { ok: false, error: 'no such contact' }; }
+  const lines = md.split(/\r?\n/);
+  const idx = lines.findIndex((l) => l.startsWith('# '));
+  if (idx === -1) lines.unshift(`# ${newName}`, '');
+  else lines[idx] = `# ${newName}`;
+  fs.writeFileSync(file, lines.join('\n'));
+  // Best-effort commit to the isolated history, so the rename is attributed and
+  // future diffs stay clean. Non-fatal: the file is already written and served,
+  // and the next pipeline run snapshots it regardless.
+  const relPath = `data/contacts/${slug}.md`;
+  try {
+    execFileSync('git', ['--git-dir', GITDIR, '--work-tree', ROOT, 'add', '--', relPath], { cwd: ROOT, timeout: 15_000 });
+    execFileSync('git', ['--git-dir', GITDIR, '--work-tree', ROOT, 'commit', '-m', `rename ${slug} → ${newName}`], { cwd: ROOT, timeout: 15_000 });
+  } catch { /* uncommitted rename still shows */ }
+  return { ok: true };
+}
+
 // ---------------------------------------------------------------------------
 // Screen B — /status: what would run right now, per tracked contact
 // ---------------------------------------------------------------------------
@@ -1087,83 +1122,138 @@ function diffPage(id, slug, chunkIdx) {
 }
 
 // ---------------------------------------------------------------------------
-// Screen C — /actions: launch runs from the browser, one at a time
+// Screen C — the pipeline jobs: sweep / ingest / compact, launched from /admin
 // ---------------------------------------------------------------------------
-// In-memory single-job lock. This is also the only sanctioned way to launch
-// overlapping-able work from the UI — a second launch while one is running is
-// rejected with 409 rather than interleaving cursor state.
-let job = null; // { mode, slug, argv, startedAt, endedAt, running, exit, buf }
+// In-memory single-job lock: one run at a time, so two launches can never
+// interleave cursor state (a second launch while one runs is rejected with 409).
+// A job runs a QUEUE of commands sequentially — one per selected person — and
+// stops at the first failure rather than cascading model calls into a broken run.
+let job = null;
 
-function startJob(mode, slug) {
+const ARCHIVE_JS = path.join(ROOT, 'scripts', 'crm-archive.js');
+const DAILY_JS = path.join(ROOT, 'scripts', 'crm-daily.js');
+const COMPACT_JS = path.join(ROOT, 'scripts', 'crm-compact.js');
+
+// A job spec → the argv(s) to run. An empty `slugs` means "everyone": sweep and
+// compact each have a native all-people pass (run once), while ingest is
+// per-contact by design (crm-daily --only), so it expands to every tracked slug.
+//   sweep   → crm-archive.js  [--only <slug>] [--deep]     (free, no model)
+//   ingest  → crm-daily.js    --only <slug>  [--dry-run]   (refresh + merge)
+//   compact → crm-compact.js  --write [--slug <slug>]      (timeline summaries)
+function jobCommands({ kind, slugs, deep, plan }) {
+  if (kind === 'sweep') {
+    const people = slugs.length ? slugs : [null];
+    return people.map((s) => [ARCHIVE_JS, ...(s ? ['--only', s] : []), ...(deep ? ['--deep'] : [])]);
+  }
+  if (kind === 'ingest') {
+    const people = slugs.length ? slugs : loadTrackedSlugs();
+    return people.map((s) => [DAILY_JS, '--only', s, ...(plan ? ['--dry-run'] : [])]);
+  }
+  if (kind === 'compact') {
+    const people = slugs.length ? slugs : [null];
+    return people.map((s) => [COMPACT_JS, '--write', ...(s ? ['--slug', s] : [])]);
+  }
+  return null;
+}
+
+function startJob(spec) {
   if (job && job.running) return { ok: false, error: 'a run is already in progress' };
-  const daily = path.join(ROOT, 'scripts', 'crm-daily.js');
-  const compact = path.join(ROOT, 'scripts', 'crm-compact.js');
-  let argv;
-  if (mode === 'full') argv = [daily];
-  else if (mode === 'dry') argv = [daily, '--dry-run'];
-  else if (mode === 'only' && slug && /^[a-z0-9._-]+$/i.test(slug)) argv = [daily, '--only', slug];
-  else if (mode === 'compact') argv = [compact, '--write'];
-  else return { ok: false, error: 'bad mode' };
+  if (!['sweep', 'ingest', 'compact'].includes(spec.kind)) return { ok: false, error: 'bad job kind' };
+  const cmds = jobCommands(spec);
+  if (!cmds || !cmds.length) return { ok: false, error: 'nothing to run (no such people?)' };
+  const now = Date.now();
+  job = {
+    id: new Date(now).toISOString().replace(/[:.]/g, '-').slice(0, 19),
+    kind: spec.kind, deep: !!spec.deep, plan: !!spec.plan,
+    scope: spec.slugs.length ? spec.slugs.join(', ') : 'everyone',
+    total: cmds.length, done: 0,
+    startedAt: now, endedAt: null, running: true, exit: null, buf: '',
+  };
+  runQueue(cmds, 0);
+  return { ok: true, id: job.id };
+}
 
-  job = { mode, slug: slug || null, argv, startedAt: Date.now(), endedAt: null, running: true, exit: null, buf: '' };
+function runQueue(cmds, i) {
+  if (i >= cmds.length) {
+    job.running = false;
+    job.endedAt = Date.now();
+    if (job.exit == null) job.exit = 0;
+    job.buf += `\n[done — ${cmds.length} step(s), exit ${job.exit}]`;
+    return;
+  }
+  job.done = i;
+  const argv = cmds[i];
+  const pretty = argv.map((a) => (a.startsWith(ROOT) ? path.basename(a) : a)).join(' ');
+  job.buf += (job.buf ? '\n\n' : '') + `$ node ${pretty}\n`;
   const child = spawn(process.execPath, argv, { cwd: ROOT });
   const append = (d) => {
     job.buf += d.toString();
-    if (job.buf.length > 200_000) job.buf = job.buf.slice(-200_000);
+    if (job.buf.length > 400_000) job.buf = job.buf.slice(-400_000);
   };
   child.stdout.on('data', append);
   child.stderr.on('data', append);
   child.on('close', (code) => {
-    job.running = false;
-    job.exit = code;
-    job.endedAt = Date.now();
-    job.buf += `\n[exit ${code}]`;
+    if (code) {
+      job.exit = code;
+      job.running = false;
+      job.endedAt = Date.now();
+      job.buf += `\n[step ${i + 1}/${cmds.length} exit ${code} — stopped]`;
+      return;
+    }
+    job.done = i + 1;
+    runQueue(cmds, i + 1);
   });
   child.on('error', (e) => {
-    job.running = false;
     job.exit = -1;
+    job.running = false;
     job.endedAt = Date.now();
     job.buf += `\n[spawn error: ${e.message}]`;
   });
-  return { ok: true };
 }
 
-function actionsPage() {
-  const slugs = loadTrackedSlugs();
-  const opts = slugs.map((s) => `<option value="${esc(s)}">${esc(s)}</option>`).join('');
-  const body = `<header class="top"><h1>Actions</h1><span class="sub">runs launch the real pipeline scripts; one at a time</span></header>` +
-    `<div class="actions">` +
-    `<form method="post" action="/actions/run"><input type="hidden" name="mode" value="full">` +
-    `<button>Full run</button><div class="cap">Autopromote, refresh everyone, merge each contact, compact all timelines.</div></form>` +
-    `<form method="post" action="/actions/run"><input type="hidden" name="mode" value="only">` +
-    `<select name="slug">${opts}</select> <button>Run one contact</button><div class="cap">Refresh + merge + cursor commit for one person. No compaction.</div></form>` +
-    `<form method="post" action="/actions/run"><input type="hidden" name="mode" value="dry">` +
-    `<button>Dry run</button><div class="cap">Plan only: shows what would merge. Touches nothing, no AI calls.</div></form>` +
-    `<form method="post" action="/actions/run"><input type="hidden" name="mode" value="compact">` +
-    `<button>Compact only</button><div class="cap">Rebuild every Timeline (raw week + aged summaries). AI summary calls, no merges.</div></form>` +
-    `</div>` +
-    `<h2>Current / last job</h2><div id="jobmeta" class="sub">loading…</div><pre class="log" id="out"></pre>` +
-    `<script>
-      async function poll() {
-        try {
-          const r = await fetch('/actions/status.json');
-          const j = await r.json();
-          const meta = document.getElementById('jobmeta');
-          const out = document.getElementById('out');
-          if (!j.job) { meta.textContent = 'No job has been launched from the UI yet.'; out.textContent = ''; }
-          else {
-            meta.textContent = '[' + j.job.mode + (j.job.slug ? ' ' + j.job.slug : '') + '] ' +
-              (j.job.running ? 'RUNNING since ' + new Date(j.job.startedAt).toLocaleTimeString()
-                             : 'finished, exit ' + j.job.exit);
-            out.textContent = j.job.buf || '(no output yet)';
-          }
-          document.querySelectorAll('.actions button').forEach(b => b.disabled = !!(j.job && j.job.running));
-        } catch (e) { /* server briefly busy */ }
-        setTimeout(poll, 2000);
-      }
-      poll();
-    </script>`;
-  return page('Actions — Personal CRM', body, '/actions');
+// Shape the in-memory job for the V.job monitor component and status.json.
+function jobToView() {
+  if (!job) return null;
+  const status = job.running ? 'running' : (job.exit ? 'failed' : 'done');
+  const step = job.total > 1
+    ? (job.running ? `person ${job.done + 1} of ${job.total}` : `${job.done} of ${job.total} done`)
+    : (job.running ? 'running' : status);
+  return {
+    id: job.id,
+    kind: job.kind[0].toUpperCase() + job.kind.slice(1) + (job.deep ? ' · deep' : '') + (job.plan ? ' · plan' : ''),
+    scope: job.scope,
+    status,
+    startedAt: new Date(job.startedAt).toISOString().slice(11, 19) + ' UTC',
+    elapsed: fmtMs((job.endedAt || Date.now()) - job.startedAt),
+    step,
+    model: job.kind === 'sweep' ? 'no model' : MERGE_MODEL,
+    log: job.buf || '(no output yet)',
+  };
+}
+
+// The job monitor. Server-renders the current state, then polls status.json to
+// stream the log live; when the run ends it reloads once for the final stamp.
+function jobPage() {
+  const j = jobToView();
+  if (!j) {
+    return page('No job — personal-crm',
+      '<div class="back"><a href="/admin">&larr; pipeline</a></div>' +
+      '<p class="sub">No job has been launched yet. Start one from the ' +
+      '<a href="/admin">pipeline desk</a>.</p>', '/admin');
+  }
+  const poll = `<script>(function(){
+    if(${j.status === 'running'} !== true) return;
+    function tick(){
+      fetch('/admin/jobs/status.json').then(function(r){return r.json();}).then(function(d){
+        if(!d.job) return;
+        var pre=document.querySelector('.joblog');
+        if(pre){pre.textContent=d.job.log;pre.scrollTop=pre.scrollHeight;}
+        if(d.job.status==='running'){setTimeout(tick,1500);}else{location.reload();}
+      }).catch(function(){setTimeout(tick,2500);});
+    }
+    setTimeout(tick,1200);
+  })();</script>`;
+  return page(`${j.kind} — job ${j.id}`, render(V.job(j).body) + poll);
 }
 
 function readBody(req, cb) {
@@ -1269,19 +1359,25 @@ function start() {
         return;
       }
 
-      if (url.pathname === '/actions' && req.method === 'GET') { send(200, actionsPage()); return; }
-      if (url.pathname === '/actions/status.json') { sendJson(200, { job }); return; }
-      if (url.pathname === '/actions/run' && req.method === 'POST') {
-        // CSRF guard: modern browsers stamp cross-site requests; only allow
-        // same-origin (or direct curl, which sends no Sec-Fetch-Site at all).
+      // Launch a pipeline job (sweep / ingest / compact) from the pipeline desk.
+      // The desk is one <form>: `job` is the kind, or "<kind>:<slug>" for a row's
+      // own trigger; `who` carries every checked roster slug; `deep` / `plan` are
+      // per-kind modifiers.
+      if (url.pathname === '/admin/jobs' && req.method === 'POST') {
         const sfs = req.headers['sec-fetch-site'];
         if (sfs && sfs !== 'same-origin' && sfs !== 'none') { send(403, page('Forbidden', '<p>Cross-site request refused.</p>')); return; }
         readBody(req, (body) => {
           try {
-            const params = new URLSearchParams(body);
-            const r = startJob(params.get('mode'), params.get('slug'));
-            if (!r.ok) { send(409, page('Busy', `<div class="back"><a href="/actions">&larr; Actions</a></div><p class="bad">${esc(r.error)}</p>`)); return; }
-            res.writeHead(303, { Location: '/actions' });
+            const p = new URLSearchParams(body);
+            const jobVal = p.get('job') || '';
+            const colon = jobVal.indexOf(':');
+            const kind = colon === -1 ? jobVal : jobVal.slice(0, colon);
+            const slugs = (colon === -1 ? p.getAll('who') : [jobVal.slice(colon + 1)]).filter(isSafeSlug);
+            const deep = kind === 'sweep' && p.get('deep') != null;
+            const plan = kind === 'ingest' && p.get('plan') != null;
+            const r = startJob({ kind, slugs, deep, plan });
+            if (!r.ok) { send(409, page('Busy', `<div class="back"><a href="/admin/jobs/current">&larr; current job</a></div><p class="bad">${esc(r.error)}</p>`)); return; }
+            res.writeHead(303, { Location: '/admin/jobs/current' });
             res.end();
           } catch {
             try { send(400, page('Bad request', '<p>Bad request.</p>')); } catch { /* sent */ }
@@ -1289,6 +1385,9 @@ function start() {
         });
         return;
       }
+      if (url.pathname === '/admin/jobs/status.json') { sendJson(200, { job: jobToView() }); return; }
+      // /admin/jobs, /admin/jobs/current, /admin/jobs/<id> all show the one job.
+      if (url.pathname === '/admin/jobs' || url.pathname.startsWith('/admin/jobs/')) { send(200, jobPage()); return; }
 
       const mm = url.pathname.match(/^\/m\/(\d+)$/);
       if (mm) {
@@ -1316,6 +1415,33 @@ function start() {
         if (!isSafeSlug(slug)) { send(400, page('Bad request', '<p>Bad request.</p>')); return; }
         const html = ledgerPage(slug, cl[2]);
         if (!html) { send(404, page('Not found', `<div class="back"><a href="/c/${encodeURIComponent(slug)}/history">&larr; history</a></div><p>No ledger captured at that commit.</p>`)); return; }
+        send(200, html);
+        return;
+      }
+      // Rename a contact's display name. GET renders the form, POST applies it.
+      const cn = url.pathname.match(/^\/c\/([^/]+)\/rename$/);
+      if (cn) {
+        const slug = decodeURIComponent(cn[1]);
+        if (!isSafeSlug(slug)) { send(400, page('Bad request', '<p>Bad request.</p>')); return; }
+        if (req.method === 'POST') {
+          const sfs = req.headers['sec-fetch-site'];
+          if (sfs && sfs !== 'same-origin' && sfs !== 'none') { send(403, page('Forbidden', '<p>Cross-site request refused.</p>')); return; }
+          readBody(req, (raw2) => {
+            try {
+              const name = String(new URLSearchParams(raw2).get('name') || '').replace(/[\r\n]+/g, ' ').trim().slice(0, 120);
+              if (!name) { send(400, page('Bad request', '<div class="back"><a href="/admin">&larr; pipeline</a></div><p>A name is required.</p>')); return; }
+              const r = renameContact(slug, name);
+              if (!r.ok) { send(404, page('Not found', `<p>${esc(r.error)}</p>`)); return; }
+              res.writeHead(303, { Location: '/admin' });
+              res.end();
+            } catch (e) {
+              try { send(500, page('Error', `<p class="bad">${esc(String(e.message).slice(0, 200))}</p>`)); } catch { /* sent */ }
+            }
+          });
+          return;
+        }
+        const html = renamePage(slug);
+        if (!html) { send(404, page('Not found', '<div class="back"><a href="/admin">&larr; pipeline</a></div><p>No such contact.</p>')); return; }
         send(200, html);
         return;
       }

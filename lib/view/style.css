@@ -122,7 +122,9 @@ button{font:inherit;cursor:pointer}
   padding:14px 16px 12px 36px;min-height:158px;
   background-image:repeating-linear-gradient(to bottom,transparent 0 25px,var(--cardline) 25px 26px);
   background-position:0 66px;transition:box-shadow .12s,transform .12s}
-a.cd:hover{text-decoration:none;box-shadow:3px 4px 0 #00000018;transform:translateY(-1px)}
+.cd:hover{box-shadow:3px 4px 0 #00000018;transform:translateY(-1px)}
+.cd .cardlink{color:inherit;text-decoration:none}
+.cd .cardlink::after{content:"";position:absolute;inset:0;z-index:0}
 .cd::before{content:"";position:absolute;left:14px;top:20px;width:12px;height:12px;
   border:1px solid var(--rule);border-radius:50%;background:var(--ground);box-shadow:inset 0 1px 1px #00000018}
 .cd .call{font-family:"Courier Prime",monospace;font-size:10.5px;letter-spacing:.09em;color:var(--soft)}
@@ -134,7 +136,7 @@ a.cd:hover{text-decoration:none;box-shadow:3px 4px 0 #00000018;transform:transla
   font-family:"Courier Prime",monospace;font-size:10.5px;letter-spacing:.03em;color:var(--soft)}
 
 /* ---- the signature: stamped source slip & corner stamp ------------------ */
-.slip{display:inline-block;border:1.5px solid var(--stamp);color:var(--stamp);
+.slip{position:relative;z-index:1;display:inline-block;border:1.5px solid var(--stamp);color:var(--stamp);
   font-family:"Courier Prime",monospace;font-size:10px;letter-spacing:.05em;
   padding:0 5px;transform:rotate(-1.4deg);opacity:.88;white-space:nowrap;vertical-align:1px}
 .slip:hover{opacity:1;text-decoration:none;background:#2E4A6B12}
@@ -195,6 +197,12 @@ tbody tr:hover td{background:var(--hover)}
 td.r{text-align:right;font-variant-numeric:tabular-nums}
 .pickcell{width:34px;text-align:center}
 .pick{accent-color:var(--stamp);margin:0;cursor:pointer}
+.ren{color:var(--faint);text-decoration:none;font-size:12px;opacity:.6;vertical-align:1px}
+.ren:hover{color:var(--stamp);opacity:1;text-decoration:none}
+.renameform{margin-top:16px}
+.renameform input{font-family:Newsreader,serif;font-size:19px;padding:9px 11px;width:100%;box-sizing:border-box;
+  background:var(--paper);border:1px solid var(--rule);color:var(--ink)}
+.renameactions{display:flex;gap:10px;margin-top:12px}
 .person{font-family:Newsreader,serif;font-size:16px;font-weight:500}
 .person a{color:var(--ink)}
 .person a:hover{color:var(--ox)}
@@ -233,7 +241,8 @@ td.r{text-align:right;font-variant-numeric:tabular-nums}
   border-top:1px solid var(--rule)}
 .btn{font-family:"Courier Prime",monospace;font-size:11.5px;letter-spacing:.1em;
   text-transform:uppercase;background:var(--card2);border:1.5px solid var(--ink);
-  padding:6px 13px;color:var(--ink)}
+  padding:6px 13px;color:var(--ink);cursor:pointer;display:inline-block;line-height:1.4;
+  text-decoration:none;-webkit-appearance:none;appearance:none}
 .btn:hover{background:var(--ink);color:var(--card)}
 .btn.pr{border-color:var(--ox);color:var(--ox)}
 .btn.pr:hover{background:var(--ox);color:var(--card)}
