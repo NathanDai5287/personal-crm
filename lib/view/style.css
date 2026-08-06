@@ -70,6 +70,9 @@ body{
   font:16.5px/1.55 Newsreader,Georgia,"Times New Roman",serif;
   background-image:radial-gradient(var(--dot) 1px,transparent 1px);
   background-size:3px 3px;-webkit-font-smoothing:antialiased;
+  /* html carries the solid ground, so body's dot grain paints only its own box;
+     fill the viewport (short pages) so the grain never stops mid-page. */
+  min-height:100vh;min-height:100dvh;
 }
 .tw{font-family:"Courier Prime",ui-monospace,Consolas,monospace}
 h1,h2,h3,h4{margin:0;font-weight:500;letter-spacing:-.005em}
@@ -328,9 +331,101 @@ td.r{text-align:right;font-variant-numeric:tabular-nums}
 .foot{margin-top:30px;padding-top:8px;border-top:1px solid var(--rule);
   font-family:"Courier Prime",monospace;font-size:11px;letter-spacing:.05em;color:var(--soft)}
 
+/* ---- Bindery form fields (add slip, inline edit, rename) ------------------ */
+.fld{font-family:Newsreader,serif;font-size:15.5px;padding:8px 10px;width:100%;
+  background:var(--paper);border:1px solid var(--rule);color:var(--ink)}
+.fld:hover{border-color:var(--faint)}
+.fld:focus{outline:2px solid var(--ox);outline-offset:1px;border-color:var(--ox)}
+.fld.tw{font-family:"Courier Prime",monospace;font-size:12.5px}
+textarea.fld{resize:vertical;line-height:1.4}
+.selwrap{position:relative;display:block}
+.selwrap::after{content:"▾";position:absolute;right:10px;top:50%;transform:translateY(-50%);
+  pointer-events:none;color:var(--soft);font-size:11px}
+select.fld{appearance:none;-webkit-appearance:none;padding-right:26px;cursor:pointer}
+
+/* ---- to do: charge cards + the in-tray ----------------------------------- */
+.todo{display:grid;grid-template-columns:1fr;gap:26px;margin-top:18px;align-items:start}
+@media(min-width:920px){.todo{grid-template-columns:1fr 340px}}
+.slipform{display:grid;grid-template-columns:1fr 150px auto auto;gap:9px;align-items:center;
+  background:var(--card2);border:1px solid var(--rule);border-left:3px solid var(--stamp);
+  padding:11px 13px;margin-bottom:18px}
+.emptyline{color:var(--soft);font-style:italic;font-size:14.5px;padding:8px 2px}
+
+/* a task is a catalog card, clearly bordered so rows never blur together */
+.taskcard{position:relative;display:grid;grid-template-columns:auto 1fr auto;gap:13px;align-items:start;
+  background:var(--card);border:1px solid var(--rule);box-shadow:var(--shadow);
+  padding:12px 15px 12px 14px;margin-bottom:10px;transition:box-shadow .12s}
+.taskcard:hover{box-shadow:3px 4px 0 #00000014}
+.taskcard.done{opacity:.58}
+.taskbox{appearance:none;-webkit-appearance:none;flex:none;width:19px;height:19px;margin:2px 0 0;
+  border:1.5px solid var(--rule);background:var(--paper);cursor:pointer;position:relative}
+.taskbox:hover{border-color:var(--stamp)}
+.taskbox:checked{border-color:var(--stamp);background:var(--stamp)}
+.taskbox:checked::after{content:"✓";position:absolute;inset:0;display:flex;align-items:center;
+  justify-content:center;color:var(--card);font-size:13px;font-weight:700}
+.taskbody{min-width:0}
+.taskline{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+.tasktitle{font-size:17.5px;line-height:1.25}
+.taskcard.done .tasktitle{text-decoration:line-through;text-decoration-color:var(--faint)}
+.taskdesc{font-size:14px;color:var(--soft);margin:4px 0 0}
+.tasksrc{font-family:"Courier Prime",monospace;font-size:11px;letter-spacing:.02em;color:var(--soft);margin-top:6px}
+.taskaside{display:flex;flex-direction:column;align-items:flex-end;gap:7px;white-space:nowrap}
+.taskdue{font-family:"Courier Prime",monospace;font-size:11px;color:var(--soft);text-align:right;
+  font-variant-numeric:tabular-nums}
+.taskdue span{display:block;font-size:8.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--faint)}
+.taskdue.od{color:var(--ox);font-weight:700}
+.taskdue.od span{color:var(--ox)}
+.prob{color:var(--amber);font-style:italic}
+
+/* importance as a rubber stamp — only high/minor show; normal goes unmarked */
+.impmark{font-family:"Courier Prime",monospace;font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;
+  border:1.5px solid;padding:0 5px;display:inline-block;vertical-align:2px;white-space:nowrap}
+.impmark.high{color:var(--ox);border-color:var(--ox);transform:rotate(-2deg)}
+.impmark.minor{color:var(--faint);border-color:var(--faint);transform:rotate(1.5deg)}
+
+/* inline edit form (shares .fld) */
+.tedit{display:grid;gap:9px;margin-top:12px;padding:12px;background:var(--card2);border:1px solid var(--stamp)}
+.tedit label{display:grid;gap:4px;font-family:"Courier Prime",monospace;font-size:10.5px;
+  letter-spacing:.06em;text-transform:uppercase;color:var(--soft)}
+.tedit-acts{display:flex;gap:9px;margin-top:2px}
+.hint{font-family:Newsreader,serif;font-size:12px;text-transform:none;letter-spacing:0;
+  color:var(--faint);font-style:italic}
+
+/* the in-tray (drafts an ingest run pulled from messages) */
+@media(min-width:920px){.intray{border-left:1px solid var(--rule);padding-left:22px}}
+.intray-note{font-size:13px;font-style:italic;color:var(--soft);margin:0 0 12px}
+.draftcard{position:relative;background:var(--card);border:1px solid var(--rule);box-shadow:var(--shadow);
+  padding:11px 13px;margin-bottom:10px}
+.draft-h{display:flex;gap:7px;align-items:baseline;flex-wrap:wrap}
+.draft-t{font-size:15.5px;line-height:1.25}
+.draft-d{font-size:13.5px;color:var(--soft);margin-top:4px}
+.draft-m{font-family:"Courier Prime",monospace;font-size:11px;color:var(--soft);margin-top:6px}
+.draft-a{display:flex;gap:8px;margin-top:10px}
+.inl{margin:0}
+
+/* ---- confirm modal (job requisition slip) -------------------------------- */
+.modal{position:fixed;inset:0;z-index:50;display:flex;align-items:center;justify-content:center;
+  padding:20px;background:rgba(16,18,12,.66)}
+.modal[hidden]{display:none}
+.modal-card{position:relative;overflow:hidden;width:100%;max-width:440px;background:var(--card);
+  border:1px solid var(--rule);box-shadow:6px 9px 0 #00000033;padding:22px 24px 20px}
+.modal-stamp{position:absolute;right:-4px;top:12px;font-family:"Courier Prime",monospace;font-weight:700;
+  font-size:34px;letter-spacing:.05em;text-transform:uppercase;color:var(--ox);opacity:.12;
+  transform:rotate(-8deg);pointer-events:none}
+.modal-title{font-size:23px;margin:0 0 4px}
+.modal-meta{font-family:"Courier Prime",monospace;font-size:12px;color:var(--soft);margin-bottom:13px}
+.modal-whoh{font-family:"Courier Prime",monospace;font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;
+  color:var(--soft);border-top:1px solid var(--rule);padding-top:11px;margin-bottom:9px}
+.modal-who{list-style:none;margin:0 0 17px;padding:0;max-height:216px;overflow:auto;
+  display:flex;flex-wrap:wrap;gap:6px}
+.modal-who li{font-family:Newsreader,serif;font-size:14px;background:var(--card2);
+  border:1px solid var(--rule);padding:3px 9px}
+.modal-acts{display:flex;gap:10px;justify-content:flex-end}
+
 @media (max-width:760px){
   .plate{grid-template-columns:1fr}.counts{gap:16px;flex-wrap:wrap}
   .drawer{grid-template-columns:1fr}
   .head{grid-template-columns:1fr}
+  .slipform{grid-template-columns:1fr}
 }
 @media (prefers-reduced-motion:reduce){.barber i{animation:none;opacity:.32}}

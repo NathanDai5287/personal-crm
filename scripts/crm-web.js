@@ -344,152 +344,64 @@ function taskItems() {
   return out;
 }
 
+// Toggling a task done/reopen posts in the background and restyles the card in
+// place — no full page reload. The X-Requested-With header tells the POST handler
+// to answer 204 instead of the 303 a form submit gets. The plate counts are
+// nudged to match; a failed request reverts the checkbox.
+const TASKS_TOGGLE_JS = `<script>(function(){
+  function adj(id,d){var el=document.getElementById(id);if(!el)return;var n=parseInt(el.textContent,10)||0;el.textContent=Math.max(0,n+d);}
+  document.querySelectorAll('.taskbox').forEach(function(box){
+    box.addEventListener('change',function(){
+      var id=box.getAttribute('data-id'),nowDone=box.checked,card=box.closest('.taskcard');
+      box.disabled=true;
+      fetch('/tasks/'+(nowDone?'done':'reopen'),{
+        method:'POST',
+        headers:{'X-Requested-With':'fetch','Content-Type':'application/x-www-form-urlencoded'},
+        body:'id='+encodeURIComponent(id)
+      }).then(function(r){
+        if(!r.ok)throw new Error(r.status);
+        if(card)card.classList.toggle('done',nowDone);
+        adj('cActive',nowDone?-1:1);adj('cActiveChip',nowDone?-1:1);adj('cDone',nowDone?1:-1);
+      }).catch(function(){box.checked=!nowDone;}).then(function(){box.disabled=false;});
+    });
+  });
+})();</script>`;
+
 function tasksPage(editId = null) {
   let cdb;
-  try { cdb = openCrmDb(); } catch { return page('To do', '<p class="bad">archive unavailable</p>', '/tasks'); }
+  try { cdb = openCrmDb(); } catch { return page('To do — personal-crm', '<p class="bad">archive unavailable</p>', '/tasks'); }
   let drafts = [];
   let active = [];
   let done = [];
-  let n = { draft: 0, active: 0, done: 0, dismissed: 0 };
+  let counts = { draft: 0, active: 0, done: 0, dismissed: 0 };
   let editing = null;
   try {
-    // Drafts are ROWS now, written by scripts/crm-tasks.js during an ingest run —
-    // not derived from the profile. Deriving them from `## Talking points` is what
+    // Drafts are ROWS, written by scripts/crm-tasks.js during an ingest run — not
+    // derived from the profile. Deriving them from `## Talking points` is what
     // filled this list with conversation topics instead of commitments.
     drafts = TASKS.listByStatus(cdb, 'draft');
     active = TASKS.listByStatus(cdb, 'active');
     done = TASKS.listByStatus(cdb, 'done');
-    n = TASKS.counts(cdb);
+    counts = TASKS.counts(cdb);
     if (editId) editing = TASKS.getTask(cdb, editId);
   } finally {
     try { cdb.close(); } catch { /* closed */ }
   }
-
-  const today = new Date().toISOString().slice(0, 10);
-  const hidden = (o) => Object.entries(o)
-    .map(([k, v]) => `<input type="hidden" name="${esc(k)}" value="${esc(v == null ? '' : String(v))}">`).join('');
-  const btn = (action, id, label, cls = '') => `<form method="post" action="/tasks/${action}" class="inl">`
-    + hidden({ id })
-    + `<button class="btn ${cls}" type="submit">${label}</button></form>`;
-
-  // Importance is the sort key, so it has to be visible or the ordering looks arbitrary.
-  // 2 is the default and the common case, so only 3 and 1 are badged — badging every row
-  // would be noise.
-  const impBadge = (n) => (Number(n) === 3 ? '<span class="imp3">high</span>'
-    : Number(n) === 1 ? '<span class="imp1">minor</span>' : '');
-
-  const srcHtml = (t) => `<div class="tsrc">`
-    + (t.slug ? `from <a href="/c/${encodeURIComponent(t.slug)}">${esc(t.contact_name || t.slug)}</a>` : 'added by hand')
-    + (t.source_msg_id ? ` · agreed in <a href="/m/${t.source_msg_id}">m${t.source_msg_id}</a>` : '')
-    + (t.owner && t.owner !== 'nathan' ? ` · owner: ${esc(t.owner)}` : '')
-    + (t.confidence === 'probable' ? ' · <span class="prob">probable</span>' : '')
-    + `</div>`;
-
-  const draftRow = (d) => `<li class="dr">`
-    + `<div class="dtitle">${impBadge(d.importance)}${esc(d.title)}</div>`
-    + (d.description ? `<div class="ddesc">${inline(d.description)}</div>` : '')
-    + `<div class="dmeta">${esc(d.contact_name || d.slug)}${d.deadline ? ` · due ${esc(d.deadline)}` : ''}`
-    + (d.source_msg_id ? ` · <a href="/m/${d.source_msg_id}">m${d.source_msg_id}</a>` : '')
-    + (d.owner !== 'nathan' ? ` · ${esc(d.owner)}` : '')
-    + (d.confidence === 'probable' ? ' · <span class="prob">probable</span>' : '')
-    + `</div>`
-    + `<div class="dacts">${btn('accept', d.id, '+ add', 'ok')}${btn('dismiss', d.id, 'dismiss')}</div>`
-    + `</li>`;
-
-  const editForm = (t) => `<form method="post" action="/tasks/edit" class="ed">`
-    + hidden({ id: t.id })
-    + `<label>Title<input name="title" value="${esc(t.title)}" maxlength="300"></label>`
-    + `<label>Description<textarea name="description" rows="2">${esc(t.description || '')}</textarea></label>`
-    + `<label>Deadline <span class="hint">YYYY-MM-DD, or blank</span>`
-    + `<input name="deadline" value="${esc(t.deadline || '')}" placeholder="2026-09-01" maxlength="20"></label>`
-    + `<label>Importance <span class="hint">3 = someone is blocked · 1 = minor</span>`
-    + `<select name="importance">`
-    + [3, 2, 1].map((v) => `<option value="${v}"${Number(t.importance) === v ? ' selected' : ''}>${v}</option>`).join('')
-    + `</select></label>`
-    + `<div class="dacts"><button class="btn ok" type="submit">save</button>`
-    + `<a class="btn" href="/tasks">cancel</a></div></form>`;
-
-  const taskRow = (t) => {
-    const isEditing = editing && editing.id === t.id;
-    const overdue = t.deadline && t.deadline < today && t.status === 'active';
-    return `<li class="tr${t.status === 'done' ? ' isdone' : ''}">`
-      + btn(t.status === 'done' ? 'reopen' : 'done', t.id, t.status === 'done' ? '☑' : '☐', 'box')
-      + `<div class="tbody">`
-      + `<div class="tline">${impBadge(t.importance)}<span class="ttitle">${esc(t.title)}</span>`
-      + (t.deadline ? `<span class="tdate${overdue ? ' od' : ''}">${esc(t.deadline)}</span>` : '')
-      + (isEditing ? '' : `<a class="btn sm" href="/tasks?edit=${t.id}">edit</a>`)
-      + `</div>`
-      + (t.description ? `<div class="tdesc">${inline(t.description)}</div>` : '')
-      + srcHtml(t)
-      + (isEditing ? editForm(t) : '')
-      + `</div></li>`;
+  // Shape the DB rows into what lib/view's tasks page expects: a display name, the
+  // source-message id, and description Markdown pre-rendered to Bindery HTML so its
+  // ⟨m…⟩ citations become slips.
+  const shape = (t) => ({
+    ...t,
+    name: t.contact_name || t.slug,
+    msgId: t.source_msg_id,
+    probable: t.confidence === 'probable',
+    descHtml: t.description ? mdInline(t.description) : '',
+  });
+  const data = {
+    counts, editing, today: new Date().toISOString().slice(0, 10),
+    active: active.map(shape), done: done.map(shape), drafts: drafts.map(shape),
   };
-
-  const addForm = `<form method="post" action="/tasks/add" class="add">`
-    + `<input name="title" placeholder="Add a task yourself…" maxlength="300" required>`
-    + `<input name="deadline" placeholder="due (optional)" maxlength="20" class="sm">`
-    + `<select name="importance" class="sm">`
-    + [3, 2, 1].map((v) => `<option value="${v}"${v === 2 ? ' selected' : ''}>imp ${v}</option>`).join('')
-    + `</select>`
-    + `<button class="btn ok" type="submit">add</button></form>`;
-
-  const st = `<style>
-    .cols{display:grid;grid-template-columns:1fr;gap:22px}
-    @media(min-width:900px){.cols{grid-template-columns:1fr 330px}}
-    ul.tl,ul.dl{list-style:none;padding:0;margin:6px 0}
-    li.tr{display:flex;gap:8px;align-items:flex-start;padding:8px 4px;border-bottom:1px solid var(--line)}
-    li.isdone .ttitle{text-decoration:line-through;color:var(--mut)}
-    .inl{margin:0;display:inline-block}
-    .btn.box{background:none;border:none;font-size:17px;padding:0 2px;color:var(--mut)}
-    .btn.box:hover{color:var(--accent)}
-    .tbody{flex:1;min-width:0}
-    .tline{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
-    .ttitle{flex:1 1 auto;min-width:0;font-weight:500}
-    .tdesc{font-size:13px;color:var(--mut);margin:2px 0}
-    .tsrc{font-size:11px;color:var(--mut);margin-top:2px}
-    .tdate{font-size:12px;color:var(--mut);font-variant-numeric:tabular-nums}
-    .tdate.od{color:#c2410c;font-weight:600}
-    .prob{color:#b45309}
-    .imp3{background:#b91c1c;color:#fff;font-size:11px;padding:1px 6px;border-radius:9px;margin-right:6px;vertical-align:1px}
-    .imp1{background:#e5e7eb;color:#6b7280;font-size:11px;padding:1px 6px;border-radius:9px;margin-right:6px;vertical-align:1px}
-    .side{border-left:1px solid var(--line);padding-left:16px}
-    @media(max-width:899px){.side{border-left:none;padding-left:0;border-top:1px solid var(--line);padding-top:12px}}
-    li.dr{border:1px solid var(--line);border-radius:6px;padding:7px 8px;margin-bottom:8px;background:var(--card)}
-    .dtitle{font-size:13px;font-weight:500}
-    .ddesc{font-size:12px;color:var(--mut);margin-top:2px}
-    .dmeta{font-size:11px;color:var(--mut);margin-top:3px}
-    .dacts{display:flex;gap:6px;margin-top:6px;align-items:center}
-    .dacts form{margin:0}
-    .btn{font-size:11px;padding:2px 8px;border:1px solid var(--line);border-radius:5px;background:var(--card);
-         color:var(--ink);cursor:pointer;text-decoration:none;display:inline-block}
-    .btn.ok{border-color:var(--accent);color:var(--accent)}
-    .btn.sm{font-size:10px;padding:1px 6px}
-    .ed{margin:8px 0;padding:8px;border:1px solid var(--accent);border-radius:6px;display:grid;gap:6px}
-    .ed label{display:grid;gap:3px;font-size:11px;color:var(--mut)}
-    .ed input,.ed textarea,.add input{font:inherit;font-size:13px;padding:4px 6px;border:1px solid var(--line);
-         border-radius:4px;background:var(--bg);color:var(--ink);width:100%}
-    .add{display:flex;gap:6px;margin:10px 0 4px}
-    .add input.sm{max-width:130px}
-    .hint{color:var(--mut);font-weight:400}
-    h2{font-size:15px;margin:18px 0 4px}
-  </style>`;
-
-  const body = st
-    + `<header class="top"><h1>To do</h1>`
-    + `<span class="sub">${n.active} active · ${n.done} done · ${n.draft} draft${n.draft === 1 ? '' : 's'}`
-    + (n.dismissed ? ` · ${n.dismissed} dismissed` : '') + `</span></header>`
-    + `<div class="cols"><div>`
-    + addForm
-    + (active.length ? `<ul class="tl">${active.map(taskRow).join('')}</ul>`
-      : '<p style="color:var(--mut);font-size:13px">No active tasks.</p>')
-    + (done.length ? `<h2>Done</h2><ul class="tl">${done.map(taskRow).join('')}</ul>` : '')
-    + `</div><div class="side">`
-    + `<h2>Drafts <span class="hint">${n.draft}</span></h2>`
-    + `<p style="font-size:11px;color:var(--mut);margin:0 0 8px">Commitments an ingest run found in your messages &mdash; things you or they said you would do. Add one to make it yours, then edit it.</p>`
-    + (drafts.length ? `<ul class="dl">${drafts.map(draftRow).join('')}</ul>`
-      : `<p style="font-size:12px;color:var(--mut)">None. Drafts appear after an ingest run extracts commitments (<code>scripts/crm-tasks.js</code>).</p>`)
-    + `</div></div>`;
-  return page('To do', body, '/tasks');
+  return page('To do — personal-crm', render(V.tasks(data).body) + TASKS_TOGGLE_JS);
 }
 
 
@@ -771,8 +683,69 @@ function adminData() {
   return { health, roster, dials };
 }
 
+// Confirm modal for the job buttons. Replaces the browser confirm() with a
+// Bindery slip that resolves and LISTS the exact people the run will touch:
+// the checked roster names, or everyone if none are checked, or the single
+// person for a row's own trigger. Approving submits the form with that button.
+const JOB_MODAL_JS = `<script>(function(){
+  var form=document.querySelector('form[action="/admin/jobs"]');
+  if(!form)return;
+  var ov=document.createElement('div');ov.className='modal';ov.hidden=true;
+  ov.innerHTML='<div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="mTitle">'
+    +'<div class="modal-stamp" id="mStamp"></div>'
+    +'<h2 class="modal-title" id="mTitle"></h2>'
+    +'<div class="modal-meta" id="mMeta"></div>'
+    +'<div class="modal-whoh" id="mWhoH"></div>'
+    +'<ul class="modal-who" id="mWho"></ul>'
+    +'<div class="modal-acts"><button type="button" class="btn" data-x="cancel">Cancel</button>'
+    +'<button type="button" class="btn pr" data-x="run">Run</button></div></div>';
+  document.body.appendChild(ov);
+  var pending=null;
+  function boxes(){return Array.prototype.slice.call(form.querySelectorAll('.pick'));}
+  function nameFor(slug){
+    var el=form.querySelector('.pick[value="'+slug+'"]');
+    if(!el)return slug;
+    var row=el.closest('tr'),a=row&&row.querySelector('.person a');
+    return a?a.textContent.trim():slug;
+  }
+  function modOn(name){var el=form.querySelector('input[name='+name+']');return !!(el&&el.checked);}
+  function open(btn){
+    pending=btn;
+    var val=btn.value,i=val.indexOf(':');
+    var kind=i===-1?val:val.slice(0,i),one=i===-1?null:val.slice(i+1);
+    var deep=kind==='sweep'&&modOn('deep'),plan=kind==='ingest'&&modOn('plan');
+    var everyone=false,who;
+    if(one){who=[nameFor(one)];}
+    else{
+      var checked=boxes().filter(function(c){return c.checked;});
+      if(checked.length){who=checked.map(function(c){return nameFor(c.value);});}
+      else{everyone=true;who=boxes().map(function(c){return nameFor(c.value);});}
+    }
+    document.getElementById('mStamp').textContent=kind;
+    document.getElementById('mTitle').textContent='Run '+kind+(deep?' · deep':'')+(plan?' · plan only':'');
+    document.getElementById('mMeta').textContent=kind==='sweep'?'Free — copies messages into the archive, no model.':(plan?'Planning only — reads messages, no model, no writes.':'Calls the model.');
+    document.getElementById('mWhoH').textContent=(everyone?'Everyone — ':'')+'will run on '+who.length+(who.length===1?' person':' people');
+    var ul=document.getElementById('mWho');ul.innerHTML='';
+    who.forEach(function(nm){var li=document.createElement('li');li.textContent=nm;ul.appendChild(li);});
+    ov.hidden=false;document.querySelector('[data-x=run]').focus();
+  }
+  function close(){ov.hidden=true;pending=null;}
+  form.addEventListener('click',function(e){
+    var b=e.target.closest&&e.target.closest('button[name=job]');
+    if(!b)return;e.preventDefault();open(b);
+  });
+  ov.addEventListener('click',function(e){
+    if(e.target===ov){close();return;}
+    var x=e.target.closest&&e.target.closest('[data-x]');
+    if(!x)return;
+    if(x.getAttribute('data-x')==='cancel'){close();return;}
+    var b=pending;close();if(b)form.requestSubmit(b);
+  });
+  document.addEventListener('keydown',function(e){if(!ov.hidden&&e.key==='Escape')close();});
+})();</script>`;
+
 function statusPage() {
-  return page('Pipeline — personal-crm', render(V.admin(adminData()).body));
+  return page('Pipeline — personal-crm', render(V.admin(adminData()).body) + JOB_MODAL_JS);
 }
 
 // ---------------------------------------------------------------------------
@@ -1324,8 +1297,10 @@ function start() {
             } else {
               send(404, page('Not found', '<p>Not found.</p>')); return;
             }
-            res.writeHead(303, { Location: '/tasks' });
-            res.end();
+            // A background toggle (done/reopen) sends X-Requested-With: fetch and
+            // wants no navigation — answer 204 so the card restyles in place.
+            if (req.headers['x-requested-with'] === 'fetch') { res.writeHead(204); res.end(); }
+            else { res.writeHead(303, { Location: '/tasks' }); res.end(); }
           } catch (e) {
             try { send(500, page('Error', `<p class="bad">${esc(String(e.message).slice(0, 200))}</p>`)); } catch { /* sent */ }
           } finally {

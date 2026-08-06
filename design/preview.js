@@ -93,7 +93,23 @@ function placeholder(slug) {
 const ROUTES = {
   '/': () => V.people(previewContacts),
   '/preview': directory,
-  '/tasks': () => V.tasks(F.TODO),
+  '/tasks': () => V.tasks({
+    counts: { active: 2, done: 1, draft: 3, dismissed: 0 },
+    today: '2026-08-06',
+    editing: null,
+    active: [
+      { id: 1, status: 'active', title: 'Back up crm.db', importance: 2, deadline: '2026-08-10', slug: null, name: null, msgId: null, descHtml: '' },
+      { id: 2, status: 'active', title: 'Send Katia the apartment listings', importance: 3, deadline: '2026-08-08', slug: 'katia-jacoby', name: 'Katia Jacoby', msgId: 90032, descHtml: 'She asked twice — do it before the weekend.' },
+    ],
+    done: [
+      { id: 3, status: 'done', title: 'Confirm dinner with Pine', importance: 2, deadline: null, slug: 'pine-nguyen', name: 'Pine Nguyen', msgId: 89510, descHtml: '' },
+    ],
+    drafts: [
+      { id: 4, title: 'Pick Ken up from the subway station', importance: 3, deadline: '2026-08-15', slug: 'ken-chessmore', name: 'Ken Chessmore', msgId: 91720, descHtml: '' },
+      { id: 5, title: 'Check availability to help Katia move in', importance: 2, deadline: null, slug: 'katia-jacoby', name: 'Katia Jacoby', msgId: 90036, descHtml: 'Katia asked about August 14th or 15th.' },
+      { id: 6, title: "Keep Pine's news from Max", importance: 1, deadline: null, slug: 'pine-nguyen', name: 'Pine Nguyen', msgId: 92058, probable: true, descHtml: 'Pine shared confidential news and asked Nathan to keep it from Max.' },
+    ],
+  }),
   '/admin': () => V.admin({ health: F.HEALTH, roster: F.CONTACTS, dials: F.RUN_DIALS }),
   '/admin/runs': () => V.runs(F.RUNS),
   '/states': statesSheet,
