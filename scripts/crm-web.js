@@ -662,7 +662,7 @@ function adminData() {
   const arch = loadArchiveState();
   const sweepMs = arch.ranAt ? now - arch.ranAt : null;
   const runs = loadRuns();
-  const dailyMs = runs.length ? now - runs[0].startedAt : null;
+  const ingestMs = runs.length ? now - runs[0].startedAt : null;
   const backupMs = backupAgeMs(now);
   const waiting = roster.reduce((s, x) => s + x.waiting, 0);
   const inPeople = roster.filter((x) => x.waiting > 0).length;
@@ -675,10 +675,12 @@ function adminData() {
     waiting: waiting.toLocaleString(), waitingSub: `in ${inPeople} ${inPeople === 1 ? 'person' : 'people'}`,
     backupAge: backupMs == null ? '—' : fmtAgo(backupMs), backupSub: 'off-machine', backupStale: backupMs != null && backupMs > 8 * DAY,
   };
+  // Two timed runs, named to match the Key — there is no vague "pipeline": the
+  // only jobs are sweep, ingest, compact. Sweep is the free hourly archive copy;
+  // ingest is the weekly model pass, with compaction running right after it.
   const dials = [
-    dial('Archive sweep', 'hourly', sweepMs == null ? HOUR : sweepMs, HOUR),
-    dial('Daily pipeline', '04:00 Pacific', dailyMs == null ? DAY : dailyMs, DAY),
-    dial('Weekly ingest', 'Mondays', dailyMs == null ? 7 * DAY : Math.min(dailyMs, 7 * DAY), 7 * DAY),
+    dial('Sweep', 'hourly · deep daily', sweepMs == null ? HOUR : sweepMs, HOUR),
+    dial('Ingest', 'weekly · compact after', ingestMs == null ? 7 * DAY : ingestMs, 7 * DAY),
   ];
   return { health, roster, dials };
 }
