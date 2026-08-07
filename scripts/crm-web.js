@@ -28,6 +28,7 @@ const { STYLE: BINDERY_CSS, FONTS, THEME_INIT, THEME_JS } = require('../lib/view
 const { render, raw } = require('../lib/view/h');
 const V = require('../lib/view/pages');
 const { renderProfile, inline: mdInline } = require('../lib/view/markdown');
+const { parseDeadline } = require('../lib/deadline');
 const ARCHIVE_STATE_FILE = path.posix.join(path.posix.dirname(TRACKED), 'crm-archive-state.json');
 
 const RUNS_DIR = path.join(LOGS_DIR, 'runs');
@@ -361,8 +362,23 @@ const TASKS_TOGGLE_JS = `<script>(function(){
       }).then(function(r){
         if(!r.ok)throw new Error(r.status);
         if(card)card.classList.toggle('done',nowDone);
-        adj('cActive',nowDone?-1:1);adj('cActiveChip',nowDone?-1:1);adj('cDone',nowDone?1:-1);
+        adj('cActive',nowDone?-1:1);adj('cDone',nowDone?1:-1);
       }).catch(function(){box.checked=!nowDone;}).then(function(){box.disabled=false;});
+    });
+  });
+})();</script>`;
+
+// Translate a typed due date ("eod", "monday", "aug 15") into an ISO date when
+// the field loses focus, by asking the server (one parser, lib/deadline.js). The
+// submit handler re-parses server-side, so this is just live feedback.
+const TASKS_DATE_JS = `<script>(function(){
+  document.querySelectorAll('input[name=deadline]').forEach(function(inp){
+    inp.addEventListener('change',function(){
+      var v=inp.value.trim();
+      if(!v)return;
+      fetch('/tasks/parse-date?q='+encodeURIComponent(v)).then(function(r){return r.json();}).then(function(d){
+        if(d&&d.date)inp.value=d.date;
+      }).catch(function(){});
     });
   });
 })();</script>`;
@@ -401,7 +417,7 @@ function tasksPage(editId = null) {
     counts, editing, today: new Date().toISOString().slice(0, 10),
     active: active.map(shape), done: done.map(shape), drafts: drafts.map(shape),
   };
-  return page('To do — personal-crm', render(V.tasks(data).body) + TASKS_TOGGLE_JS);
+  return page('To do — personal-crm', render(V.tasks(data).body) + TASKS_TOGGLE_JS + TASKS_DATE_JS);
 }
 
 
@@ -635,6 +651,11 @@ function backupAgeMs(now) {
 }
 
 function dial(label, cadence, sinceMs, intervalMs) {
+  // Never run yet: an empty ring, not a full one — a null `sinceMs` otherwise
+  // read as "a whole interval elapsed" and drew a misleading full arc.
+  if (sinceMs == null) {
+    return { label, cadence, since: 'not yet run', center: '—', centerSub: 'never', fraction: 0, overdue: false };
+  }
   const remaining = intervalMs - sinceMs;
   const overdue = remaining < 0;
   return {
@@ -681,10 +702,10 @@ function adminData() {
   // archive copy; the deep sweep is a daily full re-walk; ingest and compact are
   // the two steps of the weekly Monday run, so they share its clock.
   const dials = [
-    dial('Sweep', 'hourly', sweepMs == null ? HOUR : sweepMs, HOUR),
-    dial('Deep sweep', 'daily', deepMs == null ? DAY : deepMs, DAY),
-    dial('Ingest', 'weekly · Mondays', ingestMs == null ? 7 * DAY : ingestMs, 7 * DAY),
-    dial('Compact', 'weekly · after ingest', ingestMs == null ? 7 * DAY : ingestMs, 7 * DAY),
+    dial('Sweep', 'hourly', sweepMs, HOUR),
+    dial('Deep sweep', 'daily', deepMs, DAY),
+    dial('Ingest', 'weekly · Mondays', ingestMs, 7 * DAY),
+    dial('Compact', 'weekly · after ingest', ingestMs, 7 * DAY),
   ];
   return { health, roster, dials };
 }
@@ -1274,6 +1295,11 @@ function start() {
         send(200, tasksPage(ed && /^\d+$/.test(ed) ? Number(ed) : null));
         return;
       }
+      // Live due-date translation for the To do form: "monday" -> "2026-08-10".
+      if (url.pathname === '/tasks/parse-date') {
+        sendJson(200, { date: parseDeadline(url.searchParams.get('q'), new Date()) });
+        return;
+      }
       if (url.pathname.startsWith('/tasks/') && req.method === 'POST') {
         // Same CSRF guard as /actions/run: allow same-origin and direct curl
         // (which sends no Sec-Fetch-Site), refuse anything cross-site.
@@ -1288,13 +1314,14 @@ function start() {
             const STATUS_ACTIONS = { accept: 'active', dismiss: 'dismissed', done: 'done', reopen: 'active' };
             if (action === 'add') {
               if (!p.get('title')) { send(400, page('Bad request', '<p>A title is required.</p>')); return; }
-              TASKS.addManual(cdb, { title: p.get('title'), deadline: p.get('deadline') || null, importance: p.get('importance') });
+              TASKS.addManual(cdb, { title: p.get('title'), deadline: parseDeadline(p.get('deadline'), new Date()), importance: p.get('importance') });
             } else if (STATUS_ACTIONS[action] || action === 'edit') {
               const id = p.get('id');
               if (!/^\d+$/.test(String(id))) { send(400, page('Bad request', '<p>Bad request.</p>')); return; }
               if (action === 'edit') {
                 TASKS.updateTask(cdb, id, {
-                  title: p.get('title'), description: p.get('description'), deadline: p.get('deadline'),
+                  title: p.get('title'), description: p.get('description'),
+                  deadline: parseDeadline(p.get('deadline'), new Date()),
                   importance: p.get('importance'),
                 });
               } else {
