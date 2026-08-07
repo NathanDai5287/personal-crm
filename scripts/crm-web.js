@@ -675,12 +675,15 @@ function adminData() {
     waiting: waiting.toLocaleString(), waitingSub: `in ${inPeople} ${inPeople === 1 ? 'person' : 'people'}`,
     backupAge: backupMs == null ? '—' : fmtAgo(backupMs), backupSub: 'off-machine', backupStale: backupMs != null && backupMs > 8 * DAY,
   };
-  // Two timed runs, named to match the Key — there is no vague "pipeline": the
-  // only jobs are sweep, ingest, compact. Sweep is the free hourly archive copy;
-  // ingest is the weekly model pass, with compaction running right after it.
+  // A dial per scheduled job, named to match the Key — no vague "pipeline". Each
+  // maps to a real registered task (tools/register-*.ps1): sweep is the hourly
+  // archive copy; ingest and compact are the two steps of the weekly Monday run,
+  // so they share its clock. The old daily task was superseded by that weekly
+  // run, which is why nothing here is daily.
   const dials = [
-    dial('Sweep', 'hourly · deep daily', sweepMs == null ? HOUR : sweepMs, HOUR),
-    dial('Ingest', 'weekly · compact after', ingestMs == null ? 7 * DAY : ingestMs, 7 * DAY),
+    dial('Sweep', 'hourly', sweepMs == null ? HOUR : sweepMs, HOUR),
+    dial('Ingest', 'weekly · Mondays', ingestMs == null ? 7 * DAY : ingestMs, 7 * DAY),
+    dial('Compact', 'weekly · after ingest', ingestMs == null ? 7 * DAY : ingestMs, 7 * DAY),
   ];
   return { health, roster, dials };
 }
