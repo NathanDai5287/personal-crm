@@ -1161,13 +1161,22 @@ function startJob(spec) {
   if (!['sweep', 'ingest', 'compact'].includes(spec.kind)) return { ok: false, error: 'bad job kind' };
   const cmds = jobCommands(spec);
   if (!cmds || !cmds.length) return { ok: false, error: 'nothing to run (no such people?)' };
+  // Cross-process lock: refuse if a scheduled sweep or a CLI run is mid-flight,
+  // so two processes never write crm.db / a profile at once. The server is idle
+  // here (no job.running), so any lingering env flag is stale from a prior job —
+  // clear it so acquire() takes a REAL file lock, not a nested no-op. The
+  // children spawned by runQueue inherit the flag acquire() sets and skip
+  // re-locking, which is what keeps them from deadlocking on this same lock.
+  delete process.env.CRM_PIPELINE_LOCK_HELD;
+  const lock = require('../lib/pipeline-lock').acquire(`web:${spec.kind}`);
+  if (!lock.ok) return { ok: false, error: `another pipeline run is active (${lock.holderDesc})` };
   const now = Date.now();
   job = {
     id: new Date(now).toISOString().replace(/[:.]/g, '-').slice(0, 19),
     kind: spec.kind, deep: !!spec.deep, plan: !!spec.plan,
     scope: spec.slugs.length ? spec.slugs.join(', ') : 'everyone',
     total: cmds.length, done: 0,
-    startedAt: now, endedAt: null, running: true, exit: null, buf: '',
+    startedAt: now, endedAt: null, running: true, exit: null, buf: '', lock,
   };
   runQueue(cmds, 0);
   return { ok: true, id: job.id };
@@ -1179,6 +1188,7 @@ function runQueue(cmds, i) {
     job.endedAt = Date.now();
     if (job.exit == null) job.exit = 0;
     job.buf += `\n[done — ${cmds.length} step(s), exit ${job.exit}]`;
+    if (job.lock) { job.lock.release(); job.lock = null; }
     return;
   }
   job.done = i;
@@ -1198,6 +1208,7 @@ function runQueue(cmds, i) {
       job.running = false;
       job.endedAt = Date.now();
       job.buf += `\n[step ${i + 1}/${cmds.length} exit ${code} — stopped]`;
+      if (job.lock) { job.lock.release(); job.lock = null; }
       return;
     }
     job.done = i + 1;
@@ -1208,6 +1219,7 @@ function runQueue(cmds, i) {
     job.running = false;
     job.endedAt = Date.now();
     job.buf += `\n[spawn error: ${e.message}]`;
+    if (job.lock) { job.lock.release(); job.lock = null; }
   });
 }
 

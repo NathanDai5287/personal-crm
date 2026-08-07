@@ -366,6 +366,12 @@ if (require.main === module) {
     only = argv[onlyIdx + 1];
     if (!only || only.startsWith('--')) { console.error('crm-archive: --only requires a slug'); process.exit(2); }
   }
-  main({ deep: argv.includes('--deep'), only });
+  // Cross-process pipeline lock: never sweep crm.db while another run (a
+  // scheduled sweep, a web-triggered job, a manual CLI run) is writing it. A
+  // scheduled loser exits 0 so Task Scheduler does not flag a failure.
+  const lock = require('../lib/pipeline-lock').acquire('archive');
+  if (!lock.ok) { console.log(`crm-archive: skipped, run in progress (${lock.holderDesc}).`); process.exit(0); }
+  try { main({ deep: argv.includes('--deep'), only }); }
+  finally { lock.release(); }
 }
 module.exports = { runSweep };

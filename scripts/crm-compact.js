@@ -518,4 +518,10 @@ function printTimeline(next) {
   console.log("\n----- end -----");
 }
 
-main();
+if (require.main === module) {
+  // Cross-process pipeline lock (see lib/pipeline-lock.js). Compaction rewrites
+  // profiles and runs a sweep first, so it must not overlap another run.
+  const lock = require('../lib/pipeline-lock').acquire('compact');
+  if (!lock.ok) { console.log(`crm-compact: skipped, run in progress (${lock.holderDesc}).`); process.exit(0); }
+  try { main(); } finally { lock.release(); }
+}

@@ -552,5 +552,12 @@ function main() {
 // obvious way to reach in for a helper, or to check the file parses — silently executes
 // a full ingest: refresh, merges, real pi calls, cursor writes. That happened on
 // 2026-08-03. Use `node --check` to validate syntax.
-if (require.main === module) main();
+if (require.main === module) {
+  // Cross-process pipeline lock (see lib/pipeline-lock.js). Ingest reads the
+  // archive and rewrites profiles; it must not overlap a sweep or another
+  // ingest. Runs the lock as `ingest` (this script's dashboard name).
+  const lock = require('../lib/pipeline-lock').acquire('ingest');
+  if (!lock.ok) { console.log(`crm-daily: skipped, run in progress (${lock.holderDesc}).`); process.exit(0); }
+  try { main(); } finally { lock.release(); }
+}
 module.exports = { main };
