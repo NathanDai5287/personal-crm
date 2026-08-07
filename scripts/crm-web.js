@@ -661,6 +661,7 @@ function adminData() {
   }
   const arch = loadArchiveState();
   const sweepMs = arch.ranAt ? now - arch.ranAt : null;
+  const deepMs = arch.deepRanAt ? now - arch.deepRanAt : null;
   const runs = loadRuns();
   const ingestMs = runs.length ? now - runs[0].startedAt : null;
   const backupMs = backupAgeMs(now);
@@ -677,11 +678,11 @@ function adminData() {
   };
   // A dial per scheduled job, named to match the Key — no vague "pipeline". Each
   // maps to a real registered task (tools/register-*.ps1): sweep is the hourly
-  // archive copy; ingest and compact are the two steps of the weekly Monday run,
-  // so they share its clock. The old daily task was superseded by that weekly
-  // run, which is why nothing here is daily.
+  // archive copy; the deep sweep is a daily full re-walk; ingest and compact are
+  // the two steps of the weekly Monday run, so they share its clock.
   const dials = [
     dial('Sweep', 'hourly', sweepMs == null ? HOUR : sweepMs, HOUR),
+    dial('Deep sweep', 'daily', deepMs == null ? DAY : deepMs, DAY),
     dial('Ingest', 'weekly · Mondays', ingestMs == null ? 7 * DAY : ingestMs, 7 * DAY),
     dial('Compact', 'weekly · after ingest', ingestMs == null ? 7 * DAY : ingestMs, 7 * DAY),
   ];

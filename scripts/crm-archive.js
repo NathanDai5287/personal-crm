@@ -307,7 +307,16 @@ function runSweep(cdb, sdb, opts = {}) {
   // A single-contact sweep must not stamp `ranAt`: the overlap floor is derived
   // from it, and moving it forward for everyone after sweeping one person would
   // shrink everyone else's window to nothing.
-  atomicWriteJson(ARCHIVE_STATE, onlySlug ? { cursors, ranAt } : { cursors, ranAt: now });
+  //
+  // Two clocks, each independent so the dashboard can dial them separately:
+  //   ranAt      last full sweep of ANY kind — the hourly incremental cadence.
+  //   deepRanAt  last full DEEP sweep — the daily deep-sweep cadence.
+  // Each is preserved across sweeps that don't set it, so a deep run advances
+  // both while an incremental run advances only `ranAt`.
+  const out = { cursors, ranAt: onlySlug ? ranAt : now };
+  const deepRanAt = (deep && !onlySlug) ? now : (state && state.deepRanAt);
+  if (deepRanAt) out.deepRanAt = deepRanAt;
+  atomicWriteJson(ARCHIVE_STATE, out);
   return { seen, inserted, per, collisions, reuse, backfilledMeta, deep, onlySlug };
 }
 
