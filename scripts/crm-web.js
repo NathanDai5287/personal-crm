@@ -705,7 +705,7 @@ function adminData() {
     dial('Sweep', 'hourly', sweepMs, HOUR),
     dial('Deep sweep', 'daily', deepMs, DAY),
     dial('Ingest', 'weekly · Mondays', ingestMs, 7 * DAY),
-    dial('Compact', 'weekly · after ingest', ingestMs, 7 * DAY),
+    dial('Timeline', 'weekly · after ingest', ingestMs, 7 * DAY),
   ];
   return { health, roster, dials };
 }
@@ -799,7 +799,7 @@ function rowForRun(r) {
   if (r.kind === 'compact') {
     return {
       t, kind: 'compact',
-      pass: r.only ? 'compact (one)' : 'compact',
+      pass: r.only ? 'timeline (one)' : 'timeline',
       scope: r.only || 'everyone',
       examined: String(r.scanned ?? ''),
       held: `${r.changed ?? 0} changed`,
@@ -888,11 +888,11 @@ function runDetailPage(id) {
   const modelsHtml = run.models
     ? `<span class="sub"> · merge <code>${esc(run.models.merge || '?')}</code>` +
       (run.models.compact && run.models.compact !== run.models.merge
-        ? ` · compact <code>${esc(run.models.compact)}</code>` : '') + `</span>`
+        ? ` · timeline <code>${esc(run.models.compact)}</code>` : '') + `</span>`
     : '';
   const cc = run.compactCitations;
   const compactCiteHtml = cc
-    ? `<h2>Timeline citations (post-compact)</h2><p class="${cc.bad && cc.bad.length ? 'bad' : 'ok'}">` +
+    ? `<h2>Timeline citations</h2><p class="${cc.bad && cc.bad.length ? 'bad' : 'ok'}">` +
       (cc.bad && cc.bad.length
         ? `unresolvable ids in ${cc.bad.length} file(s): ${esc(cc.bad.join(' '))}`
         : `${cc.cited} cited ids across ${cc.files} files, all resolve`) + `</p>`

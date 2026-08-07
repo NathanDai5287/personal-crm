@@ -17,7 +17,7 @@ Signal Desktop DB
       │      ## What I know · ## Talking points · ## Open questions · metadata
       │      (never touches ## Timeline)
       │
-      └─ crm-compact.js                  (COMPACT — model)
+      └─ crm-compact.js                  (TIMELINE — model)
              builds & maintains the CHRONOLOGY of a profile:
              ## Timeline (Recent raw → Daily → Weekly → Older) + Group activity
 ```
@@ -33,7 +33,7 @@ The four **job kinds** the dashboard exposes map to scripts like this:
 |---|---|---|
 | **Sweep** | `crm-archive.js [--only <slug>] [--deep]` | no |
 | **Ingest** | `crm-daily.js --only <slug>` (skips autopromote + compact) | yes |
-| **Compact** | `crm-compact.js --write [--slug <slug>]` | yes |
+| **Timeline** | `crm-compact.js --write [--slug <slug>]` | yes |
 | _(full unattended run)_ | `crm-daily.js` (ingest all → compact all) | yes |
 
 Model cost: `MERGE_MODEL` / `COMPACT_MODEL` default to `anthropic/*`, which is
@@ -84,7 +84,7 @@ node scripts/crm-merge.js <slug>            # invoke the model
 node scripts/crm-merge.js <slug> --dry-run  # print the argv it would run
 ```
 
-### `crm-compact.js` — build & maintain the Timeline (model)
+### `crm-compact.js` — build & maintain the Timeline (model) — dashboard: **Timeline**
 Builds each conversation's `## Timeline` and keeps it at decreasing resolution
 (Recent raw / Daily / Weekly / Older). One model call per aged-out day or week.
 Also folds group day-summaries into participant profiles. **Dry-run unless
