@@ -29,23 +29,28 @@ identical output (no cross-dependency).
 
 ## Every job that can be run
 
+Each of these is a dial on the dashboard's Pipeline tab with its own **▸ run**
+button (scoped to the checked roster, or everyone).
+
 | Job | Runs | Cadence | Model | In run log |
 |---|---|---|---|---|
 | **Sweep** | `crm-archive.js [--only <slug>]` | top of every hour | no | yes (no-op ticks hidden) |
 | **Deep sweep** | `crm-archive.js --deep` | daily 03:00 | no | yes |
-| **Ingest** | `crm-daily.js --only <slug>` | manual (weekly when the AI task is on) | yes | yes |
-| **Timeline** | `crm-compact.js --write [--slug <slug>]` | manual (weekly) | yes | yes |
-| **Todo scan** | `crm-todo-scan.js --write` | top of every hour (after the sweep) | only when a "make sure" line matches (≈0.2×/mo) | **not yet — planned** |
+| **Ingest** | `crm-daily.js --only <slug>` (merge **+** that contact's Timeline) | manual (weekly when the AI task is on) | yes | yes (ingest + timeline rows) |
+| **Todo** | `crm-todo-scan.js --write` | top of every hour (after the sweep) | only when a "make sure" line matches (≈0.2×/mo) | yes (no-op ticks hidden) |
 | _(full run)_ | `crm-daily.js` | Monday 04:00 (task currently unregistered) | yes | yes |
 
-Ingest is `crm-daily --only`, which **skips** autopromote + timeline (those are
-all-contact passes that run only on a full `crm-daily`). The full run does every
-contact's ingest, then every contact's timeline.
+Ingest (`crm-daily --only`) now runs merge **and** that contact's Timeline
+(`crm-compact --slug`); it skips only autopromote (an all-contact pass). The full
+run does every contact's ingest + timeline. The standalone Timeline pass still
+exists as `crm-compact.js` (below) for CLI use, but is no longer a separate
+dashboard button.
 
-Model cost: `MERGE_MODEL` / `COMPACT_MODEL` default to `anthropic/*`, which is
-$0 on the Claude subscription. `moonshotai/*` bills per token. The todo/tasks
-call sites use a cheaper paid model and are regex-gated, so they almost never
-fire.
+Model cost: `MERGE_MODEL` / `COMPACT_MODEL` / the todo model default to
+`moonshotai/kimi-k3` — **paid per token** (needs `MOONSHOT_API_KEY`). Override any
+of them with `anthropic/claude-opus-5` (or another `anthropic/*`) for a $0
+subscription run. The todo scan is regex-gated, so it calls the model only on a
+"make sure" match (≈0.2×/month).
 
 ---
 
@@ -65,16 +70,18 @@ The full pipeline: snapshot → autopromote → refresh → per-contact merge wi
 crash-safe cursor commit → compact → snapshot → logs. This is the only writer of
 the ingest cursors (`crm-refresh-state.json`).
 ```
-node scripts/crm-daily.js               # full run: ingest ALL, then compact ALL
-node scripts/crm-daily.js --only <slug> # one contact; SKIPS autopromote + compact
+node scripts/crm-daily.js               # full run: ingest ALL, then timeline ALL
+node scripts/crm-daily.js --only <slug> # one contact: merge + Timeline; skips autopromote
 node scripts/crm-daily.js --dry-run     # plan only; never calls the model or writes
 ```
 
 ### `crm-refresh.js` — chunk planner / ledger writer (no model)
-Turns "messages past a contact's cursor" into week-aligned chunks and writes one
-chunk's ledger at a time. A library first (`crm-daily` drives it in-process);
-running it directly just prints the plan. A cursor of `0` backfills all history;
-no cursor backfills only `CRM_BACKFILL_DAYS` (default 30) days.
+Turns "messages past a contact's cursor" into **one chunk per active week** and
+writes one chunk's ledger at a time. A library first (`crm-daily` drives it
+in-process); running it directly just prints the plan. Ingest == backfill: a
+contact with no cursor starts from message 0 (their whole history), so a backfill
+is byte-identical to playing forward. Empty weeks are skipped. (The eval harness
+can still pass an explicit `backfillDays` window; `CRM_BACKFILL_DAYS` forces one.)
 ```
 node scripts/crm-refresh.js                 # print the chunk plan for everyone
 node scripts/crm-refresh.js --only <slug>   # ...for one contact
@@ -90,7 +97,7 @@ node scripts/crm-merge.js <slug>            # invoke the model
 node scripts/crm-merge.js <slug> --dry-run  # print the argv it would run
 ```
 
-### `crm-compact.js` — build & maintain the Timeline (model) — dashboard: **Timeline**
+### `crm-compact.js` — build & maintain the Timeline (model) — runs inside Ingest
 Builds each conversation's `## Timeline` and keeps it at decreasing resolution
 (Recent raw / Daily / Weekly / Older). One model call per aged-out day or week.
 Also folds group day-summaries into participant profiles. **Dry-run unless
