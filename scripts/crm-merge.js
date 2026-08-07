@@ -19,7 +19,7 @@
 // whether `pi` can actually authenticate.
 const fs = require('fs');
 const path = require('path');
-const { execFileSync } = require('child_process');
+const { execFileSync, spawnSync } = require('child_process');
 const { ROOT, PI_CLI, MERGE_MODEL, MERGE_PROMPT } = require('../lib/config');
 const { dateKey } = require('../lib/weeks');
 
@@ -186,13 +186,35 @@ function mergeContact(slug, opts = {}) {
   }
 
   try {
-    const output = execFileSync(process.execPath, [PI_CLI, ...piArgs], {
-      cwd,
-      encoding: 'utf8',
-      timeout: 600_000, // backfill ledgers can be thousands of messages; give the model room
-      maxBuffer: 16 * 1024 * 1024,
-      env: { ...process.env, PI_SKIP_VERSION_CHECK: '1', PI_OFFLINE: '1' },
-    });
+    const piEnv = { ...process.env, PI_SKIP_VERSION_CHECK: '1', PI_OFFLINE: '1' };
+    let output;
+    if (opts.stream) {
+      // PRODUCTION (crm-daily) path. execFileSync buffers pi's whole run and
+      // returns it only at exit, so anyone tailing this process — the web job
+      // monitor tails crm-daily's stdout — sees a multi-minute silence, then a
+      // single "ok". Stream instead: inherit pi's stdout/stderr straight onto
+      // ours so the model's work shows up live. Output is NOT captured here
+      // (nothing on this path reads it; evals use the capture branch below). The
+      // banner names the model and chunk so the monitor labels each call.
+      console.log(`crm-merge: ${slug}: -> ${opts.model || MERGE_MODEL}${opts.label ? ` [${opts.label}]` : ''} ...`);
+      const r = spawnSync(process.execPath, [PI_CLI, ...piArgs], {
+        cwd,
+        stdio: ['ignore', 'inherit', 'inherit'],
+        timeout: 600_000,
+        env: piEnv,
+      });
+      if (r.error) throw r.error;
+      if (r.status !== 0) throw new Error(`pi exited ${r.status}${r.signal ? ` on ${r.signal}` : ''} (see output above)`);
+      output = '';
+    } else {
+      output = execFileSync(process.execPath, [PI_CLI, ...piArgs], {
+        cwd,
+        encoding: 'utf8',
+        timeout: 600_000, // backfill ledgers can be thousands of messages; give the model room
+        maxBuffer: 16 * 1024 * 1024,
+        env: piEnv,
+      });
+    }
     const fixed = normalizeLastContact(slug, cwd);
     if (fixed && fixed.error) console.log(`crm-merge: ${slug}: Last contact NOT normalised: ${fixed.error}`);
     else if (fixed) console.log(`crm-merge: ${slug}: Last contact ${fixed.from} -> ${fixed.to} (derived)`);

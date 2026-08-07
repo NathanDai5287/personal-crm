@@ -365,7 +365,14 @@ function main() {
           writeChunkLedger(p, chunk, i + 1, total);
 
           const t0 = Date.now();
-          const result = mergeContact(p.slug, { dryRun: false });
+          // stream:true pipes pi's output live to our stdout so the web job
+          // monitor shows the model working instead of a silent gap; label names
+          // the chunk in that live banner.
+          const result = mergeContact(p.slug, {
+            dryRun: false,
+            stream: true,
+            label: `${i + 1}/${total} ${chunk.label} · ${chunk.count} msgs`,
+          });
           detail.ms = Date.now() - t0;
 
           if (result.ok) {
