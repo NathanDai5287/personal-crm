@@ -403,6 +403,27 @@ select.fld{appearance:none;-webkit-appearance:none;padding-right:26px;cursor:poi
 .draft-a{display:flex;gap:8px;margin-top:10px}
 .inl{margin:0}
 
+/* ---- nomenclature key ---------------------------------------------------- */
+.legend{background:var(--card);border:1px solid var(--rule);box-shadow:var(--shadow);
+  padding:14px 18px 16px;margin-top:10px}
+.legend-jobs{width:100%;border-collapse:collapse}
+.legend-jobs th{text-align:left;font-family:"Courier Prime",monospace;font-size:10px;letter-spacing:.14em;
+  text-transform:uppercase;color:var(--soft);padding:0 14px 8px 0;border-bottom:1px solid var(--rule)}
+.legend-jobs td{padding:10px 14px 10px 0;border-bottom:1px solid var(--cardline);vertical-align:baseline}
+.legend-jobs tr:last-child td{border-bottom:0}
+.legend-term{font-family:"Courier Prime",monospace;font-size:11px;letter-spacing:.1em;text-transform:uppercase;
+  border:1.5px solid var(--stamp);color:var(--stamp);padding:1px 7px;transform:rotate(-1.4deg);
+  display:inline-block;white-space:nowrap}
+.legend-what{font-size:14.5px;line-height:1.4}
+.legend-cost{font-family:"Courier Prime",monospace;font-size:11px;color:var(--faint);white-space:nowrap}
+.legend-cost.model{color:var(--amber)}
+.legend-cadence{font-family:"Courier Prime",monospace;font-size:11.5px;color:var(--soft);white-space:nowrap}
+.legend-words{margin:16px 0 0;display:grid;grid-template-columns:1fr}
+@media(min-width:720px){.legend-words{grid-template-columns:1fr 1fr;column-gap:28px}}
+.legend-words dt{font-family:"Courier Prime",monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;
+  color:var(--ink);margin-top:12px;line-height:1.45}
+.legend-words dd{margin:12px 0 0;font-size:13.5px;color:var(--soft);line-height:1.45}
+
 /* ---- confirm modal (job requisition slip) -------------------------------- */
 .modal{position:fixed;inset:0;z-index:50;display:flex;align-items:center;justify-content:center;
   padding:20px;background:rgba(16,18,12,.66)}
