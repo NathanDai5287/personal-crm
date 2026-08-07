@@ -46,16 +46,17 @@ const {
 } = require('../lib/config');
 
 const DAY = 86_400_000;
-// How far back a contact with NO cursor starts MERGING. 30 days by default; set
-// CRM_BACKFILL_DAYS=3650 (or pass backfillDays) to merge the full archive.
-// Whatever this is, the work still arrives as ordinary week-sized chunks.
+// INGEST == BACKFILL. Ingest processes everything past a contact's cursor, week
+// by week; a "backfill" is just that with an old (or absent) cursor. A contact
+// with NO cursor therefore starts from the very beginning (message id > 0), which
+// makes a fresh backfill byte-identical to having played the history forward.
 //
-// NAMED FOR WHAT IT COSTS. crm-archive.js had an identically-named 30-day
-// constant meaning something completely different — how much history to COPY,
-// which is free — and the two were trivial to confuse when reading either file.
-// This one decides how many messages a model reads, i.e. dollars, which is why
-// it stayed at 30 when the archive's went to all-time (2026-08-05).
-const MERGE_BACKFILL_DAYS = Number(process.env.CRM_BACKFILL_DAYS) || 30;
+// The one exception is the eval harness, which passes an explicit backfillDays
+// window (evals/cases.js) to hold out a slice of history: when a finite
+// backfillDays is supplied, a no-cursor contact starts `sent_at >= now - N days`;
+// when it is null (the production default) a no-cursor contact starts from 0.
+// CRM_BACKFILL_DAYS still forces a window by hand if one is ever wanted.
+const MERGE_BACKFILL_DAYS = process.env.CRM_BACKFILL_DAYS ? Number(process.env.CRM_BACKFILL_DAYS) : null;
 
 function loadCursors() {
   let raw = null;
@@ -88,15 +89,17 @@ function planContact(cdb, sdb, slug, opts) {
 
   const sources = resolveSources(sdb, row.signal_id);
   const hasCursor = Object.prototype.hasOwnProperty.call(cursors, slug);
-  const cursorBefore = hasCursor ? (cursors[slug] || 0) : null;
+  // No cursor => start from 0 (the whole archive), UNLESS an explicit backfillDays
+  // window is passed (the eval harness). This is what makes ingest == backfill.
+  const cursorBefore = hasCursor ? (cursors[slug] || 0) : 0;
+  const useWindow = !hasCursor && backfillDays != null;
 
-  // Lower bound: past the cursor, or the backfill window for a new contact.
-  // Upper bound: scheduled runs clamp to the last COMPLETE week so no merge ever
-  // sees a partial one. An on-demand single-contact run passes
-  // includePartialWeek — you press that button because you're seeing someone
-  // today, and freshness beats the whole-week invariant.
-  const lowClause = hasCursor ? 'id > ?' : 'sent_at >= ?';
-  const lowParam = hasCursor ? cursorBefore : now - backfillDays * DAY;
+  // Lower bound: past the cursor (from 0 for a fresh contact), or an explicit
+  // window only when the eval harness asks. Upper bound: scheduled runs clamp to
+  // the last COMPLETE week so no merge sees a partial one; an on-demand
+  // single-contact run passes includePartialWeek to include today's week too.
+  const lowClause = useWindow ? 'sent_at >= ?' : 'id > ?';
+  const lowParam = useWindow ? now - backfillDays * DAY : cursorBefore;
   const cutoff = lastCompleteWeekStart(now);
   const bound = includePartialWeek
     ? { clause: lowClause, params: [lowParam] }
@@ -108,7 +111,10 @@ function planContact(cdb, sdb, slug, opts) {
   if (msgs.length === 0) return null;
 
   const display = (nicks[row.signal_id] && nicks[row.signal_id].name) || row.name;
-  const chunks = planChunks(msgs);
+  // ONE CHUNK PER ACTIVE WEEK (maxWeeks:1): a backfill is then exactly the sequence
+  // of weekly merges you'd get playing forward, and weeks with no messages are
+  // simply absent (skipped), never an empty merge.
+  const chunks = planChunks(msgs, { maxWeeks: 1 });
   return {
     slug,
     name: display,

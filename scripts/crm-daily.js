@@ -26,9 +26,9 @@
 // Usage:
 //   node scripts/crm-daily.js              # run the full pipeline
 //   node scripts/crm-daily.js --only <slug> # ONE contact: refresh --only + merge +
-//                                          # cursor commit. Skips autopromote and
-//                                          # compact (both are inherently all-contact
-//                                          # passes); they run on the next full run.
+//                                          # cursor commit + that contact's Timeline
+//                                          # (crm-compact --slug <slug>). Skips only
+//                                          # autopromote, which is inherently all-contact.
 //   node scripts/crm-daily.js --dry-run    # steps 1-3 + merge/cursor PLANNING only;
 //                                          # never invokes pi, never writes REFRESH_STATE,
 //                                          # never runs compact --write or the post-commit.
@@ -432,19 +432,19 @@ function main() {
     logLines.push('[4] merge: nothing to merge (no unmerged messages)');
   }
 
-  // ---- 5. compact ----------------------------------------------------------------
+  // ---- 5. timeline (compact) -----------------------------------------------------
   let compactChanged = 0;
   let compactCitations = null;
-  if (ONLY) {
-    logLines.push('[5] compact: skipped (--only mode — runs on the next full run)');
-    skipped('compact', '--only mode');
-  } else if (!fatal && !DRY_RUN) {
-    // Compaction makes one pi call per aged-out day/week per conversation, so
-    // first runs after a gap can take a while — give it half an hour.
-    const compact = timed('compact', () => runNode(SCRIPTS.compact, ['--write'], { timeout: 1_800_000 }));
-    logLines.push(`[5] compact --write: ${compact.ok ? 'ok' : 'FAILED (non-fatal)'}`);
+  if (!fatal && !DRY_RUN) {
+    // COMBINED JOB: a single-contact run builds that contact's Timeline right
+    // after ingesting them, so one dashboard "Ingest" does both halves; a full
+    // run builds everyone's. Compaction makes one pi call per aged-out day/week
+    // per conversation, so first runs after a gap can take a while — half an hour.
+    const compactArgs = ONLY ? ['--write', '--slug', ONLY] : ['--write'];
+    const compact = timed('compact', () => runNode(SCRIPTS.compact, compactArgs, { timeout: 1_800_000 }));
+    logLines.push(`[5] timeline --write${ONLY ? ` --slug ${ONLY}` : ''}: ${compact.ok ? 'ok' : 'FAILED (non-fatal)'}`);
     logLines.push(compact.output || compact.error || '');
-    if (!compact.ok) warnings.push(`compact failed (non-fatal): ${compact.error}`);
+    if (!compact.ok) warnings.push(`timeline failed (non-fatal): ${compact.error}`);
     compactChanged = ((compact.output || '').match(/changed=true/g) || []).length;
 
     // PROVENANCE CHECK for compaction (non-fatal). Compaction writes ⟨m…⟩ ids
