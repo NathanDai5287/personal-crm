@@ -188,6 +188,7 @@ button{font:inherit;cursor:pointer}
 .dialcap .dcad{display:block;font-family:"Courier Prime",monospace;font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--soft)}
 .dialcap .dsince{display:block;font-family:"Courier Prime",monospace;font-size:11.5px;color:var(--stamp);margin-top:3px}
 .dial.overdue .dsince{color:var(--ox)}
+.dialcap .btn.dialbtn{margin-top:8px;padding:3px 12px;font-size:11px;letter-spacing:.04em}
 
 /* ---- circulation ledger (runs / roster tables) -------------------------- */
 .ledger{background:var(--card);border:1px solid var(--rule);box-shadow:var(--shadow)}

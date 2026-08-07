@@ -650,16 +650,17 @@ function backupAgeMs(now) {
   } catch { return null; }
 }
 
-function dial(label, cadence, sinceMs, intervalMs) {
-  // Never run yet: an empty ring, not a full one — a null `sinceMs` otherwise
-  // read as "a whole interval elapsed" and drew a misleading full arc.
+function dial(label, cadence, sinceMs, intervalMs, job) {
+  // `job` is the kind the dial's own trigger button submits (sweep/deep-sweep/
+  // ingest/todo). Never run yet: an empty ring, not a full one — a null `sinceMs`
+  // otherwise read as "a whole interval elapsed" and drew a misleading full arc.
   if (sinceMs == null) {
-    return { label, cadence, since: 'not yet run', center: '—', centerSub: 'never', fraction: 0, overdue: false };
+    return { label, cadence, job, since: 'not yet run', center: '—', centerSub: 'never', fraction: 0, overdue: false };
   }
   const remaining = intervalMs - sinceMs;
   const overdue = remaining < 0;
   return {
-    label, cadence,
+    label, cadence, job,
     since: `${fmtAgo(sinceMs)} ago`,
     center: overdue ? `+${fmtAgo(-remaining)}` : fmtAgo(remaining),
     centerSub: overdue ? 'overdue' : 'til next',
@@ -684,7 +685,11 @@ function adminData() {
   const sweepMs = arch.ranAt ? now - arch.ranAt : null;
   const deepMs = arch.deepRanAt ? now - arch.deepRanAt : null;
   const runs = loadRuns();
-  const ingestMs = runs.length ? now - runs[0].startedAt : null;
+  // Time since the last run OF THAT KIND — runs[] now holds sweep/todo records
+  // too, so runs[0] is no longer necessarily an ingest.
+  const lastRunMs = (k) => { const r = runs.find((x) => (x.kind || 'ingest') === k); return r ? now - r.startedAt : null; };
+  const ingestMs = lastRunMs('ingest');
+  const todoMs = lastRunMs('todo');
   const backupMs = backupAgeMs(now);
   const waiting = roster.reduce((s, x) => s + x.waiting, 0);
   const inPeople = roster.filter((x) => x.waiting > 0).length;
@@ -702,10 +707,10 @@ function adminData() {
   // archive copy; the deep sweep is a daily full re-walk; ingest and compact are
   // the two steps of the weekly Monday run, so they share its clock.
   const dials = [
-    dial('Sweep', 'hourly', sweepMs, HOUR),
-    dial('Deep sweep', 'daily', deepMs, DAY),
-    dial('Ingest', 'weekly · Mondays', ingestMs, 7 * DAY),
-    dial('Timeline', 'weekly · after ingest', ingestMs, 7 * DAY),
+    dial('Sweep', 'hourly', sweepMs, HOUR, 'sweep'),
+    dial('Deep sweep', 'daily', deepMs, DAY, 'deep-sweep'),
+    dial('Ingest', 'weekly · Mondays', ingestMs, 7 * DAY, 'ingest'),
+    dial('Todo', 'hourly · after sweep', todoMs, HOUR, 'todo'),
   ];
   return { health, roster, dials };
 }
@@ -740,18 +745,20 @@ const JOB_MODAL_JS = `<script>(function(){
     pending=btn;
     var val=btn.value,i=val.indexOf(':');
     var kind=i===-1?val:val.slice(0,i),one=i===-1?null:val.slice(i+1);
-    var deep=kind==='sweep'&&modOn('deep'),plan=kind==='ingest'&&modOn('plan');
+    var isSweep=kind==='sweep'||kind==='deep-sweep';
     var everyone=false,who;
     if(one){who=[nameFor(one)];}
+    else if(kind==='todo'){everyone=true;who=boxes().map(function(c){return nameFor(c.value);});}
     else{
       var checked=boxes().filter(function(c){return c.checked;});
       if(checked.length){who=checked.map(function(c){return nameFor(c.value);});}
       else{everyone=true;who=boxes().map(function(c){return nameFor(c.value);});}
     }
-    document.getElementById('mStamp').textContent=kind;
-    document.getElementById('mTitle').textContent='Run '+kind+(deep?' · deep':'')+(plan?' · plan only':'');
-    document.getElementById('mMeta').textContent=kind==='sweep'?'Free — copies messages into the archive, no model.':(plan?'Planning only — reads messages, no model, no writes.':'Calls the model.');
-    document.getElementById('mWhoH').textContent=(everyone?'Everyone — ':'')+'will run on '+who.length+(who.length===1?' person':' people');
+    var kindLabel=kind==='deep-sweep'?'deep sweep':kind;
+    document.getElementById('mStamp').textContent=kindLabel;
+    document.getElementById('mTitle').textContent='Run '+kindLabel;
+    document.getElementById('mMeta').textContent=isSweep?'Free — copies messages into the archive, no model.':(kind==='todo'?'Scans for "make sure" commitments; a model runs only on a match.':'Calls the model — ingest, then Timeline.');
+    document.getElementById('mWhoH').textContent=(kind==='todo'?'Whole archive — ':(everyone?'Everyone — ':''))+'will run on '+who.length+(who.length===1?' person':' people');
     var ul=document.getElementById('mWho');ul.innerHTML='';
     who.forEach(function(nm){var li=document.createElement('li');li.textContent=nm;ul.appendChild(li);});
     ov.hidden=false;document.querySelector('[data-x=run]').focus();
@@ -1190,13 +1197,16 @@ let job = null;
 const ARCHIVE_JS = path.join(ROOT, 'scripts', 'crm-archive.js');
 const DAILY_JS = path.join(ROOT, 'scripts', 'crm-daily.js');
 const COMPACT_JS = path.join(ROOT, 'scripts', 'crm-compact.js');
+const TODO_JS = path.join(ROOT, 'scripts', 'crm-todo-scan.js');
 
 // A job spec → the argv(s) to run. An empty `slugs` means "everyone": sweep and
 // compact each have a native all-people pass (run once), while ingest is
-// per-contact by design (crm-daily --only), so it expands to every tracked slug.
+// per-contact by design (crm-daily --only, which now also builds that contact's
+// Timeline), so it expands to every tracked slug.
 //   sweep   → crm-archive.js  [--only <slug>] [--deep]     (free, no model)
-//   ingest  → crm-daily.js    --only <slug>  [--dry-run]   (refresh + merge)
+//   ingest  → crm-daily.js    --only <slug>               (merge + timeline)
 //   compact → crm-compact.js  --write [--slug <slug>]      (timeline summaries)
+//   todo    → crm-todo-scan.js --write --allow-paid        (global "make sure" scan)
 function jobCommands({ kind, slugs, deep, plan }) {
   if (kind === 'sweep') {
     const people = slugs.length ? slugs : [null];
@@ -1210,12 +1220,17 @@ function jobCommands({ kind, slugs, deep, plan }) {
     const people = slugs.length ? slugs : [null];
     return people.map((s) => [COMPACT_JS, '--write', ...(s ? ['--slug', s] : [])]);
   }
+  if (kind === 'todo') {
+    // Global — reads the whole archive, not per-contact; slugs are ignored.
+    // --allow-paid so a web-triggered scan may call the paid model on a match.
+    return [[TODO_JS, '--write', '--allow-paid']];
+  }
   return null;
 }
 
 function startJob(spec) {
   if (job && job.running) return { ok: false, error: 'a run is already in progress' };
-  if (!['sweep', 'ingest', 'compact'].includes(spec.kind)) return { ok: false, error: 'bad job kind' };
+  if (!['sweep', 'ingest', 'compact', 'todo'].includes(spec.kind)) return { ok: false, error: 'bad job kind' };
   const cmds = jobCommands(spec);
   if (!cmds || !cmds.length) return { ok: false, error: 'nothing to run (no such people?)' };
   // Cross-process lock: refuse if a scheduled sweep or a CLI run is mid-flight,
@@ -1448,9 +1463,12 @@ function start() {
             const p = new URLSearchParams(body);
             const jobVal = p.get('job') || '';
             const colon = jobVal.indexOf(':');
-            const kind = colon === -1 ? jobVal : jobVal.slice(0, colon);
+            let kind = colon === -1 ? jobVal : jobVal.slice(0, colon);
+            // The Deep-sweep dial posts its own value; unfold it into sweep+deep.
+            let deep = false;
+            if (kind === 'deep-sweep') { kind = 'sweep'; deep = true; }
+            else if (kind === 'sweep') deep = p.get('deep') != null;
             const slugs = (colon === -1 ? p.getAll('who') : [jobVal.slice(colon + 1)]).filter(isSafeSlug);
-            const deep = kind === 'sweep' && p.get('deep') != null;
             const plan = kind === 'ingest' && p.get('plan') != null;
             const r = startJob({ kind, slugs, deep, plan });
             if (!r.ok) { send(409, page('Busy', `<div class="back"><a href="/admin/jobs/current">&larr; current job</a></div><p class="bad">${esc(r.error)}</p>`)); return; }
