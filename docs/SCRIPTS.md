@@ -27,14 +27,20 @@ passes.** A full `crm-daily.js` run ingests every contact, then compacts every
 contact; the two are not interleaved per week, and interleaving would produce
 identical output (no cross-dependency).
 
-The four **job kinds** the dashboard exposes map to scripts like this:
+## Every job that can be run
 
-| Dashboard button | Runs | Model? |
-|---|---|---|
-| **Sweep** | `crm-archive.js [--only <slug>] [--deep]` | no |
-| **Ingest** | `crm-daily.js --only <slug>` (skips autopromote + compact) | yes |
-| **Timeline** | `crm-compact.js --write [--slug <slug>]` | yes |
-| _(full unattended run)_ | `crm-daily.js` (ingest all → compact all) | yes |
+| Job | Runs | Cadence | Model | In run log |
+|---|---|---|---|---|
+| **Sweep** | `crm-archive.js [--only <slug>]` | top of every hour | no | yes (no-op ticks hidden) |
+| **Deep sweep** | `crm-archive.js --deep` | daily 03:00 | no | yes |
+| **Ingest** | `crm-daily.js --only <slug>` | manual (weekly when the AI task is on) | yes | yes |
+| **Timeline** | `crm-compact.js --write [--slug <slug>]` | manual (weekly) | yes | yes |
+| **Todo scan** | `crm-todo-scan.js --write` | top of every hour (after the sweep) | only when a "make sure" line matches (≈0.2×/mo) | **not yet — planned** |
+| _(full run)_ | `crm-daily.js` | Monday 04:00 (task currently unregistered) | yes | yes |
+
+Ingest is `crm-daily --only`, which **skips** autopromote + timeline (those are
+all-contact passes that run only on a full `crm-daily`). The full run does every
+contact's ingest, then every contact's timeline.
 
 Model cost: `MERGE_MODEL` / `COMPACT_MODEL` default to `anthropic/*`, which is
 $0 on the Claude subscription. `moonshotai/*` bills per token. The todo/tasks
