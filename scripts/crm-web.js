@@ -807,6 +807,17 @@ function rowForRun(r) {
       note: `${r.summaries ?? 0} summary line(s)`,
     };
   }
+  if (r.kind === 'todo') {
+    return {
+      t, kind: 'todo',
+      pass: 'scan',
+      scope: 'everyone',
+      examined: String(r.scanned ?? ''),
+      held: `${r.inserted ?? 0} task(s)`,
+      took, ok: true,
+      note: r.triggers ? `${r.triggers} trigger(s)` : 'no triggers',
+    };
+  }
   // ingest (also the default for legacy records written before `kind` existed)
   const failures = (r.mergeFailures || []).length;
   return {
@@ -826,11 +837,14 @@ function runsPage() {
   const records = loadRuns()
     // Legacy records predate `kind`; they are all ingest runs.
     .map((r) => ({ ...r, kind: r.kind || 'ingest' }))
-    // No-op sweeps (0 new messages) are recorded on disk but hidden here: the
-    // hourly cadence would otherwise bury the weekly AI runs. Everything with
-    // any effect — every ingest, every compact, every sweep that archived at
-    // least one message — shows.
-    .filter((r) => !(r.kind === 'sweep' && !r.inserted))
+    // No-op hourly ticks are recorded on disk but hidden here so they don't bury
+    // the runs that mattered: a sweep that archived nothing, or a todo scan that
+    // found no triggers and inserted nothing. Everything with any effect shows.
+    .filter((r) => {
+      if (r.kind === 'sweep' && !r.inserted) return false;
+      if (r.kind === 'todo' && !r.triggers && !r.inserted) return false;
+      return true;
+    })
     .map(rowForRun);
   return page('Runs — personal-crm', render(V.runs(records).body));
 }

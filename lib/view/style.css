@@ -28,6 +28,7 @@
   --ox-soft:#9A4451;     /* oxblood tint                                 */
   --stamp:#2E4A6B;       /* stamp blue — "done, on the record"           */
   --amber:#9A741C;       /* the one caution ink (aging, not yet wrong)   */
+  --moss:#4F7A4E;        /* the quiet background ink (todo scan)          */
   --tab:#C6BE9E;         /* manila tab                                    */
   --tab-on:#F5F2E9;      /* the selected tab (= card, so it joins it)     */
   --tab-ink:#453F2B;     /* text on an unselected tab                     */
@@ -47,7 +48,7 @@
     --ink:#ECE6D6; --soft:#9C9583; --faint:#6E6857;
     --rule:#3B382D; --cardline:#3B382D66; --row-rule:#2E2C22;
     --zebra:#ffffff05; --hover:#84AAD012; --dot:#ffffff08;
-    --ox:#CF6B72; --ox-soft:#B85860; --stamp:#84AAD0; --amber:#CDA047;
+    --ox:#CF6B72; --ox-soft:#B85860; --stamp:#84AAD0; --amber:#CDA047; --moss:#8FB57E;
     --tab:#332F22; --tab-on:#211F17; --tab-ink:#C4B896; --tab-hover:#403A29;
     --flag-bg:#2A2416; --bad-bg:#2E1B1D;
     --odo-bg:#141209; --odo-line:#3B382D; --shadow:2px 3px 0 #00000045;
@@ -58,7 +59,7 @@
   --ink:#ECE6D6; --soft:#9C9583; --faint:#6E6857;
   --rule:#3B382D; --cardline:#3B382D66; --row-rule:#2E2C22;
   --zebra:#ffffff05; --hover:#84AAD012; --dot:#ffffff08;
-  --ox:#CF6B72; --ox-soft:#B85860; --stamp:#84AAD0; --amber:#CDA047;
+  --ox:#CF6B72; --ox-soft:#B85860; --stamp:#84AAD0; --amber:#CDA047; --moss:#8FB57E;
   --tab:#332F22; --tab-on:#211F17; --tab-ink:#C4B896; --tab-hover:#403A29;
   --flag-bg:#2A2416; --bad-bg:#2E1B1D;
   --odo-bg:#141209; --odo-line:#3B382D; --shadow:2px 3px 0 #00000045;
@@ -229,6 +230,7 @@ td.r{text-align:right;font-variant-numeric:tabular-nums}
 .mk.sweep{color:var(--stamp);border-color:var(--stamp)}
 .mk.ingest{color:var(--ox);border-color:var(--ox)}
 .mk.compact{color:var(--amber);border-color:var(--amber)}
+.mk.todo{color:var(--moss);border-color:var(--moss)}
 .hand{font-family:Newsreader,serif;font-style:italic;color:var(--soft);font-size:14px}
 .hand.bad{color:var(--ox);font-style:normal;font-weight:700}
 

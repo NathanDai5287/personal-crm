@@ -34,7 +34,7 @@ const TASKS = require('../lib/tasks');
 const { extractFor } = require('./crm-tasks');
 
 const STATE = path.posix.join(DATA_DIR, 'crm-todo-state.json');
-const MODEL = process.env.CRM_TODO_MODEL || 'moonshotai/kimi-k2.6';
+const MODEL = process.env.CRM_TODO_MODEL || 'moonshotai/kimi-k3';
 const PROMPT = process.env.CRM_TODO_PROMPT || path.posix.join(ROOT, 'prompts', 'tasks-trigger.md');
 const FREE_PREFIX = 'anthropic/';
 
@@ -86,6 +86,7 @@ function main() {
   const model = arg('--model', MODEL);
   const sinceOverride = arg('--since', null);
   const onlySlug = arg('--slug', null);
+  const startedAt = Date.now();
 
   const state = loadState();
   // Captured BEFORE the scan loop, which populates state.cursors as it goes. Computing it
@@ -146,7 +147,7 @@ function main() {
   }
   if (!found.length) {
     console.log('no "i\'ll make sure" triggers — no model call, nothing to do');
-    if (write) saveState(state);
+    if (write) { saveState(state); recordTodoRun(startedAt, scanned, slugs.length, 0, 0); }
     return;
   }
 
@@ -213,6 +214,27 @@ function main() {
   }
   saveState(state);
   console.log(`\ninserted ${inserted} task(s)`);
+  if (write) recordTodoRun(startedAt, scanned, slugs.length, total, inserted);
+}
+
+// Record the scan in the /admin/runs ledger. Like sweeps, a no-op tick (no
+// triggers, nothing inserted) is written but hidden in the UI, so the hourly
+// cadence doesn't bury the runs that mattered. Non-fatal.
+function recordTodoRun(startedAt, scanned, contacts, triggers, inserted) {
+  try {
+    require('../lib/run-record').writeRunRecord({
+      kind: 'todo',
+      startedAt,
+      endedAt: Date.now(),
+      durationMs: Date.now() - startedAt,
+      scanned,
+      contacts,
+      triggers,
+      inserted,
+    });
+  } catch (e) {
+    console.log(`crm-todo-scan: run-record not written (non-fatal): ${e.message}`);
+  }
 }
 
 if (require.main === module) main();
