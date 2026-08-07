@@ -321,10 +321,12 @@ function runSweep(cdb, sdb, opts = {}) {
 }
 
 function main({ deep, only }) {
+  const startedAt = Date.now();
   const cdb = openCrmDb();
   const sdb = openSignalDb();
+  let r;
   try {
-    const r = runSweep(cdb, sdb, { deep, onlySlug: only });
+    r = runSweep(cdb, sdb, { deep, onlySlug: only });
     const scope = `${deep ? ' [DEEP]' : ''}${only ? ` [ONLY ${only}]` : ''}`;
     console.log(`CRM_ARCHIVE:${scope} examined ${r.seen} message(s), ${r.inserted} new` +
       `${r.backfilledMeta ? `, backfilled meta on ${r.backfilledMeta} old row(s)` : ''}.`);
@@ -341,6 +343,29 @@ function main({ deep, only }) {
   } finally {
     sdb.close();
     cdb.close();
+  }
+  // Record this pass in the /admin/runs ledger. Every sweep is logged, even a
+  // 0-new tick; the dashboard hides those (crm-web runsPage) so the hourly
+  // cadence doesn't bury the weekly AI runs, but the ledger stays complete.
+  // A run-record failure must never fail the sweep, so it is non-fatal.
+  const endedAt = Date.now();
+  try {
+    require('../lib/run-record').writeRunRecord({
+      kind: 'sweep',
+      startedAt,
+      endedAt,
+      durationMs: endedAt - startedAt,
+      deep: !!deep,
+      only: only || null,
+      seen: r.seen,
+      inserted: r.inserted,
+      per: r.per,
+      collisions: r.collisions ? r.collisions.length : 0,
+      reuse: r.reuse || null,
+      backfilledMeta: r.backfilledMeta || 0,
+    });
+  } catch (e) {
+    console.log(`crm-archive: run-record not written (non-fatal): ${e.message}`);
   }
 }
 

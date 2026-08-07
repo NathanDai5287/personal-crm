@@ -224,7 +224,13 @@ td.r{text-align:right;font-variant-numeric:tabular-nums}
 .mk.rd{color:var(--ox);border-color:var(--ox)}
 .mk.held{color:var(--soft);border-color:var(--rule)}
 .mk.amber{color:var(--amber);border-color:var(--amber)}
+/* runs ledger — one colour per job type: sweep is the free/cool pass, ingest
+   and compact both spend the model (oxblood + amber). */
+.mk.sweep{color:var(--stamp);border-color:var(--stamp)}
+.mk.ingest{color:var(--ox);border-color:var(--ox)}
+.mk.compact{color:var(--amber);border-color:var(--amber)}
 .hand{font-family:Newsreader,serif;font-style:italic;color:var(--soft);font-size:14px}
+.hand.bad{color:var(--ox);font-style:normal;font-weight:700}
 
 /* ---- job controls (sweep / ingest / compact, with modifiers) ------------ */
 .jobs{border:1px solid var(--rule);border-top:0;background:var(--card);padding:10px 16px 14px}

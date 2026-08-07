@@ -474,6 +474,12 @@ function main() {
 
   console.log(`crm-compact: ${WRITE ? "WRITE" : "DRY-RUN"}${NO_LLM ? " | --no-llm" : ""} | ${slugs.length} contact(s), ${groups.length} group(s)\n`);
 
+  // Tallies for the /admin/runs ledger: how many conversations were processed
+  // (not skipped), how many had their profile changed, and total summary lines.
+  let scanned = 0;
+  let changedCount = 0;
+  let summariesCount = 0;
+
   // Phase 1: groups first, so their new day-summaries can fold into participant profiles.
   const foldByContact = new Map(); // slug -> [ "- YYYY-MM-DD [Group]: summary", ... ]
   for (const g of groups) {
@@ -482,6 +488,9 @@ function main() {
       console.log(`- group ${g.slug}: skipped (${r.skipped})`);
       continue;
     }
+    scanned += 1;
+    if (r.changed) changedCount += 1;
+    summariesCount += r.summaries || 0;
     console.log(`- group ${g.slug} (${r.name}): raw=${r.rawCount} summaries=${r.summaries} participants=[${r.participants.join(", ")}] changed=${r.changed}`);
     if (WRITE) state[`group:${g.slug}`] = { since: r.since, ranAt: now };
     for (const [date, summary] of r.newDailies || []) {
@@ -501,6 +510,9 @@ function main() {
       console.log(`- ${slug}: skipped (${r.skipped})`);
       continue;
     }
+    scanned += 1;
+    if (r.changed) changedCount += 1;
+    summariesCount += r.summaries || 0;
     console.log(`- ${slug} (${r.name}): raw=${r.rawCount} summaries=${r.summaries} changed=${r.changed}`);
     if (WRITE) state[slug] = { since: r.since, ranAt: now };
     if (!WRITE && r.next && slugArg) printTimeline(r.next);
@@ -509,6 +521,28 @@ function main() {
   sdb.close();
   cdb.close();
   if (WRITE) fs.writeFileSync(COMPACT_STATE, JSON.stringify(state, null, 2));
+
+  // Record real (write) passes in the /admin/runs ledger. Dry-runs are
+  // inspections, not passes, so they leave no row — matching crm-daily, which
+  // also skips the ledger on --dry-run. Non-fatal: a failed record must never
+  // fail the compaction it describes.
+  if (WRITE) {
+    const endedAt = Date.now();
+    try {
+      require("../lib/run-record").writeRunRecord({
+        kind: "compact",
+        startedAt: now,
+        endedAt,
+        durationMs: endedAt - now,
+        only: slugArg || (groupArg ? `group:${groupArg}` : null),
+        scanned,
+        changed: changedCount,
+        summaries: summariesCount,
+      });
+    } catch (e) {
+      console.log(`crm-compact: run-record not written (non-fatal): ${e.message}`);
+    }
+  }
 }
 
 function printTimeline(next) {

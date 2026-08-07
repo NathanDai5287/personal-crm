@@ -529,6 +529,10 @@ function main() {
     const runId = new Date(startedAt).toISOString().replace(/[:.]/g, '-');
     atomicWriteJson(path.join(runsDir, `${runId}.json`), {
       id: runId,
+      // The ledger colours rows by kind; legacy records with no `kind` are all
+      // ingest runs, so crm-web defaults undefined → 'ingest'. Stamp it going
+      // forward so the default only ever covers the pre-kind history.
+      kind: 'ingest',
       ...summary,
       steps,
       // One entry per CHUNK (was per contact before week-aligned chunking).

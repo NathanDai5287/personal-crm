@@ -778,17 +778,60 @@ function statusPage() {
 // ---------------------------------------------------------------------------
 // Screen A — /runs, /runs/<id>, /runs/<id>/diff/<slug>
 // ---------------------------------------------------------------------------
-function runsPage() {
-  const records = loadRuns().map((r) => ({
-    t: fmtWhen(r.startedAt),
+// One ledger row per run record. `kind` drives the row's colour (sweep/ingest/
+// compact each get a distinct chip) and which fields fill the shared columns —
+// the numbers mean different things per kind, but the header labels stay generic
+// and the note clarifies. `ok:false` renders the note in oxblood.
+function rowForRun(r) {
+  const t = fmtWhen(r.startedAt);
+  const took = fmtMs(r.durationMs);
+  if (r.kind === 'sweep') {
+    return {
+      t, kind: 'sweep',
+      pass: r.deep ? 'deep' : 'hourly',
+      scope: r.only || 'everyone',
+      examined: String(r.seen ?? ''),
+      held: `${r.inserted ?? 0} new`,
+      took, ok: true,
+      note: r.reuse ? 'rowid reuse detected' : `${r.inserted ?? 0} message(s) archived`,
+    };
+  }
+  if (r.kind === 'compact') {
+    return {
+      t, kind: 'compact',
+      pass: r.only ? 'compact (one)' : 'compact',
+      scope: r.only || 'everyone',
+      examined: String(r.scanned ?? ''),
+      held: `${r.changed ?? 0} changed`,
+      took, ok: true,
+      note: `${r.summaries ?? 0} summary line(s)`,
+    };
+  }
+  // ingest (also the default for legacy records written before `kind` existed)
+  const failures = (r.mergeFailures || []).length;
+  return {
+    t, kind: 'ingest',
     pass: r.dryRun ? 'plan' : (r.only ? 'ingest (one)' : 'daily'),
     scope: r.only || 'everyone',
     examined: String(r.messagesMerged ?? r.contactsWithActivity ?? ''),
     held: `${(r.merged || []).length} ppl`,
-    took: fmtMs(r.durationMs),
-    mark: (r.mergeFailures || []).length ? 'rd' : 'sw',
-    note: (r.warnings || []).length ? `${r.warnings.length} warning(s)` : `${r.chunksMerged ?? 0} chunk(s) ingested`,
-  }));
+    took, ok: failures === 0,
+    note: failures
+      ? `${failures} merge failure(s)`
+      : ((r.warnings || []).length ? `${r.warnings.length} warning(s)` : `${r.chunksMerged ?? 0} chunk(s) ingested`),
+  };
+}
+
+function runsPage() {
+  const records = loadRuns()
+    // Legacy records predate `kind`; they are all ingest runs.
+    .map((r) => ({ ...r, kind: r.kind || 'ingest' }))
+    // No-op sweeps (0 new messages) are recorded on disk but hidden here: the
+    // hourly cadence would otherwise bury the weekly AI runs. Everything with
+    // any effect — every ingest, every compact, every sweep that archived at
+    // least one message — shows.
+    .filter((r) => !(r.kind === 'sweep' && !r.inserted))
+    .map(rowForRun);
   return page('Runs — personal-crm', render(V.runs(records).body));
 }
 
