@@ -7,8 +7,10 @@
 //
 //   node design/preview.js     # http://localhost:8799/
 const http = require('http');
+const fs = require('fs');
+const path = require('path');
 const { h, render } = require('../lib/view/h');
-const { page } = require('../lib/view/shell');
+const { page, FONTS_DIR } = require('../lib/view/shell');
 const V = require('../lib/view/pages');
 const F = require('./fixtures');
 
@@ -126,6 +128,15 @@ function resolve(pathname) {
 
 http.createServer((req, res) => {
   const pathname = decodeURIComponent(req.url.split('?')[0]);
+  // Self-hosted woff2, same contract as crm-web.js (see lib/view/shell.js).
+  if (pathname.startsWith('/fonts/')) {
+    try {
+      const buf = fs.readFileSync(path.join(FONTS_DIR, path.basename(pathname)));
+      res.writeHead(200, { 'Content-Type': 'font/woff2', 'Cache-Control': 'public, max-age=31536000, immutable' });
+      res.end(buf);
+    } catch { res.writeHead(404); res.end(); }
+    return;
+  }
   const result = resolve(pathname);
   if (!result) {
     res.writeHead(404, { 'content-type': 'text/html; charset=utf-8' });

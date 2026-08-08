@@ -29,6 +29,13 @@
   --stamp:#2E4A6B;       /* stamp blue — "done, on the record"           */
   --amber:#9A741C;       /* the one caution ink (aging, not yet wrong)   */
   --moss:#4F7A4E;        /* the quiet background ink (todo scan)          */
+  /* job inks — each run kind keeps ONE colour everywhere it appears (runs
+     ledger chips, dials, legend, confirm slip, monitor). Aliases resolve at
+     use time, so the dark theme's --stamp/--ox/... swaps carry through. */
+  --k-sweep:var(--stamp);
+  --k-ingest:var(--ox);
+  --k-compact:var(--amber);
+  --k-todo:var(--moss);
   --tab:#C6BE9E;         /* manila tab                                    */
   --tab-on:#F5F2E9;      /* the selected tab (= card, so it joins it)     */
   --tab-ink:#453F2B;     /* text on an unselected tab                     */
@@ -174,12 +181,23 @@ button{font:inherit;cursor:pointer}
 .cell .sub{font-family:"Courier Prime",monospace;font-size:10.5px;color:var(--soft);margin-top:2px}
 
 /* ---- cadence dials (periodic runs: elapsed arc, time-to-next) ------------ */
-.dials{display:flex;flex-wrap:wrap;gap:14px;margin-top:10px}
+/* Equal-width grid tracks: when the window is too narrow for all four, a dial
+   wraps into a matching column instead of sprawling alone across a full row. */
+.dials{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px;margin-top:10px}
 .dial{background:var(--card);border:1px solid var(--rule);box-shadow:var(--shadow);
-  padding:11px 14px;display:flex;gap:13px;align-items:center;min-width:214px}
+  padding:11px 14px;display:flex;gap:13px;align-items:center}
 .dialface{width:74px;height:74px;flex:none}
 .dialface .track{fill:none;stroke:var(--rule);stroke-width:6}
 .dialface .arc{fill:none;stroke:var(--stamp);stroke-width:6}
+/* each dial wears its job's ink; overdue (below) still overrides to oxblood */
+.dial.sweep .arc{stroke:var(--k-sweep)}
+.dial.ingest .arc{stroke:var(--k-ingest)}
+.dial.compact .arc{stroke:var(--k-compact)}
+.dial.todo .arc{stroke:var(--k-todo)}
+.dial.sweep .dialcap b{color:var(--k-sweep)}
+.dial.ingest .dialcap b{color:var(--k-ingest)}
+.dial.compact .dialcap b{color:var(--k-compact)}
+.dial.todo .dialcap b{color:var(--k-todo)}
 .dial.overdue .arc{stroke:var(--ox)}
 .dialface .tick{stroke:var(--faint);stroke-width:1.4}
 .dialface .num{fill:var(--ink);font-family:"Courier Prime",monospace;font-size:16px;font-weight:700;text-anchor:middle}
@@ -226,12 +244,12 @@ td.r{text-align:right;font-variant-numeric:tabular-nums}
 .mk.rd{color:var(--ox);border-color:var(--ox)}
 .mk.held{color:var(--soft);border-color:var(--rule)}
 .mk.amber{color:var(--amber);border-color:var(--amber)}
-/* runs ledger — one colour per job type: sweep is the free/cool pass, ingest
+/* runs ledger — the job inks (--k-*): sweep is the free/cool pass, ingest
    and compact both spend the model (oxblood + amber). */
-.mk.sweep{color:var(--stamp);border-color:var(--stamp)}
-.mk.ingest{color:var(--ox);border-color:var(--ox)}
-.mk.compact{color:var(--amber);border-color:var(--amber)}
-.mk.todo{color:var(--moss);border-color:var(--moss)}
+.mk.sweep{color:var(--k-sweep);border-color:var(--k-sweep)}
+.mk.ingest{color:var(--k-ingest);border-color:var(--k-ingest)}
+.mk.compact{color:var(--k-compact);border-color:var(--k-compact)}
+.mk.todo{color:var(--k-todo);border-color:var(--k-todo)}
 .hand{font-family:Newsreader,serif;font-style:italic;color:var(--soft);font-size:14px}
 .hand.bad{color:var(--ox);font-style:normal;font-weight:700}
 /* /admin/runs cost columns: amber = spent the model, faint = free/subscription.
@@ -452,6 +470,10 @@ select.fld{appearance:none;-webkit-appearance:none;padding-right:26px;cursor:poi
 .legend-term{font-family:"Courier Prime",monospace;font-size:11px;letter-spacing:.1em;text-transform:uppercase;
   border:1.5px solid var(--stamp);color:var(--stamp);padding:1px 7px;transform:rotate(-1.4deg);
   display:inline-block;white-space:nowrap}
+.legend-term.sweep{color:var(--k-sweep);border-color:var(--k-sweep)}
+.legend-term.ingest{color:var(--k-ingest);border-color:var(--k-ingest)}
+.legend-term.compact{color:var(--k-compact);border-color:var(--k-compact)}
+.legend-term.todo{color:var(--k-todo);border-color:var(--k-todo)}
 .legend-what{font-size:14.5px;line-height:1.4}
 .legend-cost{font-family:"Courier Prime",monospace;font-size:11px;color:var(--faint);white-space:nowrap}
 .legend-cost.model{color:var(--amber)}
@@ -473,6 +495,10 @@ select.fld{appearance:none;-webkit-appearance:none;padding-right:26px;cursor:poi
 .modal-stamp{position:absolute;right:-4px;top:12px;font-family:"Courier Prime",monospace;font-weight:700;
   font-size:34px;letter-spacing:.05em;text-transform:uppercase;color:var(--ox);opacity:.12;
   transform:rotate(-8deg);pointer-events:none}
+.modal-stamp.sweep{color:var(--k-sweep)}
+.modal-stamp.ingest{color:var(--k-ingest)}
+.modal-stamp.compact{color:var(--k-compact)}
+.modal-stamp.todo{color:var(--k-todo)}
 .modal-title{font-size:23px;margin:0 0 4px}
 .modal-meta{font-family:"Courier Prime",monospace;font-size:12px;color:var(--soft);margin-bottom:13px}
 .modal-whoh{font-family:"Courier Prime",monospace;font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;

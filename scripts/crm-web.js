@@ -26,7 +26,7 @@ const { dateKey: ptDateKey, fmtLocal: ptLocal, weekStart, nextWeekStart, nextPac
 const { resolveSources, buildMessageQuery, buildArchiveQuery } = require('../lib/sources');
 const { validateCitations } = require('../lib/archive');
 const TASKS = require('../lib/tasks');
-const { STYLE: BINDERY_CSS, FONTS, THEME_INIT, THEME_JS } = require('../lib/view/shell');
+const { STYLE: BINDERY_CSS, FONTS, FONTS_DIR, THEME_INIT, THEME_JS } = require('../lib/view/shell');
 const { render, raw } = require('../lib/view/h');
 const V = require('../lib/view/pages');
 const { renderProfile, inline: mdInline } = require('../lib/view/markdown');
@@ -436,11 +436,11 @@ function contactList() {
       held.set(r.slug, r.n);
     }
     const past = cdb.prepare('SELECT COUNT(*) n FROM messages WHERE contact_slug = ? AND id > ?');
-    const total = cdb.prepare('SELECT COUNT(*) n FROM messages WHERE contact_slug = ?');
     return listContacts().map((c) => {
       const hasCursor = Object.prototype.hasOwnProperty.call(cursors, c.slug);
       const cursor = hasCursor ? (cursors[c.slug] || 0) : null;
-      const waiting = hasCursor ? past.get(c.slug, cursor).n : total.get(c.slug).n;
+      // No cursor = the whole history is waiting, which `held` already counted.
+      const waiting = hasCursor ? past.get(c.slug, cursor).n : (held.get(c.slug) || 0);
       const facts = c.talkingPoints.slice(0, 3).map((tp) => mdInline((tp.date ? `**${tp.date}** ` : '') + tp.text));
       return {
         slug: c.slug, name: c.name, rel: c.relationship, last: c.last,
@@ -695,6 +695,8 @@ function dial(label, cadence, sinceMs, intervalMs, job, sched) {
   // it and a weekly job wrongly showed ~7 days instead of "til next Monday".
   const now = Date.now();
   const since = sinceMs == null ? 'not yet run' : `${fmtAgo(sinceMs)} ago`;
+  // The dial's job ink (deep sweep is a sweep) — keys the shared --k-* colours.
+  const kind = job === 'deep-sweep' ? 'sweep' : job;
   if (sched) {
     const remaining = Math.max(0, sched.nextFire - now);
     const fraction = (now - sched.prevFire) / (sched.nextFire - sched.prevFire);
@@ -702,19 +704,19 @@ function dial(label, cadence, sinceMs, intervalMs, job, sched) {
     // the schedule may have stopped. A manual run legitimately resets this.
     const stale = sinceMs != null && sinceMs > intervalMs * 1.5;
     return {
-      label, cadence, job, since,
+      label, cadence, job, kind, since,
       center: fmtAgo(remaining), centerSub: 'til next',
       fraction: Math.max(0, Math.min(1, fraction)), overdue: stale,
     };
   }
   // Fallback rolling model (dials with no fixed schedule).
   if (sinceMs == null) {
-    return { label, cadence, job, since: 'not yet run', center: '—', centerSub: 'never', fraction: 0, overdue: false };
+    return { label, cadence, job, kind, since: 'not yet run', center: '—', centerSub: 'never', fraction: 0, overdue: false };
   }
   const remaining = intervalMs - sinceMs;
   const overdue = remaining < 0;
   return {
-    label, cadence, job, since,
+    label, cadence, job, kind, since,
     center: overdue ? `+${fmtAgo(-remaining)}` : fmtAgo(remaining),
     centerSub: overdue ? 'overdue' : 'til next',
     fraction: sinceMs / intervalMs, overdue,
@@ -727,21 +729,35 @@ function dial(label, cadence, sinceMs, intervalMs, job, sched) {
 // call-count-dominated (see lib/cost.js), so this is a real estimate, not a
 // guess — but an estimate all the same. Attaches { estCalls, estCostUsd } to
 // each roster row; estCostUsd is null when the model has no known price.
+//
+// Cached per contact: recomputing pulled every waiting row on every /admin
+// load — seconds once a few backfills are pending. The estimate only moves
+// when a sweep or ingest lands, i.e. when (cursor, waiting) moves, so that
+// pair is the cache key.
+const pendingCostCache = new Map(); // slug -> { cursor, waiting, est }
 function attachPendingCosts(roster) {
   const waiting = roster.filter((x) => x.waiting > 0);
-  if (!waiting.length) return roster;
-  const cdb = openCrmDb();
-  try {
-    const q = cdb.prepare('SELECT sent_at, length(body) AS blen FROM messages WHERE contact_slug = ? AND id > ? ORDER BY id');
-    for (const x of waiting) {
-      const rows = q.all(x.slug, x.cursor || 0);
-      const est = estIngestFromRows(MERGE_MODEL, COMPACT_MODEL, rows);
-      x.estCalls = est.calls;
-      x.estCostUsd = est.usd; // dollars, 0 for subscription models, null if unpriced
-      x.estDurSec = est.seconds; // wall-clock estimate (merges run sequentially)
+  const stale = waiting.filter((x) => {
+    const c = pendingCostCache.get(x.slug);
+    return !c || c.cursor !== x.cursor || c.waiting !== x.waiting;
+  });
+  if (stale.length) {
+    const cdb = openCrmDb();
+    try {
+      const q = cdb.prepare('SELECT sent_at, length(body) AS blen FROM messages WHERE contact_slug = ? AND id > ? ORDER BY id');
+      for (const x of stale) {
+        const rows = q.all(x.slug, x.cursor || 0);
+        pendingCostCache.set(x.slug, { cursor: x.cursor, waiting: x.waiting, est: estIngestFromRows(MERGE_MODEL, COMPACT_MODEL, rows) });
+      }
+    } finally {
+      cdb.close();
     }
-  } finally {
-    cdb.close();
+  }
+  for (const x of waiting) {
+    const est = pendingCostCache.get(x.slug).est;
+    x.estCalls = est.calls;
+    x.estCostUsd = est.usd; // dollars, 0 for subscription models, null if unpriced
+    x.estDurSec = est.seconds; // wall-clock estimate (merges run sequentially)
   }
   return roster;
 }
@@ -863,7 +879,9 @@ const JOB_MODAL_JS = `<script>(function(){
     }
     var who=runBoxes.map(function(c){return nameFor(c.value);});
     var kindLabel=kind==='deep-sweep'?'deep sweep':kind;
-    document.getElementById('mStamp').textContent=kindLabel;
+    var st=document.getElementById('mStamp');
+    st.textContent=kindLabel;
+    st.className='modal-stamp '+(isSweep?'sweep':kind);
     document.getElementById('mTitle').textContent='Run '+kindLabel;
     document.getElementById('mMeta').textContent=isSweep?'Free — copies messages into the archive, no model.':(kind==='todo'?'Scans for "make sure" commitments; a model runs only on a match.':'Calls the model — ingest, then Timeline.');
     costLine(kind,isSweep,runBoxes);
@@ -1094,8 +1112,13 @@ function runDetailPage(id) {
     ? `<span class="sub"> · cost est ${esc(money(run.costUsd, run.costModel))} · actual ${esc(money(run.actualCostUsd, run.costModel))}</span>`
     : '';
 
+  // The kind chip wears the same job ink as the runs ledger (legacy records
+  // predate `kind` and are all ingest runs).
+  const kind = run.kind || 'ingest';
+  const kindWord = { sweep: 'sweep', ingest: 'ingest', compact: 'timeline', todo: 'todo' }[kind] || kind;
   const body = `<div class="back"><a href="/runs">&larr; All runs</a></div>` +
     `<header class="top"><h1>Run ${esc(fmtWhen(run.startedAt))}</h1>` +
+    `<span class="mk ${esc(kind)}">${esc(kindWord)}</span>` +
     `<span class="sub">${esc(runMode(run))} · ${fmtMs(run.durationMs)}</span>${modelsHtml}${costHtml}</header>` +
     `<h2>Steps</h2>${stepsHtml}${contactsHtml}${compactCiteHtml}${warnHtml}${logHtml}`;
   return page(`Run ${run.id}`, body, '/runs');
@@ -1578,6 +1601,17 @@ function start() {
     // percent-encoding (e.g. /c/%zz) — both were uncaught process crashes.
     try {
       const url = new URL(req.url, 'http://localhost');
+
+      // Self-hosted woff2 (see lib/view/shell.js). Immutable: the files only
+      // change with a redesign, which also changes the shell's fonts.css.
+      if (url.pathname.startsWith('/fonts/')) {
+        try {
+          const buf = fs.readFileSync(path.join(FONTS_DIR, path.basename(url.pathname)));
+          res.writeHead(200, { 'Content-Type': 'font/woff2', 'Cache-Control': 'public, max-age=31536000, immutable' });
+          res.end(buf);
+        } catch { res.writeHead(404); res.end(); }
+        return;
+      }
 
       if (url.pathname === '/') { send(200, indexPage()); return; }
 
