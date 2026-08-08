@@ -133,7 +133,6 @@ system: |
   6. `actionable` reflects only whether someone else must move first — never size or specificity.
 ---
 Contact: {{CONTACT_NAME}}
-Today: {{TODAY}}
 
 Messages:
 {{MESSAGES}}

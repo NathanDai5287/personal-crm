@@ -141,6 +141,26 @@ const VARIANTS = {
     prompt: 'prompts/merge-v7.md',
     user: (c, today) => VARIANTS.b.user(c, today),
   },
+  // H = G plus two prompt-only rules (Nathan, 2026-08-07): a citation's range
+  // must be self-sufficient evidence for the claim it backs, and `## What I
+  // know` is one topic per bullet — multi-topic bullets split when touched.
+  // G is the control; run both on the same model so the prompt is the only
+  // variable.
+  h: {
+    label: 'H (G + granular)',
+    prompt: 'prompts/merge-v8.md',
+    user: (c, today) => VARIANTS.b.user(c, today),
+  },
+  // I = H plus the 2026-08-07 prompt-audit repairs: restores v4's "Write claims
+  // at the strength they were said" section and the profile-is-notes-only hard
+  // rule (minus v4's "strange message" clause, which v7 deliberately reversed —
+  // the injection case expects record-as-data), and operationalizes the overlap
+  // and separate-moments citation rules. H is the control.
+  i: {
+    label: 'I (H + audit)',
+    prompt: 'prompts/merge-v9.md',
+    user: (c, today) => VARIANTS.b.user(c, today),
+  },
   // K3 on F, to confirm the weaker model can carry the extra convention.
   kf_high: {
     label: 'K3+F think=high', prompt: 'prompts/merge-v6.md',
