@@ -63,8 +63,9 @@ const { openCrmDb, openSignalDb } = require('../lib/signal-db');
     if (!a.startsWith('--')) continue;
     if (a === '--dry-run') continue;
     if (a === '--only') { i += 1; continue; }
+    if (a === '--max-chunks') { i += 1; continue; }
     console.error(`crm-daily: unknown flag '${a}'`);
-    console.error('known: --dry-run, --only <slug>');
+    console.error('known: --dry-run, --only <slug>, --max-chunks <n>');
     process.exit(2);
   }
 }
@@ -74,6 +75,16 @@ const ONLY_IDX = process.argv.indexOf('--only');
 const ONLY = ONLY_IDX !== -1 ? process.argv[ONLY_IDX + 1] : null;
 if (ONLY_IDX !== -1 && (!ONLY || ONLY.startsWith('--'))) {
   console.error('crm-daily: --only requires a contact slug');
+  process.exit(2);
+}
+// --max-chunks <n>: merge at most the first n chunks per contact this run.
+// Safe with the per-chunk cursor commit: the cursor stops at chunk n's last
+// message, so the next run resumes exactly where this one left off. This is
+// how a full-history backfill runs in affordable, resumable stages.
+const MAXC_IDX = process.argv.indexOf('--max-chunks');
+const MAX_CHUNKS = MAXC_IDX !== -1 ? Number(process.argv[MAXC_IDX + 1]) : null;
+if (MAXC_IDX !== -1 && (!Number.isInteger(MAX_CHUNKS) || MAX_CHUNKS < 1)) {
+  console.error('crm-daily: --max-chunks requires a positive integer');
   process.exit(2);
 }
 
@@ -285,6 +296,18 @@ function main() {
       } finally {
         sdb.close();
         cdb.close();
+      }
+      // Cap BEFORE counts/estimates, so the plan, cost lines, and run record all
+      // describe the chunks this run will actually merge. Deferred chunks are
+      // not lost — the cursor stops at the last merged chunk, so the next run
+      // picks up from there.
+      if (MAX_CHUNKS) {
+        for (const p of plans) {
+          if (p.chunks.length > MAX_CHUNKS) {
+            logLines.push(`[3] max-chunks: ${p.slug} capped to first ${MAX_CHUNKS} of ${p.chunks.length} chunk(s); the rest resume next run`);
+            p.chunks = p.chunks.slice(0, MAX_CHUNKS);
+          }
+        }
       }
       totalChunks = plans.reduce((n, p) => n + p.chunks.length, 0);
       const note = plans.length === 0
