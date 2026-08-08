@@ -161,6 +161,17 @@ const VARIANTS = {
     prompt: 'prompts/merge-v9.md',
     user: (c, today) => VARIANTS.b.user(c, today),
   },
+  // J = I plus the What-I-know two-tier rule (Nathan's 2026-08-08 selections):
+  // eight first-class topics (school/career, money, health, living situation,
+  // dating, family, friend graph, dynamic-with-Nathan) recorded in detail;
+  // everything else is texture — one short bullet per topic, refreshed in
+  // place, never grown — with an anti-chill clause so the tier compresses
+  // rather than drops. I is the control.
+  j: {
+    label: 'J (I + tiers)',
+    prompt: 'prompts/merge-v10.md',
+    user: (c, today) => VARIANTS.b.user(c, today),
+  },
   // K3 on F, to confirm the weaker model can carry the extra convention.
   kf_high: {
     label: 'K3+F think=high', prompt: 'prompts/merge-v6.md',
