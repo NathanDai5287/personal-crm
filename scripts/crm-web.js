@@ -18,9 +18,11 @@ const crypto = require('crypto');
 const { spawn, execFileSync } = require('child_process');
 const {
   ROOT, CONTACTS_DIR, WEB_PORT, WEB_USER, WEB_PASSWORD_FILE,
-  TRACKED, REFRESH_STATE, LOGS_DIR, GITDIR, MERGE_MODEL,
+  TRACKED, REFRESH_STATE, LOGS_DIR, GITDIR, MERGE_MODEL, COMPACT_MODEL,
 } = require('../lib/config');
 const { openCrmDb, openSignalDb } = require('../lib/signal-db');
+const { estIngestFromRows, isFree, fmtUsd } = require('../lib/cost');
+const { dateKey: ptDateKey, fmtLocal: ptLocal, weekStart, nextWeekStart, nextPacificDaily } = require('../lib/weeks');
 const { resolveSources, buildMessageQuery, buildArchiveQuery } = require('../lib/sources');
 const { validateCitations } = require('../lib/archive');
 const TASKS = require('../lib/tasks');
@@ -459,26 +461,32 @@ function indexPage() {
 // `id="m<rowid>"` so a URL fragment can address one — `/m/<start>-<end>#m<primary>`
 // highlights the primary client-side, since the fragment never reaches the server.
 // `hitId` is the server-known highlight (the single message of /m/<id>).
-function msgBubbles(rows, hitId) {
+// `dimIds` is the surrounding-context rows: rendered readable but faded, so the
+// cited message(s) are what the eye lands on.
+function msgBubbles(rows, hitId, dimIds) {
   const fmt = (ms) => new Date(ms).toISOString().slice(0, 16).replace('T', ' ');
   return rows.map((m) => {
     const mine = /^nathan$/i.test(m.sender);
     const hit = m.id === hitId ? ' hit' : '';
-    return `<div class="q ${mine ? 'me' : 'them'}${hit}" id="m${m.id}">` +
+    const dim = dimIds && dimIds.has(m.id) ? ' dim' : '';
+    return `<div class="q ${mine ? 'me' : 'them'}${hit}${dim}" id="m${m.id}">` +
       `<span class="who">${esc(m.sender)} · ${esc(fmt(m.sent_at))}</span>${mdInline(m.body)}</div>`;
   }).join('');
 }
 
 // Scroll the highlighted bubble into view. A `#m<id>` fragment, if present and
-// real, becomes the highlight; otherwise the server-marked `.hit` is used.
+// real, becomes the highlight; otherwise the server-marked `.hit` is used. With
+// neither, land on the first non-dim bubble — a range citation with no primary
+// would otherwise open at the top of its leading context.
 const SCROLL_TO_HIT = `<script>(function(){`
   + `var h=(location.hash||'').slice(1),t=h&&/^m\\d+$/.test(h)?document.getElementById(h):null;`
-  + `if(t)t.classList.add('hit');else t=document.querySelector('.q.hit');`
+  + `if(t)t.classList.add('hit');else t=document.querySelector('.q.hit')||document.querySelector('.q:not(.dim)');`
   + `if(t)t.scrollIntoView({block:'center'});})();</script>`;
 
-// Provenance view: one archived message, highlighted, with ±10 messages of
-// context from the same conversation — resolved from crm.db's archive (not
-// Signal's DB), so cited messages stay viewable even if Signal purges history.
+// Provenance view: one archived message, highlighted, with the 20 messages
+// before and 10 after from the same conversation dimmed around it — resolved
+// from crm.db's archive (not Signal's DB), so cited messages stay viewable even
+// if Signal purges history.
 function messagePage(id) {
   let cdb;
   try { cdb = openCrmDb(); } catch { return null; }
@@ -487,18 +495,19 @@ function messagePage(id) {
     try { msg = cdb.prepare('SELECT * FROM messages WHERE id = ?').get(id); } catch { /* archive table not created yet */ }
     if (!msg) return null;
     const before = msg.conv_id
-      ? cdb.prepare('SELECT * FROM messages WHERE conv_id = ? AND (sent_at < ? OR (sent_at = ? AND id < ?)) ORDER BY sent_at DESC, id DESC LIMIT 10')
+      ? cdb.prepare('SELECT * FROM messages WHERE conv_id = ? AND (sent_at < ? OR (sent_at = ? AND id < ?)) ORDER BY sent_at DESC, id DESC LIMIT 20')
           .all(msg.conv_id, msg.sent_at, msg.sent_at, msg.id).reverse()
       : [];
     const after = msg.conv_id
       ? cdb.prepare('SELECT * FROM messages WHERE conv_id = ? AND (sent_at > ? OR (sent_at = ? AND id > ?)) ORDER BY sent_at ASC, id ASC LIMIT 10')
           .all(msg.conv_id, msg.sent_at, msg.sent_at, msg.id)
       : [];
+    const dim = new Set([...before, ...after].map((m) => m.id));
     const backHref = msg.contact_slug ? `/c/${encodeURIComponent(msg.contact_slug)}` : '/';
     const body = `<div class="back"><a href="${backHref}">&larr; back</a></div>` +
       `<div class="profile"><h1>${esc(msg.conversation || 'Conversation')}</h1>` +
-      `<p class="sub">source message <code>m${msg.id}</code>, shown in context</p>` +
-      `<div class="charge">${msgBubbles([...before, msg, ...after], msg.id)}</div></div>` +
+      `<p class="sub">source message <code>m${msg.id}</code>, shown with surrounding context</p>` +
+      `<div class="charge">${msgBubbles([...before, msg, ...after], msg.id, dim)}</div></div>` +
       SCROLL_TO_HIT;
     return page(`m${msg.id} — ${msg.conversation || 'message'}`, body, '/');
   } finally {
@@ -515,7 +524,8 @@ function messagePage(id) {
 // are 2-6% of their ledger's id span. The range therefore means
 // `conv_id = thread(start) AND id BETWEEN start AND end`, resolved against the
 // ARCHIVE, and the gaps that leaves (ids of other conversations, ids never
-// mirrored) are normal rather than errors.
+// mirrored) are normal rather than errors. The 20 thread messages before the
+// range and the 10 after are shown dimmed; only in-range rows are the citation.
 function spanPage(start, end) {
   if (end < start) return null;
   let cdb;
@@ -530,14 +540,25 @@ function spanPage(start, end) {
       ? cdb.prepare('SELECT * FROM messages WHERE conv_id = ? AND id BETWEEN ? AND ? ORDER BY id')
           .all(anchor.conv_id, start, end)
       : [anchor];
+    // Context flanking the range. Ordering by id is enough here: the range query
+    // itself is id-ordered, so the whole page reads in one consistent order.
+    const before = anchor.conv_id
+      ? cdb.prepare('SELECT * FROM messages WHERE conv_id = ? AND id < ? ORDER BY id DESC LIMIT 20')
+          .all(anchor.conv_id, start).reverse()
+      : [];
+    const after = anchor.conv_id
+      ? cdb.prepare('SELECT * FROM messages WHERE conv_id = ? AND id > ? ORDER BY id ASC LIMIT 10')
+          .all(anchor.conv_id, end)
+      : [];
+    const dim = new Set([...before, ...after].map((m) => m.id));
     const backHref = anchor.contact_slug ? `/c/${encodeURIComponent(anchor.contact_slug)}` : '/';
     const span = `m${start}&ndash;m${end}`;
     const body = `<div class="back"><a href="${backHref}">&larr; back</a></div>` +
       `<div class="profile"><h1>${esc(anchor.conversation || 'Conversation')}</h1>` +
       `<p class="sub">cited range <code>${span}</code> &middot; ` +
       `${rows.length} message${rows.length === 1 ? '' : 's'} in this conversation` +
-      `${anchor.conv_id ? '' : ' (no conversation recorded for this row)'}</p>` +
-      `<div class="charge">${msgBubbles(rows, null)}</div></div>` +
+      `${anchor.conv_id ? ', shown with surrounding context' : ' (no conversation recorded for this row)'}</p>` +
+      `<div class="charge">${msgBubbles([...before, ...rows, ...after], null, dim)}</div></div>` +
       SCROLL_TO_HIT;
     return page(`m${start}-m${end} — ${anchor.conversation || 'range'}`, body, '/');
   } finally {
@@ -626,8 +647,24 @@ function fmtMs(ms) {
   if (ms < 90_000) return `${(ms / 1000).toFixed(1)}s`;
   return `${Math.round(ms / 60_000)}m`;
 }
+// Runs-ledger timestamp, in PACIFIC (the timezone everything else in this repo
+// prints — see lib/weeks). Recent runs read "today 14:32" / "yesterday 09:15" /
+// "3 days ago 18:40"; past a week it falls back to the plain Pacific date.
+function pacDayIndex(dstr) {
+  const [y, m, d] = dstr.split('-').map(Number);
+  return Math.floor(Date.UTC(y, m - 1, d) / 86400000);
+}
 function fmtWhen(ts) {
-  return new Date(ts).toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
+  const local = ptLocal(ts);       // "YYYY-MM-DD HH:MM" in Pacific
+  const hm = local.slice(11);
+  const dkey = local.slice(0, 10);
+  const diff = pacDayIndex(ptDateKey(Date.now())) - pacDayIndex(dkey);
+  let label;
+  if (diff <= 0) label = 'today';
+  else if (diff === 1) label = 'yesterday';
+  else if (diff <= 7) label = `${diff} days ago`;
+  else label = dkey;
+  return `${label} ${hm}`;
 }
 
 function fmtAgo(ms) {
@@ -650,27 +687,68 @@ function backupAgeMs(now) {
   } catch { return null; }
 }
 
-function dial(label, cadence, sinceMs, intervalMs, job) {
-  // `job` is the kind the dial's own trigger button submits (sweep/deep-sweep/
-  // ingest/todo). Never run yet: an empty ring, not a full one — a null `sinceMs`
-  // otherwise read as "a whole interval elapsed" and drew a misleading full arc.
+function dial(label, cadence, sinceMs, intervalMs, job, sched) {
+  // `job` is the kind the dial's own trigger button submits. `sched`, when given,
+  // is the REAL cron ({ prevFire, nextFire } in ms): the countdown targets the next
+  // scheduled fire (e.g. next Monday 04:00), NOT `interval - sinceMs`. The old
+  // rolling model counted a full interval from the LAST run — so a manual run reset
+  // it and a weekly job wrongly showed ~7 days instead of "til next Monday".
+  const now = Date.now();
+  const since = sinceMs == null ? 'not yet run' : `${fmtAgo(sinceMs)} ago`;
+  if (sched) {
+    const remaining = Math.max(0, sched.nextFire - now);
+    const fraction = (now - sched.prevFire) / (sched.nextFire - sched.prevFire);
+    // Stale (red) = a full period-and-a-half elapsed since the last actual run, so
+    // the schedule may have stopped. A manual run legitimately resets this.
+    const stale = sinceMs != null && sinceMs > intervalMs * 1.5;
+    return {
+      label, cadence, job, since,
+      center: fmtAgo(remaining), centerSub: 'til next',
+      fraction: Math.max(0, Math.min(1, fraction)), overdue: stale,
+    };
+  }
+  // Fallback rolling model (dials with no fixed schedule).
   if (sinceMs == null) {
     return { label, cadence, job, since: 'not yet run', center: '—', centerSub: 'never', fraction: 0, overdue: false };
   }
   const remaining = intervalMs - sinceMs;
   const overdue = remaining < 0;
   return {
-    label, cadence, job,
-    since: `${fmtAgo(sinceMs)} ago`,
+    label, cadence, job, since,
     center: overdue ? `+${fmtAgo(-remaining)}` : fmtAgo(remaining),
     centerSub: overdue ? 'overdue' : 'til next',
     fraction: sinceMs / intervalMs, overdue,
   };
 }
 
+// Estimated cost of ingesting each contact's WAITING messages, for the confirm
+// modal. One lightweight query per waiting contact (timestamps + body lengths
+// only, never the bodies), bucketed into active weeks = merge calls. Cost is
+// call-count-dominated (see lib/cost.js), so this is a real estimate, not a
+// guess — but an estimate all the same. Attaches { estCalls, estCostUsd } to
+// each roster row; estCostUsd is null when the model has no known price.
+function attachPendingCosts(roster) {
+  const waiting = roster.filter((x) => x.waiting > 0);
+  if (!waiting.length) return roster;
+  const cdb = openCrmDb();
+  try {
+    const q = cdb.prepare('SELECT sent_at, length(body) AS blen FROM messages WHERE contact_slug = ? AND id > ? ORDER BY id');
+    for (const x of waiting) {
+      const rows = q.all(x.slug, x.cursor || 0);
+      const est = estIngestFromRows(MERGE_MODEL, COMPACT_MODEL, rows);
+      x.estCalls = est.calls;
+      x.estCostUsd = est.usd; // dollars, 0 for subscription models, null if unpriced
+      x.estDurSec = est.seconds; // wall-clock estimate (merges run sequentially)
+    }
+  } finally {
+    cdb.close();
+  }
+  return roster;
+}
+
 function adminData() {
   const now = Date.now();
-  const roster = contactList();
+  const roster = attachPendingCosts(contactList());
   let kept = 0;
   let span = '—';
   const cdb = openCrmDb();
@@ -706,11 +784,18 @@ function adminData() {
   // maps to a real registered task (tools/register-*.ps1): sweep is the hourly
   // archive copy; the deep sweep is a daily full re-walk; ingest and compact are
   // the two steps of the weekly Monday run, so they share its clock.
+  // Real cron schedules (tools/register-*.ps1): archive sweep + todo at the top of
+  // every hour; deep sweep daily 03:00 Pacific; the weekly AI run Monday 04:00
+  // Pacific. Each dial counts down to its NEXT fire, not a rolling interval.
+  const nextHour = Math.ceil(now / HOUR) * HOUR;
+  const nextDeep = nextPacificDaily(3, 0, now);
+  const prevMon = weekStart(now);
+  const nextMon = nextWeekStart(prevMon);
   const dials = [
-    dial('Sweep', 'hourly', sweepMs, HOUR, 'sweep'),
-    dial('Deep sweep', 'daily', deepMs, DAY, 'deep-sweep'),
-    dial('Ingest', 'weekly · Mondays', ingestMs, 7 * DAY, 'ingest'),
-    dial('Todo', 'hourly · after sweep', todoMs, HOUR, 'todo'),
+    dial('Sweep', 'hourly', sweepMs, HOUR, 'sweep', { prevFire: nextHour - HOUR, nextFire: nextHour }),
+    dial('Deep sweep', 'daily · 3am', deepMs, DAY, 'deep-sweep', { prevFire: nextDeep - DAY, nextFire: nextDeep }),
+    dial('Ingest', 'weekly · Mon 4am', ingestMs, 7 * DAY, 'ingest', { prevFire: prevMon, nextFire: nextMon }),
+    dial('Todo', 'hourly · after sweep', todoMs, HOUR, 'todo', { prevFire: nextHour - HOUR, nextFire: nextHour }),
   ];
   return { health, roster, dials };
 }
@@ -722,11 +807,17 @@ function adminData() {
 const JOB_MODAL_JS = `<script>(function(){
   var form=document.querySelector('form[action="/admin/jobs"]');
   if(!form)return;
+  // Model context for the estimate line. ingest is "free" only if BOTH halves
+  // (merge + Timeline) run on subscription auth.
+  var COST={model:${JSON.stringify(MERGE_MODEL.split('/').pop())},free:${isFree(MERGE_MODEL) && isFree(COMPACT_MODEL)}};
+  function fmtUsd(v){if(!(v>0))return '$0';if(v<0.01)return '<$0.01';if(v<10)return '$'+v.toFixed(2);if(v<100)return '$'+v.toFixed(1);return '$'+Math.round(v);}
+  function fmtDur(sec){sec=Math.round(sec);if(!(sec>0))return '~0s';if(sec<90)return '~'+sec+'s';var m=Math.round(sec/60);if(m<60)return '~'+m+'m';return '~'+Math.floor(m/60)+'h '+(m%60)+'m';}
   var ov=document.createElement('div');ov.className='modal';ov.hidden=true;
   ov.innerHTML='<div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="mTitle">'
     +'<div class="modal-stamp" id="mStamp"></div>'
     +'<h2 class="modal-title" id="mTitle"></h2>'
     +'<div class="modal-meta" id="mMeta"></div>'
+    +'<div class="modal-cost" id="mCost"></div>'
     +'<div class="modal-whoh" id="mWhoH"></div>'
     +'<ul class="modal-who" id="mWho"></ul>'
     +'<div class="modal-acts"><button type="button" class="btn" data-x="cancel">Cancel</button>'
@@ -741,23 +832,41 @@ const JOB_MODAL_JS = `<script>(function(){
     return a?a.textContent.trim():slug;
   }
   function modOn(name){var el=form.querySelector('input[name='+name+']');return !!(el&&el.checked);}
+  // Estimate line for the run about to happen. Sweeps are free; todo only spends
+  // on a match; ingest sums the per-person data-cost of the boxes being run.
+  function costLine(kind,isSweep,runBoxes){
+    var el=document.getElementById('mCost');
+    if(isSweep){el.textContent='Est. — free · no model call · seconds';return;}
+    if(kind==='todo'){el.textContent='Est. — $0 unless a "make sure" line matches';return;}
+    var sum=0,calls=0,dur=0,unknown=false;
+    runBoxes.forEach(function(c){
+      var d=c.getAttribute('data-cost'),k=parseInt(c.getAttribute('data-calls')||'0',10);
+      dur+=parseInt(c.getAttribute('data-dur')||'0',10);
+      calls+=k;
+      if(d===''||d==null){if(k>0)unknown=true;}else{sum+=parseFloat(d);}
+    });
+    var money=COST.free?('$0 · '+COST.model+' (sub)'):((unknown?'—':fmtUsd(sum))+' · '+COST.model);
+    el.textContent='Est. '+money+'  ·  '+fmtDur(dur)+'  ·  '+calls+(calls===1?' week':' weeks');
+  }
   function open(btn){
     pending=btn;
     var val=btn.value,i=val.indexOf(':');
     var kind=i===-1?val:val.slice(0,i),one=i===-1?null:val.slice(i+1);
     var isSweep=kind==='sweep'||kind==='deep-sweep';
-    var everyone=false,who;
-    if(one){who=[nameFor(one)];}
-    else if(kind==='todo'){everyone=true;who=boxes().map(function(c){return nameFor(c.value);});}
+    var everyone=false,runBoxes;
+    if(one){runBoxes=boxes().filter(function(c){return c.value===one;});}
+    else if(kind==='todo'){everyone=true;runBoxes=boxes();}
     else{
       var checked=boxes().filter(function(c){return c.checked;});
-      if(checked.length){who=checked.map(function(c){return nameFor(c.value);});}
-      else{everyone=true;who=boxes().map(function(c){return nameFor(c.value);});}
+      if(checked.length){runBoxes=checked;}
+      else{everyone=true;runBoxes=boxes();}
     }
+    var who=runBoxes.map(function(c){return nameFor(c.value);});
     var kindLabel=kind==='deep-sweep'?'deep sweep':kind;
     document.getElementById('mStamp').textContent=kindLabel;
     document.getElementById('mTitle').textContent='Run '+kindLabel;
     document.getElementById('mMeta').textContent=isSweep?'Free — copies messages into the archive, no model.':(kind==='todo'?'Scans for "make sure" commitments; a model runs only on a match.':'Calls the model — ingest, then Timeline.');
+    costLine(kind,isSweep,runBoxes);
     document.getElementById('mWhoH').textContent=(kind==='todo'?'Whole archive — ':(everyone?'Everyone — ':''))+'will run on '+who.length+(who.length===1?' person':' people');
     var ul=document.getElementById('mWho');ul.innerHTML='';
     who.forEach(function(nm){var li=document.createElement('li');li.textContent=nm;ul.appendChild(li);});
@@ -799,7 +908,7 @@ function rowForRun(r) {
       scope: r.only || 'everyone',
       examined: String(r.seen ?? ''),
       held: `${r.inserted ?? 0} new`,
-      took, ok: true,
+      cost: 'free', actual: 'free', took, ok: true,
       note: r.reuse ? 'rowid reuse detected' : `${r.inserted ?? 0} message(s) archived`,
     };
   }
@@ -810,7 +919,7 @@ function rowForRun(r) {
       scope: r.only || 'everyone',
       examined: String(r.scanned ?? ''),
       held: `${r.changed ?? 0} changed`,
-      took, ok: true,
+      cost: costCell(r), actual: actualCell(r), took, ok: true,
       note: `${r.summaries ?? 0} summary line(s)`,
     };
   }
@@ -821,7 +930,7 @@ function rowForRun(r) {
       scope: 'everyone',
       examined: String(r.scanned ?? ''),
       held: `${r.inserted ?? 0} task(s)`,
-      took, ok: true,
+      cost: r.triggers ? costCell(r) : 'free', actual: r.triggers ? actualCell(r) : 'free', took, ok: true,
       note: r.triggers ? `${r.triggers} trigger(s)` : 'no triggers',
     };
   }
@@ -833,10 +942,51 @@ function rowForRun(r) {
     scope: r.only || 'everyone',
     examined: String(r.messagesMerged ?? r.contactsWithActivity ?? ''),
     held: `${(r.merged || []).length} ppl`,
-    took, ok: failures === 0,
+    cost: r.dryRun ? 'free' : costCell(r), actual: r.dryRun ? 'free' : actualCell(r), took, ok: failures === 0,
     note: failures
       ? `${failures} merge failure(s)`
       : ((r.warnings || []).length ? `${r.warnings.length} warning(s)` : `${r.chunksMerged ?? 0} chunk(s) ingested`),
+  };
+}
+
+// The ESTIMATED-cost cell for a model-calling run. Records written before cost
+// tracking have no costUsd field (undefined) → "—"; a subscription model is free.
+function costCell(r) {
+  if (r.costUsd === undefined && r.costModel === undefined) return '—';
+  if (isFree(r.costModel)) return fmtUsd(0, { free: true });
+  return fmtUsd(r.costUsd == null ? null : r.costUsd);
+}
+
+// The ACTUAL-cost cell, summed from pi's real session usage after the run.
+// Subscription models are $0; anything not captured (legacy rows, capture
+// failed, todo) reads "—".
+function actualCell(r) {
+  if (isFree(r.costModel)) return fmtUsd(0, { free: true });
+  return fmtUsd(r.actualCostUsd == null ? null : r.actualCostUsd);
+}
+
+// The in-flight job as a ledger row, so a run shows up the moment it starts —
+// clickable through to the live monitor. Progress/ETA come from the streamed log.
+function liveJobRow() {
+  if (!job || !job.running) return null;
+  const elapsedMs = Date.now() - job.startedAt;
+  const prog = parseJobProgress(job.buf, elapsedMs);
+  const kind = job.kind === 'deep-sweep' ? 'sweep' : job.kind;
+  let pass;
+  let held;
+  let took;
+  if (prog) {
+    pass = prog.phase === 'timeline' ? 'building timeline' : `chunk ${prog.done}/${prog.total}`;
+    held = prog.phase === 'ingest' ? `${prog.pct}%` : '···';
+    took = fmtMs(elapsedMs) + (prog.etaMs != null ? ` · ~${fmtMs(prog.etaMs)} left` : '');
+  } else {
+    pass = 'starting…'; held = ''; took = fmtMs(elapsedMs);
+  }
+  return {
+    live: true, href: '/admin/jobs/current',
+    t: 'now', kind, pass, scope: job.scope,
+    examined: '', held, cost: '', actual: '', took, ok: true,
+    note: 'monitor live →',
   };
 }
 
@@ -852,8 +1002,14 @@ function runsPage() {
       if (r.kind === 'todo' && !r.triggers && !r.inserted) return false;
       return true;
     })
-    .map(rowForRun);
-  return page('Runs — personal-crm', render(V.runs(records).body));
+    // Each completed row links to its own detail page (steps, chunks, and log).
+    .map((r) => { const row = rowForRun(r); row.href = r.id ? `/runs/${r.id}` : null; return row; });
+  const live = liveJobRow();
+  const rows = live ? [live, ...records] : records;
+  // Keep the ledger fresh while something runs: the live row updates and turns
+  // into a completed row on its own once the run lands its record.
+  const refresh = job && job.running ? '<script>setTimeout(function(){location.reload();},5000);</script>' : '';
+  return page('Runs — personal-crm', render(V.runs(rows).body) + refresh);
 }
 
 function runDetailPage(id) {
@@ -919,10 +1075,29 @@ function runDetailPage(id) {
         : `${cc.cited} cited ids across ${cc.files} files, all resolve`) + `</p>`
     : '';
 
+  // Full run log, persisted per-run by crm-daily. Collapsed by default (long),
+  // open automatically if the run failed so the error is right there.
+  let logHtml = '';
+  try {
+    const logText = fs.readFileSync(path.join(RUNS_DIR, `${id}.log`), 'utf8');
+    if (logText.trim()) {
+      const failed = (run.mergeFailures || []).length > 0;
+      logHtml = `<h2>Log</h2><details class="step"${failed ? ' open' : ''}>` +
+        `<summary><span class="nm">full run output</span></summary>` +
+        `<pre class="log">${esc(logText)}</pre></details>`;
+    }
+  } catch { /* older runs have no persisted log */ }
+
+  // Estimated vs actual cost + duration for this run, when recorded.
+  const money = (v, model) => (isFree(model) ? '$0 · sub' : fmtUsd(v == null ? null : v));
+  const costHtml = (run.costUsd !== undefined || run.actualCostUsd !== undefined)
+    ? `<span class="sub"> · cost est ${esc(money(run.costUsd, run.costModel))} · actual ${esc(money(run.actualCostUsd, run.costModel))}</span>`
+    : '';
+
   const body = `<div class="back"><a href="/runs">&larr; All runs</a></div>` +
     `<header class="top"><h1>Run ${esc(fmtWhen(run.startedAt))}</h1>` +
-    `<span class="sub">${esc(runMode(run))} · ${fmtMs(run.durationMs)}</span>${modelsHtml}</header>` +
-    `<h2>Steps</h2>${stepsHtml}${contactsHtml}${compactCiteHtml}${warnHtml}`;
+    `<span class="sub">${esc(runMode(run))} · ${fmtMs(run.durationMs)}</span>${modelsHtml}${costHtml}</header>` +
+    `<h2>Steps</h2>${stepsHtml}${contactsHtml}${compactCiteHtml}${warnHtml}${logHtml}`;
   return page(`Run ${run.id}`, body, '/runs');
 }
 
@@ -1295,10 +1470,31 @@ function runQueue(cmds, i) {
   });
 }
 
+// Chunk-level progress, parsed from the streamed crm-daily output. crm-daily
+// prints `[4] merge <slug> i/total (...): ok, cursor -> …` per completed chunk and
+// a `[i/total …]` banner per chunk started, so the highest total seen is the plan
+// size and the count of "ok, cursor ->" lines is chunks done. ETA extrapolates the
+// live per-chunk rate; the Timeline (compaction) phase is indeterminate.
+function parseJobProgress(buf, elapsedMs) {
+  const s = String(buf || '');
+  const marks = [...s.matchAll(/[\[ ](\d+)\/(\d+)[\s(\]]/g)];
+  let total = null;
+  for (const m of marks) { const t = +m[2]; if (t > 1 && t < 1000) total = t; }
+  if (total == null) return null;
+  const done = (s.match(/: ok, cursor ->/g) || []).length;
+  const timeline = /\[5\] timeline|crm-compact:/.test(s);
+  const phase = (done >= total || timeline) ? 'timeline' : 'ingest';
+  let etaMs = null;
+  if (phase === 'ingest' && done > 0 && elapsedMs > 0) etaMs = Math.max(0, (total - done) * (elapsedMs / done));
+  return { total, done, phase, fraction: Math.max(0, Math.min(1, done / total)), etaMs };
+}
+
 // Shape the in-memory job for the V.job monitor component and status.json.
 function jobToView() {
   if (!job) return null;
   const status = job.running ? 'running' : (job.exit ? 'failed' : 'done');
+  const elapsedMs = (job.endedAt || Date.now()) - job.startedAt;
+  const prog = job.running ? parseJobProgress(job.buf, elapsedMs) : null;
   const step = job.total > 1
     ? (job.running ? `person ${job.done + 1} of ${job.total}` : `${job.done} of ${job.total} done`)
     : (job.running ? 'running' : status);
@@ -1308,9 +1504,14 @@ function jobToView() {
     scope: job.scope,
     status,
     startedAt: new Date(job.startedAt).toISOString().slice(11, 19) + ' UTC',
-    elapsed: fmtMs((job.endedAt || Date.now()) - job.startedAt),
+    elapsed: fmtMs(elapsedMs),
     step,
     model: job.kind === 'sweep' ? 'no model' : MERGE_MODEL,
+    progress: prog ? {
+      total: prog.total, done: prog.done, phase: prog.phase,
+      pct: Math.round(prog.fraction * 100),
+      eta: prog.etaMs != null ? fmtMs(prog.etaMs) : null,
+    } : null,
     log: job.buf || '(no output yet)',
   };
 }
@@ -1332,6 +1533,12 @@ function jobPage() {
         if(!d.job) return;
         var pre=document.querySelector('.joblog');
         if(pre){pre.textContent=d.job.log;pre.scrollTop=pre.scrollHeight;}
+        var pg=d.job.progress,fill=document.getElementById('pbarFill'),bar=document.getElementById('pbar'),lab=document.getElementById('progLab');
+        if(pg&&fill&&bar&&lab){
+          bar.setAttribute('data-phase',pg.phase);
+          fill.style.width=(pg.phase==='ingest'?pg.pct:100)+'%';
+          lab.textContent=pg.phase==='timeline'?('ingest complete ('+pg.total+'/'+pg.total+') · building Timeline…'):('ingesting · chunk '+pg.done+'/'+pg.total+(pg.eta?' · ~'+pg.eta+' left':''));
+        }
         if(d.job.status==='running'){setTimeout(tick,1500);}else{location.reload();}
       }).catch(function(){setTimeout(tick,2500);});
     }

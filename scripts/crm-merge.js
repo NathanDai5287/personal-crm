@@ -20,8 +20,26 @@
 const fs = require('fs');
 const path = require('path');
 const { execFileSync, spawnSync } = require('child_process');
-const { ROOT, PI_CLI, MERGE_MODEL, MERGE_PROMPT } = require('../lib/config');
+const { ROOT, DATA_DIR, PI_CLI, MERGE_MODEL, MERGE_PROMPT } = require('../lib/config');
 const { dateKey } = require('../lib/weeks');
+const { sumSessionCostUsd } = require('../lib/cost');
+const { detect, learn, redact } = require('../lib/redact');
+
+// Bucket a failed pi run so the retry loop knows what to do:
+//   content_filter — a provider rejected the prompt on content grounds; retrying
+//                    verbatim is pointless, but masking the trigger and retrying is
+//                    not (see the auto-remediation in mergeContact).
+//   auth           — bad/absent credentials; retrying will never help. Surface now.
+//   transient      — rate limit, 5xx, timeout, socket/DNS. Back off and retry.
+//   unknown        — anything else; treated as transient (bounded retries).
+function classifyPiError(text) {
+  const t = String(text || '').toLowerCase();
+  if (/content_filter|considered high risk|content policy|content[ _]moderation/.test(t)) return 'content_filter';
+  if (/\b40[13]\b|unauthor|invalid[ _]api[ _]key|no api key|missing api key|authentication|forbidden/.test(t)) return 'auth';
+  if (/\b429\b|rate[ _-]?limit|too many requests|overloaded|capacity|quota/.test(t)) return 'transient';
+  if (/\b5\d\d\b|timeout|timed out|etimedout|econnreset|econnrefused|socket hang|network|fetch failed|enotfound|eai_again|esockettimedout/.test(t)) return 'transient';
+  return 'unknown';
+}
 
 // The default user turn. Prompt variants may replace it (see opts.userMessage):
 // one of the review's high-severity findings is that ALL run-specific context —
@@ -172,7 +190,25 @@ function mergeContact(slug, opts = {}) {
     return { ok: false, error };
   }
 
-  const piArgs = buildArgs(slug, mergePromptText, opts);
+  // ACTUAL-COST CAPTURE. Production is normally --no-session (no copies of private
+  // content outside data/). To read back pi's real per-turn cost we point this one
+  // merge at a THROWAWAY session dir UNDER data/ (already gitignored, never
+  // committed), sum its usage after the run, then delete it in `finally` — so
+  // nothing accumulates and the privacy rationale holds. Evals that pass their own
+  // sessionDir keep it: we read cost from it but never delete it. Dry-runs create
+  // nothing.
+  let tempSession = null;
+  let sessionDir = opts.sessionDir || null;
+  if (!dryRun && !sessionDir) {
+    try {
+      const base = path.join(DATA_DIR, '_session-tmp');
+      fs.mkdirSync(base, { recursive: true });
+      tempSession = fs.mkdtempSync(path.join(base, 'm-'));
+      sessionDir = tempSession;
+    } catch { tempSession = null; sessionDir = null; }
+  }
+
+  const piArgs = buildArgs(slug, mergePromptText, { ...opts, sessionDir });
   const argv = [process.execPath, PI_CLI, ...piArgs];
 
   if (dryRun) {
@@ -185,45 +221,100 @@ function mergeContact(slug, opts = {}) {
     return { ok: true, dryRun: true, argv, cwd };
   }
 
+  // RETRY WITH ERROR HANDLING. A weekly run must not fail on a transient blip, so
+  // transient errors back off and retry up to `maxAttempts`; only an exhausted or
+  // unrecoverable error surfaces. content_filter is special: retrying verbatim is
+  // useless, but naming the slur, masking it in the ledger, and retrying is not —
+  // so those auto-remediate (and the learned word is censored from then on).
+  const maxAttempts = opts.maxAttempts != null ? opts.maxAttempts : Number(process.env.CRM_MERGE_RETRIES || 3);
+  const ledgerPath = path.join(cwd, 'data', 'contacts', '_refresh', `${slug}.new.txt`);
+  const piEnv = { ...process.env, PI_SKIP_VERSION_CHECK: '1', PI_OFFLINE: '1' };
+  let attempt = 0;
+  let remediations = 0;
+  let lastError = null;
+  let lastClass = null;
   try {
-    const piEnv = { ...process.env, PI_SKIP_VERSION_CHECK: '1', PI_OFFLINE: '1' };
-    let output;
-    if (opts.stream) {
-      // PRODUCTION (crm-daily) path. execFileSync buffers pi's whole run and
-      // returns it only at exit, so anyone tailing this process — the web job
-      // monitor tails crm-daily's stdout — sees a multi-minute silence, then a
-      // single "ok". Stream instead: inherit pi's stdout/stderr straight onto
-      // ours so the model's work shows up live. Output is NOT captured here
-      // (nothing on this path reads it; evals use the capture branch below). The
-      // banner names the model and chunk so the monitor labels each call.
-      console.log(`crm-merge: ${slug}: -> ${opts.model || MERGE_MODEL}${opts.label ? ` [${opts.label}]` : ''} ...`);
-      const r = spawnSync(process.execPath, [PI_CLI, ...piArgs], {
-        cwd,
-        stdio: ['ignore', 'inherit', 'inherit'],
-        timeout: 600_000,
-        env: piEnv,
-      });
-      if (r.error) throw r.error;
-      if (r.status !== 0) throw new Error(`pi exited ${r.status}${r.signal ? ` on ${r.signal}` : ''} (see output above)`);
-      output = '';
-    } else {
-      output = execFileSync(process.execPath, [PI_CLI, ...piArgs], {
-        cwd,
-        encoding: 'utf8',
-        timeout: 600_000, // backfill ledgers can be thousands of messages; give the model room
-        maxBuffer: 16 * 1024 * 1024,
-        env: piEnv,
-      });
+    while (true) {
+      attempt += 1;
+      let stderrCap = '';
+      try {
+        let output;
+        if (opts.stream) {
+          // PRODUCTION (crm-daily) path. stdout stays inherited so the model's work
+          // shows live in the monitor; stderr is PIPED so a provider error (e.g. a
+          // 400 content_filter) can be read back and classified, then re-emitted so
+          // the monitor still shows it.
+          console.log(`crm-merge: ${slug}: -> ${opts.model || MERGE_MODEL}${opts.label ? ` [${opts.label}]` : ''}${attempt > 1 ? ` (attempt ${attempt})` : ''} ...`);
+          const r = spawnSync(process.execPath, [PI_CLI, ...piArgs], {
+            cwd, stdio: ['ignore', 'inherit', 'pipe'], timeout: 600_000, env: piEnv,
+            encoding: 'utf8', maxBuffer: 16 * 1024 * 1024,
+          });
+          stderrCap = r.stderr || '';
+          if (stderrCap) process.stderr.write(stderrCap);
+          if (r.error) throw r.error;
+          if (r.status !== 0) throw new Error(`pi exited ${r.status}${r.signal ? ` on ${r.signal}` : ''} (see output above)`);
+          output = '';
+        } else {
+          output = execFileSync(process.execPath, [PI_CLI, ...piArgs], {
+            cwd, encoding: 'utf8', timeout: 600_000, maxBuffer: 16 * 1024 * 1024, env: piEnv,
+          });
+        }
+        const fixed = normalizeLastContact(slug, cwd);
+        if (fixed && fixed.error) console.log(`crm-merge: ${slug}: Last contact NOT normalised: ${fixed.error}`);
+        else if (fixed) console.log(`crm-merge: ${slug}: Last contact ${fixed.from} -> ${fixed.to} (derived)`);
+        // Real billed cost of this merge, summed from pi's session usage (all
+        // attempts' sessions land in the same dir, so this is the true total spend).
+        let costUsd = null;
+        if (sessionDir) { const c = sumSessionCostUsd(sessionDir); if (c) costUsd = c.costUsd; }
+        console.log(`crm-merge: ${slug}: ok${costUsd != null ? ` ($${costUsd.toFixed(4)})` : ''}${attempt > 1 ? ` (attempt ${attempt})` : ''}`);
+        return { ok: true, output, costUsd, attempts: attempt, lastContactFixed: fixed || undefined };
+      } catch (e) {
+        lastError = String((e && e.stderr) || stderrCap || (e && e.message) || e).slice(0, 2000);
+        lastClass = classifyPiError(lastError);
+        // If we couldn't capture the error text but the ledger holds a known slur,
+        // it is almost certainly a content filter — treat it as one.
+        if (lastClass === 'unknown') {
+          try { if (detect(fs.readFileSync(ledgerPath, 'utf8')).length) lastClass = 'content_filter'; } catch { /* no ledger */ }
+        }
+
+        if (lastClass === 'content_filter') {
+          // AUTO-REMEDIATE: name the culprit, learn it (persisted, censored from now
+          // on), mask the ledger in place, and retry. Bounded so a filter we can't
+          // localize can't loop forever.
+          if (remediations < 2) {
+            remediations += 1;
+            let learned = [];
+            let masked = false;
+            try {
+              const led = fs.readFileSync(ledgerPath, 'utf8');
+              learned = learn(detect(led));
+              const red = redact(led);
+              if (red !== led) { fs.writeFileSync(ledgerPath, red); masked = true; }
+            } catch { /* ledger unreadable — fall through to surface */ }
+            if (masked) {
+              console.log(`crm-merge: ${slug}: content filter — auto-censored ${learned.length ? `new trigger(s) [${learned.join(', ')}]` : 'known trigger(s)'} in the ledger, retrying`);
+              continue;
+            }
+          }
+          console.log(`crm-merge: ${slug}: FAIL — content filter with no maskable trigger found (needs manual review): ${lastError.slice(0, 160)}`);
+          break;
+        }
+        if (lastClass === 'auth') {
+          console.log(`crm-merge: ${slug}: FAIL — auth error, not retrying: ${lastError.slice(0, 160)}`);
+          break;
+        }
+        if (attempt >= maxAttempts) {
+          console.log(`crm-merge: ${slug}: FAIL — ${lastClass} error, ${attempt}/${maxAttempts} attempts exhausted: ${lastError.slice(0, 160)}`);
+          break;
+        }
+        const backoffMs = Math.min(60_000, 5_000 * (3 ** (attempt - 1))); // 5s, 15s, 45s
+        console.log(`crm-merge: ${slug}: ${lastClass} error on attempt ${attempt}/${maxAttempts}, retrying in ${Math.round(backoffMs / 1000)}s: ${lastError.slice(0, 120)}`);
+        try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, backoffMs); } catch { /* SAB unavailable — retry immediately */ }
+      }
     }
-    const fixed = normalizeLastContact(slug, cwd);
-    if (fixed && fixed.error) console.log(`crm-merge: ${slug}: Last contact NOT normalised: ${fixed.error}`);
-    else if (fixed) console.log(`crm-merge: ${slug}: Last contact ${fixed.from} -> ${fixed.to} (derived)`);
-    console.log(`crm-merge: ${slug}: ok`);
-    return { ok: true, output, lastContactFixed: fixed || undefined };
-  } catch (e) {
-    const error = String((e && e.stderr) || (e && e.message) || e).slice(0, 2000);
-    console.log(`crm-merge: ${slug}: FAIL (${error.slice(0, 200)})`);
-    return { ok: false, error };
+    return { ok: false, error: lastError, errorClass: lastClass, attempts: attempt };
+  } finally {
+    if (tempSession) { try { fs.rmSync(tempSession, { recursive: true, force: true }); } catch { /* best-effort */ } }
   }
 }
 
@@ -239,4 +330,4 @@ if (require.main === module) {
   process.exit(result.ok ? 0 : 1);
 }
 
-module.exports = { mergeContact, buildArgs, normalizeLastContact };
+module.exports = { mergeContact, buildArgs, normalizeLastContact, classifyPiError };

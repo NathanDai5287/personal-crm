@@ -49,6 +49,7 @@ const {
 const { mergeContact } = require('./crm-merge');
 const { planAll, writeChunkLedger, chunkSummary } = require('./crm-refresh');
 const { validateCitations } = require('../lib/archive');
+const { mergeCallUsd } = require('../lib/cost');
 const { openCrmDb, openSignalDb } = require('../lib/signal-db');
 
 // REJECT UNKNOWN FLAGS BEFORE ANYTHING ELSE. Both flags here fail dangerously when
@@ -320,6 +321,17 @@ function main() {
   // earlier ones landed) but costs at most one chunk of re-work.
   const merged = [];
   const mergeFailures = [];
+  // Estimated merge-side (ingest) spend for this run, accrued one call per merged
+  // chunk from that chunk's real ledger size. Estimate only — see lib/cost.js.
+  // `mergeCostKnown` drops to false if the model isn't in pi's price catalog, so
+  // the record can honestly say "unknown" instead of a wrong $0.
+  let mergeCostUsd = 0;
+  let mergeCostKnown = true;
+  // ACTUAL merge spend, summed from each merge's real pi session usage (see
+  // crm-merge). Stays null until at least one chunk reports a captured cost, so
+  // the record distinguishes "nothing merged / not captured" from "$0".
+  let actualCostUsd = 0;
+  let actualCostSeen = false;
   if (!fatal && plans.length > 0) {
     if (DRY_RUN) {
       logLines.push('[4] merge PLANNING (--dry-run, pi not invoked):');
@@ -384,6 +396,9 @@ function main() {
             atomicWriteJson(REFRESH_STATE, state);
             detail.ok = true;
             detail.cursorAfter = chunk.ridEnd;
+            const cc = mergeCallUsd(MERGE_MODEL, { ledgerTokens: chunk.tokens });
+            if (cc == null) mergeCostKnown = false; else mergeCostUsd += cc;
+            if (result.costUsd != null) { actualCostUsd += result.costUsd; actualCostSeen = true; }
             logLines.push(`[4] merge ${p.slug} ${i + 1}/${total} (${chunk.label}, ${chunk.count} msgs): ok, cursor -> ${chunk.ridEnd}`);
 
             // PROVENANCE CHECK (non-fatal): every ⟨m…⟩ id the model cited must
@@ -418,7 +433,7 @@ function main() {
             }
           } else {
             contactFailed = true;
-            mergeFailures.push({ slug: p.slug, chunk: chunk.label, chunkIndex: i + 1, chunkTotal: total, error: result.error });
+            mergeFailures.push({ slug: p.slug, chunk: chunk.label, chunkIndex: i + 1, chunkTotal: total, error: result.error, errorClass: result.errorClass, attempts: result.attempts });
             detail.error = result.error;
             logLines.push(`[4] merge ${p.slug} ${i + 1}/${total} (${chunk.label}): FAILED — cursor NOT advanced, ` +
               `remaining ${total - i - 1} chunk(s) deferred to the next run: ${result.error}`);
@@ -507,6 +522,15 @@ function main() {
     // is always attributable to a model — the whole point of being able to A/B
     // MERGE_MODEL on one contact and compare the output.
     models: { merge: MERGE_MODEL, compact: COMPACT_MODEL },
+    // Estimated merge-side spend (this record's half of the combined job; the
+    // Timeline half is priced in crm-compact's own record). null = model not in
+    // pi's price catalog. See lib/cost.js — an estimate, never a bill.
+    costUsd: mergeCostKnown ? mergeCostUsd : null,
+    // Real billed merge cost, summed from pi's session usage per chunk. null when
+    // no chunk reported usage (nothing merged, or capture failed). This is the
+    // "actual" the ledger shows against the estimate above.
+    actualCostUsd: actualCostSeen ? actualCostUsd : null,
+    costModel: MERGE_MODEL,
     promoted,
     contactsWithActivity: plans.length,
     totalChunks,
@@ -541,6 +565,9 @@ function main() {
       preSha,
       postSha,
     });
+    // Full human log for this run, so /admin/runs/<id> can show what happened
+    // (the record's per-step notes are truncated). Keyed by the same runId.
+    try { fs.writeFileSync(path.join(runsDir, `${runId}.log`), logLines.join('\n')); } catch { /* non-fatal */ }
     const oneLine = `${nowIso()} durationMs=${summary.durationMs} promoted=${promoted} activity=${plans.length} chunks=${summary.chunksMerged}/${totalChunks} merged=${merged.length} mergeFailures=${mergeFailures.length} compactChanged=${compactChanged} warnings=${warnings.length}`;
     fs.appendFileSync(path.join(LOGS_DIR, 'daily.log'), `${oneLine}\n${logLines.join('\n')}\n`);
   } else {

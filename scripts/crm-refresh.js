@@ -41,6 +41,7 @@ const { openSignalDb, openCrmDb } = require('../lib/signal-db');
 const { runSweep } = require('./crm-archive');
 const { resolveSources, buildArchiveQuery } = require('../lib/sources');
 const { fmtLocal, planChunks, lastCompleteWeekStart } = require('../lib/weeks');
+const { redact } = require('../lib/redact');
 const {
   TRACKED, NICKNAMES, REFRESH_STATE, REFRESH_DIR,
 } = require('../lib/config');
@@ -175,7 +176,7 @@ function writeChunkLedger(plan, chunk, chunkIndex, chunkTotal, dir = REFRESH_DIR
   const lines = chunk.msgs.map((m) => {
     const label = plan.sources.labels[m.cid]; // set only for group conversations
     const ctx = label ? `(${label}) ` : '';
-    return `[${fmtLocal(m.sent_at)}] ⟨m${m.rid}⟩ ${ctx}${m.sender}: ${m.body}`;
+    return `[${fmtLocal(m.sent_at)}] ⟨m${m.rid}⟩ ${ctx}${m.sender}: ${redact(m.body)}`;
   });
 
   const srcBits = [];
