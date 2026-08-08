@@ -49,6 +49,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { execFileSync } = require('child_process');
+const { ensureMessagesTable } = require('../lib/archive');
 
 const REPO_ROOT = path.resolve(__dirname, '..');
 
@@ -193,20 +194,15 @@ const EMPTY_DIRS = [
 // Zero rows is not a detail: a fabricated archive row would be a citation target
 // that no real message backs, and `citations_resolve` resolves against the REAL
 // archive from lib/config.js, not against this file.
+//
+// The messages table itself is NOT declared here — it is built by calling
+// lib/archive.js's ensureMessagesTable() below, the same function production uses.
+// A second hand-written copy of that DDL drifted before (src/type were added to
+// archive.js's table once already) and would drift again silently; importing it
+// keeps this stand-in schema-identical to production by construction rather than
+// by remembering to update two files in lockstep.
 const CRM_DB_DDL = `
   PRAGMA journal_mode = delete;
-  CREATE TABLE IF NOT EXISTS messages (
-    id INTEGER PRIMARY KEY,
-    conv_id TEXT,
-    conversation TEXT,
-    contact_slug TEXT,
-    sent_at INTEGER NOT NULL,
-    sender TEXT NOT NULL,
-    body TEXT NOT NULL,
-    src TEXT,
-    type TEXT
-  );
-  CREATE INDEX IF NOT EXISTS idx_messages_conv_sent ON messages(conv_id, sent_at);
   CREATE TABLE IF NOT EXISTS contacts (
     file_path TEXT PRIMARY KEY,
     signal_id TEXT,
@@ -248,6 +244,7 @@ function crmDbTemplate() {
     const { DatabaseSync } = require('node:sqlite');
     const db = new DatabaseSync(file);
     db.exec(CRM_DB_DDL);
+    ensureMessagesTable(db); // single source of truth — see the comment above CRM_DB_DDL
     db.close();
     DB_CACHE = fs.readFileSync(file);
   } catch {

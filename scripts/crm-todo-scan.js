@@ -32,6 +32,8 @@ const { CRM_DB, DATA_DIR, TRACKED, ROOT } = require('../lib/config');
 const TRIGGER = require('../lib/task-trigger');
 const TASKS = require('../lib/tasks');
 const { extractFor } = require('./crm-tasks');
+const { redact } = require('../lib/redact');
+const { fmtLocal } = require('../lib/weeks');
 
 const STATE = path.posix.join(DATA_DIR, 'crm-todo-state.json');
 const MODEL = process.env.CRM_TODO_MODEL || 'moonshotai/kimi-k3';
@@ -51,17 +53,12 @@ function saveState(s) {
   fs.renameSync(tmp, STATE);
 }
 
-function fmtLocal(ms) {
-  const d = new Date(ms);
-  const p = (n) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
-}
-
 // Same shape crm-refresh writes, because lib/task-trigger.js parses that format and the
-// model's prompt documents it. Timestamps are LOCAL, i.e. Pacific, matching every other
-// ledger in the system.
+// model's prompt documents it. Timestamps are Pacific (lib/weeks.js fmtLocal, computed via
+// Intl, not the host clock), matching every other ledger in the system regardless of the
+// machine's own timezone.
 function renderLedger(rows) {
-  return rows.map((m) => `[${fmtLocal(m.sent_at)}] ⟨m${m.id}⟩ ${m.sender}: ${m.body}`).join('\n');
+  return rows.map((m) => `[${fmtLocal(m.sent_at)}] ⟨m${m.id}⟩ ${m.sender}: ${redact(m.body)}`).join('\n');
 }
 
 function contactsToScan(db) {
@@ -180,7 +177,7 @@ function main() {
       fs.writeFileSync(tmp, f.ledger);
       let res;
       try {
-        res = extractFor(f.slug, tmp, fmtLocal(Date.now()).slice(0, 10), { promptFile: PROMPT, model });
+        res = extractFor(f.slug, tmp, { promptFile: PROMPT, model });
       } catch (e) {
         console.log(`${f.slug}: FAILED (${String(e.message).slice(0, 120)}) — cursor NOT advanced`);
         continue;
@@ -214,13 +211,20 @@ function main() {
   }
   saveState(state);
   console.log(`\ninserted ${inserted} task(s)`);
-  if (write) recordTodoRun(startedAt, scanned, slugs.length, total, inserted);
+  if (write) recordTodoRun(startedAt, scanned, slugs.length, total, inserted, model);
 }
 
 // Record the scan in the /admin/runs ledger. Like sweeps, a no-op tick (no
 // triggers, nothing inserted) is written but hidden in the UI, so the hourly
 // cadence doesn't bury the runs that mattered. Non-fatal.
-function recordTodoRun(startedAt, scanned, contacts, triggers, inserted) {
+function recordTodoRun(startedAt, scanned, contacts, triggers, inserted, model = MODEL) {
+  // One model call per trigger (each "make sure" line is extracted on its own);
+  // a scan with no triggers spends nothing. Estimate only — see lib/cost.js.
+  let costUsd = null;
+  try {
+    const per = require('../lib/cost').compactCallUsd(model, { bucketTokens: 2_000 });
+    costUsd = per == null ? null : per * triggers;
+  } catch { /* pricing is best-effort */ }
   try {
     require('../lib/run-record').writeRunRecord({
       kind: 'todo',
@@ -231,6 +235,8 @@ function recordTodoRun(startedAt, scanned, contacts, triggers, inserted) {
       contacts,
       triggers,
       inserted,
+      costUsd,
+      costModel: model,
     });
   } catch (e) {
     console.log(`crm-todo-scan: run-record not written (non-fatal): ${e.message}`);

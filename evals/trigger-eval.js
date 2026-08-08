@@ -172,7 +172,7 @@ function main() {
       fs.writeFileSync(tmp, b.text);
       let res;
       try {
-        res = extractFor(b.slug, tmp, b.when.slice(0, 10), {
+        res = extractFor(b.slug, tmp, {
           promptFile: PROMPT, model, window: { before: b.before, after: b.after },
         });
       } catch (e) {

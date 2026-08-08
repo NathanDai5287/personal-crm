@@ -40,7 +40,7 @@ const TASKS = require('../lib/tasks');
 const TRIGGER = require('../lib/task-trigger');
 
 // Same template mechanism as compaction, different placeholders.
-const TASK_SLOTS = ['CONTACT_NAME', 'TODAY', 'MESSAGES'];
+const TASK_SLOTS = ['CONTACT_NAME', 'MESSAGES'];
 const PROMPT_FILE = process.env.CRM_TASKS_PROMPT || path.posix.join(ROOT, 'prompts', 'tasks-trigger.md');
 const MODEL = process.env.CRM_TASKS_MODEL || 'anthropic/claude-opus-5';
 const FREE_PREFIX = 'anthropic/';
@@ -104,7 +104,7 @@ function ledgerIds(text) {
 // opts.promptFile / opts.model override the module-level PROMPT_FILE and MODEL, which are
 // read once at require time and so cannot be varied per call by an env var. Kept for
 // testing a prompt variant against a fixture without touching the environment.
-function extractFor(slug, ledgerPath, today, opts = {}) {
+function extractFor(slug, ledgerPath, opts = {}) {
   const ledger = fs.readFileSync(ledgerPath, 'utf8');
   const ids = ledgerIds(ledger);
 
@@ -121,7 +121,6 @@ function extractFor(slug, ledgerPath, today, opts = {}) {
   const tpl = loadTemplate(opts.promptFile || PROMPT_FILE);
   const { user, system } = render(tpl, {
     CONTACT_NAME: opts.contactName || contactName(slug),
-    TODAY: today,
     MESSAGES: TRIGGER.renderWindows(windows),
   }, TASK_SLOTS);
   const raw = callModel(user, system, opts.model || MODEL);
@@ -172,10 +171,9 @@ function main() {
   const argv = process.argv.slice(2);
   const arg = (n, d) => { const i = argv.indexOf(n); return i === -1 ? d : argv[i + 1]; };
   const write = argv.includes('--write');
-  const today = arg('--today', new Date().toISOString().slice(0, 10));
 
   if (!fs.existsSync(PROMPT_FILE)) {
-    console.error(`no prompt at ${PROMPT_FILE} — write prompts/tasks.md first`);
+    console.error(`no prompt at ${PROMPT_FILE} — write prompts/tasks-trigger.md first`);
     process.exit(2);
   }
   if (!MODEL.startsWith(FREE_PREFIX) && !argv.includes('--allow-paid')) {
@@ -204,7 +202,7 @@ function main() {
       const lp = explicitLedger || path.posix.join(REFRESH_DIR, `${slug}.new.txt`);
       if (!fs.existsSync(lp)) { console.log(`${slug}: no ledger at ${lp} — skipped`); continue; }
       let res;
-      try { res = extractFor(slug, lp, today); } catch (e) {
+      try { res = extractFor(slug, lp); } catch (e) {
         console.log(`${slug}: FAILED (${String(e.message).slice(0, 140)})`);
         continue;
       }

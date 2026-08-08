@@ -3,7 +3,7 @@
 // A conversation (a 1:1 DM or a group) keeps its `## Timeline` at decreasing resolution:
 //   ### Recent (raw, last 7 days)   verbatim, rebuilt from the Signal DB each run (capped)
 //   ### Daily log (7–21 days)        one line per day
-//   ### Weekly log (3–10 weeks)      one line per ISO week
+//   ### Weekly log (3–10 weeks)      one line per Pacific calendar week (Mon 04:00)
 //   ### Older                        coarse/era notes (+ any pre-existing curated timeline)
 // Contact profiles also get:
 //   ### Group activity               folded day-summaries from groups they're in (capped)
@@ -31,7 +31,15 @@ const { openSignalDb, openCrmDb } = require("../lib/signal-db");
 const { render, loadTemplate } = require("../lib/compact-prompt");
 const { runSweep } = require("./crm-archive");
 const { resolveSources, groupOthers } = require("../lib/sources");
+const { redact } = require("../lib/redact");
+// Pacific, always — see lib/weeks.js header. dateKey/fmtLocal replace this file's old
+// getUTC*()-based dayKey/fmtTs (a message at 23:30 Pacific landed on the next UTC day),
+// and weekStart/nextWeekStart replace isoWeekKey's UTC-ISO week with the pipeline's own
+// Monday-04:00-Pacific week boundary, so the Timeline's tiers bucket the same way every
+// other ledger in the system does.
+const { dateKey, fmtLocal, weekStart, nextWeekStart } = require("../lib/weeks");
 const {
+  DATA_DIR,
   TRACKED,
   TRACKED_GROUPS,
   CONTACTS_DIR,
@@ -63,34 +71,20 @@ const argVal = (flag) => {
 const slugArg = argVal("--slug");
 const groupArg = argVal("--group");
 
-function pad(n) {
-  return String(n).padStart(2, "0");
-}
-function dayKey(ms) {
-  const d = new Date(ms);
-  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
-}
-function isoWeekKey(ms) {
-  const d = new Date(ms);
-  const t = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
-  const day = (t.getUTCDay() + 6) % 7;
-  t.setUTCDate(t.getUTCDate() - day + 3);
-  const firstThu = new Date(Date.UTC(t.getUTCFullYear(), 0, 4));
-  const week = 1 + Math.round(((t - firstThu) / DAY - 3 + ((firstThu.getUTCDay() + 6) % 7)) / 7);
-  return `${t.getUTCFullYear()}-W${pad(week)}`;
-}
-function fmtTs(ms) {
-  const d = new Date(ms);
-  return `${dayKey(ms)} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
-}
 
 // Replaces the original claude.exe call: invoke `pi` headless, prompt via
 // stdin, `pi -p` prints just the response text on stdout. Never throws —
 // compaction must never crash the pipeline on a model error.
+// Set once per run (in main) to a throwaway session dir under data/ so each
+// summary's real pi usage is recorded and can be summed for the "actual" cost in
+// the ledger; deleted after the run. null → stay ephemeral (--no-session).
+let SESSION_CAPTURE = null;
+
 function piSummarize(prompt, system) {
   if (NO_LLM) return "(summary skipped: --no-llm)";
   try {
-    const argv = [PI_CLI, "-p", "--no-session", "-nc", "--no-extensions", "--no-skills", "--no-tools", "--model", COMPACT_MODEL];
+    const sessionArgs = SESSION_CAPTURE ? ["--session-dir", SESSION_CAPTURE] : ["--no-session"];
+    const argv = [PI_CLI, "-p", ...sessionArgs, "-nc", "--no-extensions", "--no-skills", "--no-tools", "--model", COMPACT_MODEL];
     // v1 declares no system prompt — the whole contract sits in the user turn,
     // which was the review's top finding. A variant that declares one gets it
     // on the system channel where models weight it more heavily.
@@ -270,7 +264,7 @@ function messagesBetween(cdb, convs, fromMs, toMs) {
   }
   rows.sort((a, b) => a.sent_at - b.sent_at || a.rid - b.rid);
   return {
-    lines: rows.map((m) => `[${fmtTs(m.sent_at)}] ⟨m${m.rid}⟩ ${m._c.prefix || ""}${m.sender}: ${(m.body || "").replace(/\s+/g, " ").trim()}`),
+    lines: rows.map((m) => `[${fmtLocal(m.sent_at)}] ⟨m${m.rid}⟩ ${m._c.prefix || ""}${m.sender}: ${redact((m.body || "").replace(/\s+/g, " ").trim())}`),
     senders: new Set(rows.map((r) => r.sourceServiceId).filter(Boolean)),
   };
 }
@@ -292,8 +286,8 @@ function buildConvTiers(cdb, convs, who, since, now, t) {
   for (let d = RAW_DAYS; d < DAILY_UNTIL_DAYS; d++) {
     const dayStart = now - (d + 1) * DAY;
     if (dayStart < since) continue;
-    const key = dayKey(dayStart + DAY / 2);
-    if (t.daily.has(key) || t.weekly.has(isoWeekKey(dayStart + DAY / 2))) continue;
+    const key = dateKey(dayStart + DAY / 2);
+    if (t.daily.has(key) || t.weekly.has(dateKey(weekStart(dayStart + DAY / 2)))) continue;
     const lines = messagesBetween(cdb, convs, dayStart, dayStart + DAY).lines;
     if (lines.length === 0) continue;
     const s = summarize(who, key, lines, "daily");
@@ -308,20 +302,34 @@ function buildConvTiers(cdb, convs, who, since, now, t) {
     newDailies.set(key, s);
     summaries++;
   }
-  // Weekly: roll up weeks older than DAILY_UNTIL (up to WEEKLY_UNTIL), then drop aged dailies.
-  for (let wk = Math.floor(DAILY_UNTIL_DAYS / 7); wk * 7 < WEEKLY_UNTIL_DAYS; wk++) {
-    const weekStart = now - (wk + 1) * 7 * DAY;
-    if (weekStart < since) continue;
-    const key = isoWeekKey(now - (wk * 7 + 3) * DAY);
+  // Weekly: roll up whole Monday-04:00-Pacific weeks (lib/weeks.js's own week
+  // boundary — not an ISO-UTC week) older than DAILY_UNTIL, up to WEEKLY_UNTIL, then
+  // drop aged dailies. nextWeekStart is the only week-stepping primitive lib/weeks.js
+  // exports, so walk forward from the oldest candidate week rather than back from now.
+  // Keyed by the week's Monday date, so it sorts and reads like the daily keys.
+  //
+  // ONLY COMPLETE WEEKS. A week straddling dailyBoundary must wait: summarizing a
+  // clipped range would freeze under the week's key (`t.weekly.has` skips filled
+  // keys forever), and the days clipped off would age out of the daily tier with
+  // nowhere to go — silently vanishing from the Timeline.
+  const dailyBoundary = now - DAILY_UNTIL_DAYS * DAY;
+  const weeklyBoundary = now - WEEKLY_UNTIL_DAYS * DAY;
+  for (let wStart = weekStart(weeklyBoundary); nextWeekStart(wStart) <= dailyBoundary; wStart = nextWeekStart(wStart)) {
+    if (wStart < since) continue;
+    const key = dateKey(wStart);
     if (t.weekly.has(key)) continue;
-    const lines = messagesBetween(cdb, convs, weekStart, now - wk * 7 * DAY).lines;
+    const lines = messagesBetween(cdb, convs, wStart, nextWeekStart(wStart)).lines;
     if (lines.length === 0) continue;
-    const ws = summarize(who, `the week of ${key}`, lines, "weekly");
-    if (isBadSummary(ws)) continue; // same permanence trap as the daily loop
-    t.weekly.set(key, ws);
+    const wsum = summarize(who, `the week of ${key}`, lines, "weekly");
+    if (isBadSummary(wsum)) continue; // same permanence trap as the daily loop
+    t.weekly.set(key, wsum);
     summaries++;
   }
-  const dailyCutoff = dayKey(now - DAILY_UNTIL_DAYS * DAY);
+  // Dailies survive until their WHOLE week has rolled up: the cutoff is the start
+  // of the week containing dailyBoundary (the first week the weekly tier does not
+  // own yet), not the raw 21-day line — so the daily tier can briefly hold up to
+  // ~27 days, and nothing falls between the tiers.
+  const dailyCutoff = dateKey(weekStart(dailyBoundary));
   for (const k of [...t.daily.keys()]) if (k < dailyCutoff) t.daily.delete(k);
 
   return { rawLines, summaries, newDailies };
@@ -480,6 +488,17 @@ function main() {
   let changedCount = 0;
   let summariesCount = 0;
 
+  // ACTUAL-COST CAPTURE: point every summary call at one throwaway session dir
+  // under data/ (gitignored, deleted below) so pi records real usage we can sum.
+  // Only when we'll actually call the model and write a ledger row.
+  if (WRITE && !NO_LLM) {
+    try {
+      const base = path.join(DATA_DIR, "_session-tmp");
+      fs.mkdirSync(base, { recursive: true });
+      SESSION_CAPTURE = fs.mkdtempSync(path.join(base, "c-"));
+    } catch { SESSION_CAPTURE = null; }
+  }
+
   // Phase 1: groups first, so their new day-summaries can fold into participant profiles.
   const foldByContact = new Map(); // slug -> [ "- YYYY-MM-DD [Group]: summary", ... ]
   for (const g of groups) {
@@ -528,6 +547,20 @@ function main() {
   // fail the compaction it describes.
   if (WRITE) {
     const endedAt = Date.now();
+    // Estimated Timeline spend: one model call per summary line written. Estimate
+    // only (see lib/cost.js) — null if COMPACT_MODEL isn't in pi's price catalog.
+    let costUsd = null;
+    let actualCostUsd = null;
+    try {
+      const cost = require("../lib/cost");
+      const per = cost.compactCallUsd(COMPACT_MODEL);
+      costUsd = per == null ? null : per * summariesCount;
+      // Real billed cost, summed from the session dir every summary wrote into.
+      if (SESSION_CAPTURE) {
+        const a = cost.sumSessionCostUsd(SESSION_CAPTURE);
+        if (a) actualCostUsd = a.costUsd;
+      }
+    } catch { /* pricing is best-effort */ }
     try {
       require("../lib/run-record").writeRunRecord({
         kind: "compact",
@@ -538,10 +571,18 @@ function main() {
         scanned,
         changed: changedCount,
         summaries: summariesCount,
+        costUsd,
+        actualCostUsd,
+        costModel: COMPACT_MODEL,
       });
     } catch (e) {
       console.log(`crm-compact: run-record not written (non-fatal): ${e.message}`);
     }
+  }
+  // Delete the throwaway capture dir — nothing accumulates outside a single run.
+  if (SESSION_CAPTURE) {
+    try { fs.rmSync(SESSION_CAPTURE, { recursive: true, force: true }); } catch { /* best-effort */ }
+    SESSION_CAPTURE = null;
   }
 }
 
