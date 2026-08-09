@@ -125,13 +125,24 @@ function piSummarize(prompt, system) {
 const STYLE_INSTRUCTION = {
   daily: "Summarize the day in ONE line: every durable fact (plans, decisions, life events, money owed or paid) and nothing else — drop chatter, jokes, games, and one-off details that change nothing. Short past-tense sentences separated by periods, not semicolons. At most ~65 words: cut words and noise, never a durable fact.",
   weekly: "Summarize the period in 1-2 lines: the main threads and every durable fact, nothing else. Short past-tense sentences separated by periods, not semicolons. At most ~110 words: cut words and noise, never a durable fact.",
+  // era: distills aged-out weekly lines into one season note in the Older tier.
+  // Input is weekly SUMMARIES (not raw messages); when the era already has a
+  // note it is included in the input and must be rewritten, never appended to.
+  // Text reviewed by a Fable agent (2026-08-09): the replace-don't-append and
+  // carry-forward-unless-superseded sentences each cover a distinct observed
+  // failure mode of repeated self-rewrite; the closing formula is the proven
+  // anti-starvation clause from the daily/weekly strings.
+  era: "Distill the period into one era note: only what will still matter in a year — life events, durable changes (job, school, moves, relationships), big decisions, money milestones. Drop week-by-week narration and logistics. When a later week changes or reverses an earlier fact, keep only the outcome. If a current era note is included, rewrite the whole note — your output replaces it, never appends to it — and keep every fact it holds unless a later week supersedes it. One paragraph of short past-tense sentences separated by periods, not semicolons. At most ~120 words: cut words and noise, never a durable fact.",
 };
 
 // Exported so evals/ can build the exact prompt this pipeline sends without
 // re-implementing it — the same reason crm-merge.js takes a promptFile override.
 function buildSummaryPrompt(who, periodLabel, lines, style, template) {
   return render(template, {
-    PERIOD_SENTENCE: `These are Signal messages ${who} during ${periodLabel}.`,
+    // Era calls read weekly summaries, not raw messages — the framing must say so.
+    PERIOD_SENTENCE: style === "era"
+      ? `These are one-line weekly summaries of Signal messages ${who} during ${periodLabel}.`
+      : `These are Signal messages ${who} during ${periodLabel}.`,
     STYLE_INSTRUCTION: STYLE_INSTRUCTION[style] || STYLE_INSTRUCTION.weekly,
     MESSAGES: lines.join("\n"),
   });
@@ -161,6 +172,22 @@ const TIER_HEADERS = {
   older: "### Older",
   group: "### Group activity",
 };
+
+// Season eras for the Older tier, Pacific calendar: spring = Jan–May,
+// summer = Jun–Aug, fall = Sep–Dec. A week belongs to the era of its Monday.
+function eraKey(weekDateKey) {
+  const m = Number(weekDateKey.slice(5, 7));
+  return `${weekDateKey.slice(0, 4)}-${m <= 5 ? "spring" : m <= 8 ? "summer" : "fall"}`;
+}
+function eraName(era) {
+  const [y, s] = era.split("-");
+  return `${s} ${y}`;
+}
+// Season names don't sort chronologically as text (summer > spring > fall),
+// so the Older tier orders by the era's starting month instead.
+function eraSortKey(k) {
+  return k.replace(/(spring|summer|fall)$/, (s) => ({ spring: "01", summer: "06", fall: "09" }[s]));
+}
 
 function splitProfile(text) {
   const lines = text.split("\n");
@@ -232,7 +259,9 @@ function renderTimeline(rawLines, t, { includeGroup }) {
     void label;
   }
   out.push("", TIER_HEADERS.older);
-  const olderLines = sortDesc(t.older).map(([k, v]) => `- ${k}: ${v}`);
+  const olderLines = [...t.older.entries()]
+    .sort((a, b) => (eraSortKey(a[0]) < eraSortKey(b[0]) ? 1 : -1))
+    .map(([k, v]) => `- ${k}: ${v}`);
   out.push([olderLines.join("\n"), t.legacyOlder].filter(Boolean).join("\n\n").trim() || "_(none yet)_");
   if (includeGroup) {
     out.push("", TIER_HEADERS.group);
@@ -292,8 +321,10 @@ function firstArchivedMs(cdb, convs) {
   return first;
 }
 
-// Mutates `t` (daily/weekly/older maps). Returns { rawLines, summaries, newDailies, historyFrom }.
-function buildConvTiers(cdb, convs, who, since, now, t) {
+// Mutates `t` (daily/weekly/older maps). Returns { rawLines, summaries,
+// attempts, newDailies, historyFrom, foldedOut }. `foldedTo` is the era-fold
+// watermark from state: every weekly key ≤ it has already been distilled.
+function buildConvTiers(cdb, convs, who, since, now, t, foldedTo) {
   const all = messagesBetween(cdb, convs, now - RAW_DAYS * DAY, now).lines;
   const rawLines = all.slice(-RAW_MAX_MSGS);
   if (all.length > rawLines.length)
@@ -368,7 +399,39 @@ function buildConvTiers(cdb, convs, who, since, now, t) {
   const dailyCutoff = dateKey(weekStart(dailyBoundary));
   for (const k of [...t.daily.keys()]) if (k < dailyCutoff) t.daily.delete(k);
 
-  return { rawLines, summaries, attempts, newDailies, historyFrom };
+  // ---- era fold: weeks aged past the weekly window distill into their
+  // season's note in the Older tier. Weekly lines are KEPT (Nathan's rule:
+  // every week stays viewable) — the era note is a distillation on top, not a
+  // replacement. Eras fold oldest-first and the watermark only advances
+  // through successes, so one failed model call simply retries next run
+  // without skipping anything. Forward runs fold a week or two at a time into
+  // the era's existing note (rewritten, never appended); a backfill hands an
+  // era all its weeks in one call.
+  let foldedOut = foldedTo || null;
+  const weeklyCutoffKey = dateKey(weekStart(weeklyBoundary));
+  const foldable = [...t.weekly.keys()]
+    .filter((k) => k < weeklyCutoffKey && (!foldedTo || k > foldedTo))
+    .sort();
+  const byEra = new Map(); // insertion order = chronological (keys sorted above)
+  for (const k of foldable) {
+    const era = eraKey(k);
+    if (!byEra.has(era)) byEra.set(era, []);
+    byEra.get(era).push(k);
+  }
+  for (const [era, weeks] of byEra) {
+    const lines = [];
+    const cur = t.older.get(era);
+    if (cur) lines.push(`Current era note (rewrite it to fold the new weeks in): ${cur}`);
+    for (const k of weeks) lines.push(`- week of ${k}: ${t.weekly.get(k)}`);
+    attempts++;
+    const note = summarize(who, eraName(era), lines, "era");
+    if (isBadSummary(note)) break; // watermark stays — this era retries next run
+    t.older.set(era, note.trim());
+    summaries++;
+    foldedOut = weeks[weeks.length - 1];
+  }
+
+  return { rawLines, summaries, attempts, newDailies, historyFrom, foldedOut };
 }
 
 function backupAndWrite(file, next) {
@@ -391,7 +454,9 @@ function compactConversation({ cdb, convs, who, file, stateKey, state, now, incl
   // gradient behind them is real, not a gap.
   const since = BACKFILL ? 0 : (prevSince != null ? prevSince : now);
 
-  const { rawLines, summaries, attempts, newDailies, historyFrom } = buildConvTiers(cdb, convs, who, since, now, t);
+  const foldedTo = (state[stateKey] && state[stateKey].foldedTo) || null;
+  const { rawLines, summaries, attempts, newDailies, historyFrom, foldedOut } =
+    buildConvTiers(cdb, convs, who, since, now, t, foldedTo);
   const sinceOut = BACKFILL
     ? Math.min(historyFrom != null ? historyFrom : now, prevSince != null ? prevSince : now)
     : since;
@@ -411,7 +476,7 @@ function compactConversation({ cdb, convs, who, file, stateKey, state, now, incl
       fs.writeFileSync(file, next);
     }
   }
-  return { changed, summaries, attempts, since: sinceOut, rawCount: rawLines.length, next, newDailies };
+  return { changed, summaries, attempts, since: sinceOut, foldedTo: foldedOut, rawCount: rawLines.length, next, newDailies };
 }
 
 function compactContact(cdb, sdb, slug, state, now, foldLines, nicks) {
@@ -554,7 +619,7 @@ function main() {
     if (r.changed) changedCount += 1;
     summariesCount += r.summaries || 0;
     console.log(`- group ${g.slug} (${r.name}): raw=${r.rawCount} summaries=${r.summaries}/${r.attempts} participants=[${r.participants.join(", ")}] changed=${r.changed}`);
-    if (WRITE) state[`group:${g.slug}`] = { since: r.since, ranAt: now };
+    if (WRITE) state[`group:${g.slug}`] = { since: r.since, foldedTo: r.foldedTo || undefined, ranAt: now };
     for (const [date, summary] of r.newDailies || []) {
       const line = `- ${date} [${r.name}]: ${summary}`;
       for (const slug of r.participants) {
@@ -576,7 +641,7 @@ function main() {
     if (r.changed) changedCount += 1;
     summariesCount += r.summaries || 0;
     console.log(`- ${slug} (${r.name}): raw=${r.rawCount} summaries=${r.summaries}/${r.attempts} changed=${r.changed}`);
-    if (WRITE) state[slug] = { since: r.since, ranAt: now };
+    if (WRITE) state[slug] = { since: r.since, foldedTo: r.foldedTo || undefined, ranAt: now };
     if (!WRITE && r.next && slugArg) printTimeline(r.next);
   }
 
