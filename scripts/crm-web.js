@@ -693,16 +693,31 @@ function updateFields(slug, form) {
       changes.push({ field: label, from: cur == null ? '(absent)' : cur, to: next });
     }
     if (!changes.length) return { ok: true, changed: 0 };
+    // Nathan's "why" — the commit message for this set of edits. Subject stays
+    // machine-shaped; his context rides as the body, and both land in the run
+    // record so the provenance view can show them without a git subprocess.
+    const message = String(form.message || '').replace(/\r/g, '').trim().slice(0, 500);
     fs.writeFileSync(file, md);
     // Same isolated-history commit as a rename, so the edit shows on the
-    // profile's history page with a clean attribution.
+    // profile's history page with a clean attribution. pre/post shas make the
+    // run's line-level diff viewable at /runs/<id>/diff/<slug>.
     const relPath = `data/contacts/${slug}.md`;
+    const rev = () => {
+      try {
+        return execFileSync('git', ['--git-dir', GITDIR, 'rev-parse', 'HEAD'],
+          { cwd: ROOT, encoding: 'utf8', timeout: 15_000 }).trim();
+      } catch { return null; }
+    };
+    const preSha = rev();
+    let postSha = null;
     try {
       // -f: data/ is ignored by the MAIN repo's .gitignore, which this shared
       // work-tree applies — a bare `add` refuses the path.
       execFileSync('git', ['--git-dir', GITDIR, '--work-tree', ROOT, 'add', '-f', '--', relPath], { cwd: ROOT, timeout: 15_000 });
+      const subject = `manual edit ${slug}: ${changes.map((c) => c.field).join(', ')}`;
       execFileSync('git', ['--git-dir', GITDIR, '--work-tree', ROOT, 'commit', '-m',
-        `manual edit ${slug}: ${changes.map((c) => c.field).join(', ')}`], { cwd: ROOT, timeout: 15_000 });
+        message ? `${subject}\n\n${message}` : subject], { cwd: ROOT, timeout: 15_000 });
+      postSha = rev();
     } catch { /* uncommitted edit still shows */ }
     // One ledger row per save, grouped by profile (`only: slug`). Non-fatal: a
     // missing ledger row must never fail the edit that produced it.
@@ -712,6 +727,9 @@ function updateFields(slug, form) {
         kind: 'manual',
         startedAt, endedAt, durationMs: endedAt - startedAt,
         only: slug,
+        message: message || undefined,
+        preSha: preSha || undefined,
+        postSha: postSha || undefined,
         fields: changes,
         steps: changes.map((c) => ({ name: `${c.field}: ${c.from} → ${c.to}`, ok: true, ms: 0 })),
       });
@@ -1070,7 +1088,8 @@ function rowForRun(r) {
       examined: '',
       held: `${fields.length} field(s)`,
       cost: 'free', actual: 'free', took, ok: true,
-      note: fields.length ? fields.join(', ') : 'no changes',
+      // The "why" he typed is the most useful cell; fall back to what changed.
+      note: r.message || (fields.length ? fields.join(', ') : 'no changes'),
     };
   }
   // ingest (also the default for legacy records written before `kind` existed)
@@ -1194,6 +1213,15 @@ function runDetailPage(id) {
       }).join('') + `</table>`
     : '<p class="sub">No contacts had new activity.</p>';
 
+  // Manual-edit provenance: the "why" Nathan typed at save time, and a link to
+  // the exact lines the edit changed (pre/post shas around its history commit).
+  const manualHtml = run.kind === 'manual'
+    ? (run.message ? `<h2>Why</h2><p>${esc(run.message)}</p>` : '') +
+      (run.preSha && run.postSha && run.only
+        ? `<h2>Changes</h2><p><a href="/runs/${encodeURIComponent(run.id)}/diff/${encodeURIComponent(run.only)}">line diff of ${esc(run.only)} &rarr;</a></p>`
+        : '')
+    : '';
+
   const warnHtml = (run.warnings || []).length
     ? `<h2>Warnings</h2><ul>${run.warnings.map((w) => `<li class="bad">${esc(w)}</li>`).join('')}</ul>`
     : '';
@@ -1241,7 +1269,9 @@ function runDetailPage(id) {
     `<header class="top"><h1>Run ${esc(fmtWhen(run.startedAt))}</h1>` +
     `<span class="mk ${esc(kind)}">${esc(kindWord)}</span>` +
     `<span class="sub">${esc(runMode(run))} · ${fmtMs(run.durationMs)}</span>${modelsHtml}${costHtml}</header>` +
-    `<h2>Steps</h2>${stepsHtml}${contactsHtml}${compactCiteHtml}${warnHtml}${logHtml}`;
+    // A manual run has no contacts table — its whole story is the steps
+    // (field before→after), the why, and the line diff.
+    `<h2>Steps</h2>${stepsHtml}${manualHtml}${run.kind === 'manual' ? '' : contactsHtml}${compactCiteHtml}${warnHtml}${logHtml}`;
   return page(`Run ${run.id}`, body, '/runs');
 }
 
@@ -1895,7 +1925,7 @@ function start() {
           readBody(req, (raw2) => {
             try {
               const p = new URLSearchParams(raw2);
-              const r = updateFields(slug, { relationship: p.get('relationship'), birthday: p.get('birthday') });
+              const r = updateFields(slug, { relationship: p.get('relationship'), birthday: p.get('birthday'), message: p.get('message') });
               if (!r.ok) {
                 send(r.status, page(r.status === 409 ? 'Run in progress' : 'Not found',
                   `<div class="back"><a href="/c/${encodeURIComponent(slug)}">&larr; ${esc(slug)}</a></div><p class="bad">${esc(r.error)}</p>`));
