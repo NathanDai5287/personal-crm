@@ -64,6 +64,15 @@ const GROUP_ACTIVITY_MAX = 40; // cap on folded group-activity lines per contact
 const args = process.argv.slice(2);
 const WRITE = args.includes("--write");
 const NO_LLM = args.includes("--no-llm");
+// --backfill: build the Timeline tiers from the WHOLE archived history — one
+// weekly summary per complete week from the conversation's first archived
+// message — instead of only forward from when tiering started. This is what
+// makes a profile backfill equivalent to having run the pipeline all along
+// (Nathan's rule). EXPLICIT FLAG ONLY, never inferred from missing state: it
+// spends one model call per historical week per conversation, so it must be
+// impossible to trigger by accident. Idempotent: filled weekly keys are
+// skipped, so re-running only fills gaps.
+const BACKFILL = args.includes("--backfill");
 const argVal = (flag) => {
   const i = args.indexOf(flag);
   return i >= 0 ? args[i + 1] : null;
@@ -271,7 +280,19 @@ function messagesBetween(cdb, convs, fromMs, toMs) {
 
 // ---- shared tiering engine ---------------------------------------------------
 
-// Mutates `t` (daily/weekly/older maps). Returns { rawLines, summaries, newDailies }.
+// The earliest archived message across a conversation's sources — where a
+// --backfill starts its weekly walk. Sender filters are deliberately ignored:
+// starting a couple of weeks early only adds empty weeks, which cost nothing.
+function firstArchivedMs(cdb, convs) {
+  let first = null;
+  for (const c of convs) {
+    const r = cdb.prepare("SELECT MIN(sent_at) AS m FROM messages WHERE conv_id = ?").get(c.convId);
+    if (r && r.m != null) first = first == null ? r.m : Math.min(first, r.m);
+  }
+  return first;
+}
+
+// Mutates `t` (daily/weekly/older maps). Returns { rawLines, summaries, newDailies, historyFrom }.
 function buildConvTiers(cdb, convs, who, since, now, t) {
   const all = messagesBetween(cdb, convs, now - RAW_DAYS * DAY, now).lines;
   const rawLines = all.slice(-RAW_MAX_MSGS);
@@ -281,6 +302,7 @@ function buildConvTiers(cdb, convs, who, since, now, t) {
     );
 
   let summaries = 0;
+  let attempts = 0; // model calls this run WOULD make — the cost preview under --no-llm
   const newDailies = new Map();
   // Daily: ensure a line for each day in [RAW_DAYS, DAILY_UNTIL) that aged out after tiering started.
   for (let d = RAW_DAYS; d < DAILY_UNTIL_DAYS; d++) {
@@ -290,6 +312,7 @@ function buildConvTiers(cdb, convs, who, since, now, t) {
     if (t.daily.has(key) || t.weekly.has(dateKey(weekStart(dayStart + DAY / 2)))) continue;
     const lines = messagesBetween(cdb, convs, dayStart, dayStart + DAY).lines;
     if (lines.length === 0) continue;
+    attempts++;
     const s = summarize(who, key, lines, "daily");
     // A failed or skipped summary must NOT be stored. Storing it is permanent:
     // the `t.daily.has(key)` guard above skips any filled key forever, so one
@@ -314,12 +337,25 @@ function buildConvTiers(cdb, convs, who, since, now, t) {
   // nowhere to go — silently vanishing from the Timeline.
   const dailyBoundary = now - DAILY_UNTIL_DAYS * DAY;
   const weeklyBoundary = now - WEEKLY_UNTIL_DAYS * DAY;
-  for (let wStart = weekStart(weeklyBoundary); nextWeekStart(wStart) <= dailyBoundary; wStart = nextWeekStart(wStart)) {
+  // Forward runs walk only the 21–70 day window; a --backfill walks from the
+  // first archived message, so every complete historical week gets its line —
+  // the same set of weeklies a pipeline running since day one would have built
+  // (dailies for fully rolled-up weeks would have been deleted anyway, so a
+  // single weekly pass per week reproduces the play-forward end state).
+  let historyFrom = null;
+  let weeklyFrom = weekStart(weeklyBoundary);
+  if (BACKFILL) {
+    const first = firstArchivedMs(cdb, convs);
+    if (first != null && weekStart(first) < weeklyFrom) weeklyFrom = weekStart(first);
+    historyFrom = first;
+  }
+  for (let wStart = weeklyFrom; nextWeekStart(wStart) <= dailyBoundary; wStart = nextWeekStart(wStart)) {
     if (wStart < since) continue;
     const key = dateKey(wStart);
     if (t.weekly.has(key)) continue;
     const lines = messagesBetween(cdb, convs, wStart, nextWeekStart(wStart)).lines;
     if (lines.length === 0) continue;
+    attempts++;
     const wsum = summarize(who, `the week of ${key}`, lines, "weekly");
     if (isBadSummary(wsum)) continue; // same permanence trap as the daily loop
     t.weekly.set(key, wsum);
@@ -332,7 +368,7 @@ function buildConvTiers(cdb, convs, who, since, now, t) {
   const dailyCutoff = dateKey(weekStart(dailyBoundary));
   for (const k of [...t.daily.keys()]) if (k < dailyCutoff) t.daily.delete(k);
 
-  return { rawLines, summaries, newDailies };
+  return { rawLines, summaries, attempts, newDailies, historyFrom };
 }
 
 function backupAndWrite(file, next) {
@@ -349,9 +385,16 @@ function compactConversation({ cdb, convs, who, file, stateKey, state, now, incl
     : `# ${path.basename(file, ".md")}\n\n## What I know\n\n_(stub)_\n`;
   const { head, timelineExisting, tail } = splitProfile(ensured);
   const t = parseTiers(timelineExisting);
-  const since = state[stateKey] && state[stateKey].since != null ? state[stateKey].since : now;
+  const prevSince = state[stateKey] && state[stateKey].since != null ? state[stateKey].since : null;
+  // A backfill owns all of history: no skip guard, and the recorded `since`
+  // moves back to the first archived message so future forward runs know the
+  // gradient behind them is real, not a gap.
+  const since = BACKFILL ? 0 : (prevSince != null ? prevSince : now);
 
-  const { rawLines, summaries, newDailies } = buildConvTiers(cdb, convs, who, since, now, t);
+  const { rawLines, summaries, attempts, newDailies, historyFrom } = buildConvTiers(cdb, convs, who, since, now, t);
+  const sinceOut = BACKFILL
+    ? Math.min(historyFrom != null ? historyFrom : now, prevSince != null ? prevSince : now)
+    : since;
 
   // Merge folded group-activity lines (newest first, capped).
   if (includeGroup && foldLines && foldLines.length) {
@@ -368,7 +411,7 @@ function compactConversation({ cdb, convs, who, file, stateKey, state, now, incl
       fs.writeFileSync(file, next);
     }
   }
-  return { changed, summaries, since, rawCount: rawLines.length, next, newDailies };
+  return { changed, summaries, attempts, since: sinceOut, rawCount: rawLines.length, next, newDailies };
 }
 
 function compactContact(cdb, sdb, slug, state, now, foldLines, nicks) {
@@ -480,7 +523,7 @@ function main() {
   const groups = groupArg ? allGroups.filter((g) => g.slug === groupArg) : slugArg ? [] : allGroups;
   const slugs = groupArg ? [] : slugArg ? [slugArg] : JSON.parse(fs.readFileSync(TRACKED, "utf8")).slugs;
 
-  console.log(`crm-compact: ${WRITE ? "WRITE" : "DRY-RUN"}${NO_LLM ? " | --no-llm" : ""} | ${slugs.length} contact(s), ${groups.length} group(s)\n`);
+  console.log(`crm-compact: ${WRITE ? "WRITE" : "DRY-RUN"}${NO_LLM ? " | --no-llm" : ""}${BACKFILL ? " | BACKFILL (whole history)" : ""} | ${slugs.length} contact(s), ${groups.length} group(s)\n`);
 
   // Tallies for the /admin/runs ledger: how many conversations were processed
   // (not skipped), how many had their profile changed, and total summary lines.
@@ -510,7 +553,7 @@ function main() {
     scanned += 1;
     if (r.changed) changedCount += 1;
     summariesCount += r.summaries || 0;
-    console.log(`- group ${g.slug} (${r.name}): raw=${r.rawCount} summaries=${r.summaries} participants=[${r.participants.join(", ")}] changed=${r.changed}`);
+    console.log(`- group ${g.slug} (${r.name}): raw=${r.rawCount} summaries=${r.summaries}/${r.attempts} participants=[${r.participants.join(", ")}] changed=${r.changed}`);
     if (WRITE) state[`group:${g.slug}`] = { since: r.since, ranAt: now };
     for (const [date, summary] of r.newDailies || []) {
       const line = `- ${date} [${r.name}]: ${summary}`;
@@ -532,7 +575,7 @@ function main() {
     scanned += 1;
     if (r.changed) changedCount += 1;
     summariesCount += r.summaries || 0;
-    console.log(`- ${slug} (${r.name}): raw=${r.rawCount} summaries=${r.summaries} changed=${r.changed}`);
+    console.log(`- ${slug} (${r.name}): raw=${r.rawCount} summaries=${r.summaries}/${r.attempts} changed=${r.changed}`);
     if (WRITE) state[slug] = { since: r.since, ranAt: now };
     if (!WRITE && r.next && slugArg) printTimeline(r.next);
   }

@@ -64,13 +64,17 @@ const { openCrmDb, openSignalDb } = require('../lib/signal-db');
     if (a === '--dry-run') continue;
     if (a === '--only') { i += 1; continue; }
     if (a === '--max-chunks') { i += 1; continue; }
+    if (a === '--timeline-backfill') continue;
     console.error(`crm-daily: unknown flag '${a}'`);
-    console.error('known: --dry-run, --only <slug>, --max-chunks <n>');
+    console.error('known: --dry-run, --only <slug>, --max-chunks <n>, --timeline-backfill');
     process.exit(2);
   }
 }
 
 const DRY_RUN = process.argv.includes('--dry-run');
+// Step 5 builds Timeline tiers from the whole archived history (one weekly
+// summary per historical week — paid) instead of only forward from now.
+const TIMELINE_BACKFILL = process.argv.includes('--timeline-backfill');
 const ONLY_IDX = process.argv.indexOf('--only');
 const ONLY = ONLY_IDX !== -1 ? process.argv[ONLY_IDX + 1] : null;
 if (ONLY_IDX !== -1 && (!ONLY || ONLY.startsWith('--'))) {
@@ -478,7 +482,12 @@ function main() {
     // after ingesting them, so one dashboard "Ingest" does both halves; a full
     // run builds everyone's. Compaction makes one pi call per aged-out day/week
     // per conversation, so first runs after a gap can take a while — half an hour.
+    // --timeline-backfill makes step 5 build tiers from the whole archived
+    // history (crm-compact --backfill) — the flag for a post-wipe re-backfill,
+    // so profile AND timeline regenerate in the same pass. Explicit only; a
+    // normal nightly run must never re-walk history.
     const compactArgs = ONLY ? ['--write', '--slug', ONLY] : ['--write'];
+    if (TIMELINE_BACKFILL) compactArgs.push('--backfill');
     const compact = timed('compact', () => runNode(SCRIPTS.compact, compactArgs, { timeout: 1_800_000 }));
     logLines.push(`[5] timeline --write${ONLY ? ` --slug ${ONLY}` : ''}: ${compact.ok ? 'ok' : 'FAILED (non-fatal)'}`);
     logLines.push(compact.output || compact.error || '');
