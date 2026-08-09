@@ -322,6 +322,9 @@ tr.runrow.live .tw{border-left:3px solid var(--amber)}
 /* sub-entries of a two-tier What-I-know bullet: stepped in under their parent */
 .profile .fields.sub{margin:4px 0 4px 24px;padding-left:12px;border-left:2px solid var(--cardline)}
 .profile h2{font-size:19px;margin:28px 0 8px;padding-bottom:6px;border-bottom:2px solid var(--ink)}
+/* level-1 topic headings inside What I know (### in the markdown) */
+.profile h3{font-size:16.5px;font-weight:700;margin:24px 0 2px;letter-spacing:.01em}
+.profile p{font-size:14.5px;line-height:1.55;margin:7px 0}
 .profile ul{list-style:none;padding:0;margin:0}
 .profile li{padding:5px 0 5px 20px;position:relative;font-size:15.5px;line-height:1.5;border-bottom:1px solid var(--cardline)}
 .profile li::before{content:"—";position:absolute;left:0;color:var(--rule)}
