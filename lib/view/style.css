@@ -332,8 +332,9 @@ tr.runrow.live .tw{border-left:3px solid var(--amber)}
    detail: Newsreader italic, soft ink, a touch larger. (A paragraph opening
    with a bold run-in head is a sub-topic, never the abstract.) */
 .profile h3+p:not(:has(> strong:first-child)){font-size:16.5px;font-style:italic;color:var(--soft);margin:6px 0 12px}
-/* A sub-topic opens with a typed run-in head; the block groups with its detail. */
-.profile p>strong:first-child{font-family:"Courier Prime",monospace;font-size:13px;letter-spacing:.05em}
+/* A sub-topic opens with a bold run-in head — the body face, a half-step up,
+   like a book sidehead — and the block groups with its detail. */
+.profile p>strong:first-child{font-size:16px;letter-spacing:.01em}
 .profile p:has(> strong:first-child){margin-top:18px}
 /* Weekly log keeps every week; past the first screenful they fold away. */
 .profile details.tl-more summary{font-family:"Courier Prime",monospace;font-size:12.5px;
