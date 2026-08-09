@@ -585,6 +585,7 @@ function profilePage(slug) {
   const titleLine = md.split(/\r?\n/).find((l) => l.startsWith('# '));
   const name = titleLine ? titleLine.slice(2).trim() : slug;
   const body = `<div class="back"><a href="/">&larr; All people</a>`
+    + ` &middot; <a href="/c/${encodeURIComponent(slug)}/fields">Edit fields</a>`
     + ` &middot; <a href="/c/${encodeURIComponent(slug)}/history">History &rarr;</a></div>`
     + `<div class="profile">${renderProfile(md)}</div>`;
   return page(name, body, '/');
@@ -619,10 +620,106 @@ function renameContact(slug, newName) {
   // and the next pipeline run snapshots it regardless.
   const relPath = `data/contacts/${slug}.md`;
   try {
-    execFileSync('git', ['--git-dir', GITDIR, '--work-tree', ROOT, 'add', '--', relPath], { cwd: ROOT, timeout: 15_000 });
+    // -f: data/ is ignored by the MAIN repo's .gitignore, which this shared
+    // work-tree applies — a bare `add` refuses the path (memory-commit.js
+    // force-adds for the same reason).
+    execFileSync('git', ['--git-dir', GITDIR, '--work-tree', ROOT, 'add', '-f', '--', relPath], { cwd: ROOT, timeout: 15_000 });
     execFileSync('git', ['--git-dir', GITDIR, '--work-tree', ROOT, 'commit', '-m', `rename ${slug} → ${newName}`], { cwd: ROOT, timeout: 15_000 });
   } catch { /* uncommitted rename still shows */ }
   return { ok: true };
+}
+
+// ---- hand-edit header fields (Relationship, Birthday) -----------------------
+// These two are Nathan's knowledge, not message-derivable; every other metadata
+// line is pipeline-owned and not offered. A save is treated as a real pass: it
+// refuses to run while a pipeline run holds the profile (a merge rewriting the
+// same file would clobber the edit), commits to the isolated history, and lands
+// in the runs ledger as kind 'manual' — one run per profile per save.
+const EDITABLE_FIELDS = [
+  ['relationship', 'Relationship'],
+  ['birthday', 'Birthday'],
+];
+
+function readField(md, label) {
+  const m = md.match(new RegExp(`^- \\*\\*${label}:\\*\\* (.*)$`, 'm'));
+  return m ? m[1].trim() : null;
+}
+
+function fieldsPage(slug) {
+  const file = path.posix.join(CONTACTS_DIR, `${slug}.md`);
+  let md;
+  try { md = fs.readFileSync(file, 'utf8'); } catch { return null; }
+  const titleLine = md.split(/\r?\n/).find((l) => l.startsWith('# '));
+  const name = titleLine ? titleLine.slice(2).trim() : slug;
+  const cur = (label) => {
+    const v = readField(md, label);
+    return v == null || v === '_TBD_' ? '' : v;
+  };
+  const v = V.fields({ slug, name, relationship: cur('Relationship'), birthday: cur('Birthday') });
+  return page(v.title, render(v.body));
+}
+
+// A metadata line the profile lacks is added at the end of the block: after the
+// last `- ` bullet that follows the `# ` title.
+function insertMetaLine(md, line) {
+  const lines = md.split('\n');
+  let i = lines.findIndex((l) => l.startsWith('# ')) + 1;
+  while (i < lines.length && (lines[i].trim() === '' || lines[i].startsWith('- '))) i += 1;
+  while (i > 0 && lines[i - 1].trim() === '') i -= 1;
+  lines.splice(i, 0, line);
+  return lines.join('\n');
+}
+
+function updateFields(slug, form) {
+  const file = path.posix.join(CONTACTS_DIR, `${slug}.md`);
+  let md;
+  try { md = fs.readFileSync(file, 'utf8'); } catch { return { ok: false, status: 404, error: 'no such contact' }; }
+  // The file lock alone is not enough here: while THIS process runs a web job it
+  // holds the lock itself, so acquire() would hand back an inherited no-op and
+  // let the edit race the job's merges. Check the in-memory job first.
+  if (job && job.running) return { ok: false, status: 409, error: 'a job is running — save again when it finishes' };
+  const lock = require('../lib/pipeline-lock').acquire('manual-edit');
+  if (!lock.ok) return { ok: false, status: 409, error: `a run is in progress (${lock.holderDesc}) — save again when it finishes` };
+  const startedAt = Date.now();
+  try {
+    const changes = [];
+    for (const [key, label] of EDITABLE_FIELDS) {
+      if (form[key] == null) continue; // not in the form -> untouched
+      const next = String(form[key]).replace(/[\r\n]+/g, ' ').trim().slice(0, 120) || '_TBD_';
+      const cur = readField(md, label);
+      if (cur === next || (cur == null && next === '_TBD_')) continue;
+      if (cur == null) md = insertMetaLine(md, `- **${label}:** ${next}`);
+      else md = md.replace(new RegExp(`^- \\*\\*${label}:\\*\\* .*$`, 'm'), `- **${label}:** ${next}`);
+      changes.push({ field: label, from: cur == null ? '(absent)' : cur, to: next });
+    }
+    if (!changes.length) return { ok: true, changed: 0 };
+    fs.writeFileSync(file, md);
+    // Same isolated-history commit as a rename, so the edit shows on the
+    // profile's history page with a clean attribution.
+    const relPath = `data/contacts/${slug}.md`;
+    try {
+      // -f: data/ is ignored by the MAIN repo's .gitignore, which this shared
+      // work-tree applies — a bare `add` refuses the path.
+      execFileSync('git', ['--git-dir', GITDIR, '--work-tree', ROOT, 'add', '-f', '--', relPath], { cwd: ROOT, timeout: 15_000 });
+      execFileSync('git', ['--git-dir', GITDIR, '--work-tree', ROOT, 'commit', '-m',
+        `manual edit ${slug}: ${changes.map((c) => c.field).join(', ')}`], { cwd: ROOT, timeout: 15_000 });
+    } catch { /* uncommitted edit still shows */ }
+    // One ledger row per save, grouped by profile (`only: slug`). Non-fatal: a
+    // missing ledger row must never fail the edit that produced it.
+    const endedAt = Date.now();
+    try {
+      require('../lib/run-record').writeRunRecord({
+        kind: 'manual',
+        startedAt, endedAt, durationMs: endedAt - startedAt,
+        only: slug,
+        fields: changes,
+        steps: changes.map((c) => ({ name: `${c.field}: ${c.from} → ${c.to}`, ok: true, ms: 0 })),
+      });
+    } catch { /* edit already applied */ }
+    return { ok: true, changed: changes.length };
+  } finally {
+    lock.release();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -964,6 +1061,18 @@ function rowForRun(r) {
       note: r.triggers ? `${r.triggers} trigger(s)` : 'no triggers',
     };
   }
+  if (r.kind === 'manual') {
+    const fields = (r.fields || []).map((f) => f.field);
+    return {
+      t, kind: 'manual',
+      pass: 'edit',
+      scope: r.only || '',
+      examined: '',
+      held: `${fields.length} field(s)`,
+      cost: 'free', actual: 'free', took, ok: true,
+      note: fields.length ? fields.join(', ') : 'no changes',
+    };
+  }
   // ingest (also the default for legacy records written before `kind` existed)
   const failures = (r.mergeFailures || []).length;
   return {
@@ -1127,7 +1236,7 @@ function runDetailPage(id) {
   // The kind chip wears the same job ink as the runs ledger (legacy records
   // predate `kind` and are all ingest runs).
   const kind = run.kind || 'ingest';
-  const kindWord = { sweep: 'sweep', ingest: 'ingest', compact: 'timeline', todo: 'todo' }[kind] || kind;
+  const kindWord = { sweep: 'sweep', ingest: 'ingest', compact: 'timeline', todo: 'todo', manual: 'by hand' }[kind] || kind;
   const body = `<div class="back"><a href="/runs">&larr; All runs</a></div>` +
     `<header class="top"><h1>Run ${esc(fmtWhen(run.startedAt))}</h1>` +
     `<span class="mk ${esc(kind)}">${esc(kindWord)}</span>` +
@@ -1772,6 +1881,36 @@ function start() {
         if (!isSafeSlug(slug)) { send(400, page('Bad request', '<p>Bad request.</p>')); return; }
         const html = ledgerPage(slug, cl[2]);
         if (!html) { send(404, page('Not found', `<div class="back"><a href="/c/${encodeURIComponent(slug)}/history">&larr; history</a></div><p>No ledger captured at that commit.</p>`)); return; }
+        send(200, html);
+        return;
+      }
+      // Hand-edit the header fields. GET renders the form, POST applies + logs it.
+      const cf = url.pathname.match(/^\/c\/([^/]+)\/fields$/);
+      if (cf) {
+        const slug = decodeURIComponent(cf[1]);
+        if (!isSafeSlug(slug)) { send(400, page('Bad request', '<p>Bad request.</p>')); return; }
+        if (req.method === 'POST') {
+          const sfs = req.headers['sec-fetch-site'];
+          if (sfs && sfs !== 'same-origin' && sfs !== 'none') { send(403, page('Forbidden', '<p>Cross-site request refused.</p>')); return; }
+          readBody(req, (raw2) => {
+            try {
+              const p = new URLSearchParams(raw2);
+              const r = updateFields(slug, { relationship: p.get('relationship'), birthday: p.get('birthday') });
+              if (!r.ok) {
+                send(r.status, page(r.status === 409 ? 'Run in progress' : 'Not found',
+                  `<div class="back"><a href="/c/${encodeURIComponent(slug)}">&larr; ${esc(slug)}</a></div><p class="bad">${esc(r.error)}</p>`));
+                return;
+              }
+              res.writeHead(303, { Location: `/c/${encodeURIComponent(slug)}` });
+              res.end();
+            } catch (e) {
+              try { send(500, page('Error', `<p class="bad">${esc(String(e.message).slice(0, 200))}</p>`)); } catch { /* sent */ }
+            }
+          });
+          return;
+        }
+        const html = fieldsPage(slug);
+        if (!html) { send(404, page('Not found', '<div class="back"><a href="/">&larr; All contacts</a></div><p>No such contact.</p>')); return; }
         send(200, html);
         return;
       }

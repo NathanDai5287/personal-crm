@@ -36,6 +36,7 @@
   --k-ingest:var(--ox);
   --k-compact:var(--amber);
   --k-todo:var(--moss);
+  --k-manual:var(--ink);   /* a hand edit is ink on the card, no job colour */
   --tab:#C6BE9E;         /* manila tab                                    */
   --tab-on:#F5F2E9;      /* the selected tab (= card, so it joins it)     */
   --tab-ink:#453F2B;     /* text on an unselected tab                     */
@@ -250,6 +251,7 @@ td.r{text-align:right;font-variant-numeric:tabular-nums}
 .mk.ingest{color:var(--k-ingest);border-color:var(--k-ingest)}
 .mk.compact{color:var(--k-compact);border-color:var(--k-compact)}
 .mk.todo{color:var(--k-todo);border-color:var(--k-todo)}
+.mk.manual{color:var(--k-manual);border-color:var(--k-manual)}
 .hand{font-family:Newsreader,serif;font-style:italic;color:var(--soft);font-size:14px}
 .hand.bad{color:var(--ox);font-style:normal;font-weight:700}
 /* /admin/runs cost columns: amber = spent the model, faint = free/subscription.
