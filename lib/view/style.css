@@ -355,7 +355,12 @@ tr.runrow.live .tw{border-left:3px solid var(--amber)}
 .q.me{align-self:flex-end;border-right:3px solid var(--ox);background:var(--card2)}
 .q .who{display:block;font-family:"Courier Prime",monospace;font-size:10px;letter-spacing:.08em;
   text-transform:uppercase;color:var(--soft);margin-bottom:2px}
-.q.hit{outline:2px solid var(--ox);outline-offset:2px}
+/* The key line reads as a marked passage, not a boxed one: warm flag wash,
+   oxblood edge, and the who-line names it. */
+.q.hit{background:var(--flag-bg);border-color:var(--ox-soft)}
+.q.hit.them{border-left:3px solid var(--ox)}
+.q.hit .who{color:var(--ox)}
+.q.hit .who::after{content:" · key line"}
 /* surrounding context in the provenance views: legible, but not the subject */
 .q.dim{opacity:.45}
 .q.dim:hover{opacity:1}
