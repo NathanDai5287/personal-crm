@@ -423,7 +423,7 @@ select.fld{appearance:none;-webkit-appearance:none;padding-right:26px;cursor:poi
 .taskcard.done .tasktitle{text-decoration:line-through;text-decoration-color:var(--faint)}
 .taskdesc{font-size:14px;color:var(--soft);margin:4px 0 0}
 .tasksrc{font-family:"Courier Prime",monospace;font-size:11px;letter-spacing:.02em;color:var(--soft);margin-top:6px}
-.taskfoot{margin-top:auto;padding-top:11px}
+.taskfoot{margin-top:auto;padding-top:11px;display:flex;gap:8px;align-items:center}
 .taskaside{align-self:start;display:flex;flex-direction:column;align-items:flex-end;gap:8px;white-space:nowrap;text-align:right}
 .taskdue{font-family:"Courier Prime",monospace;font-size:11px;color:var(--soft);text-align:right;
   font-variant-numeric:tabular-nums}

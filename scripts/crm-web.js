@@ -347,12 +347,18 @@ function taskItems() {
   return out;
 }
 
-// Toggling a task done/reopen posts in the background and restyles the card in
-// place — no full page reload. The X-Requested-With header tells the POST handler
-// to answer 204 instead of the 303 a form submit gets. The plate counts are
-// nudged to match; a failed request reverts the checkbox.
+// Toggling a task done/reopen posts in the background — no full page reload. The
+// X-Requested-With header tells the POST handler to answer 204 instead of the 303
+// a form submit gets. The card physically moves between the Active and Done lists
+// (done at the bottom, matching what a fresh render shows), the plate counts are
+// nudged to match, and a failed request reverts the checkbox.
 const TASKS_TOGGLE_JS = `<script>(function(){
   function adj(id,d){var el=document.getElementById(id);if(!el)return;var n=parseInt(el.textContent,10)||0;el.textContent=Math.max(0,n+d);}
+  function reflow(){
+    var act=document.getElementById('activeList'),wrap=document.getElementById('doneWrap'),dn=document.getElementById('doneList'),none=document.getElementById('noActive');
+    if(wrap&&dn)wrap.style.display=dn.querySelector('.taskcard')?'':'none';
+    if(none&&act)none.style.display=act.querySelector('.taskcard')?'none':'';
+  }
   document.querySelectorAll('.taskbox').forEach(function(box){
     box.addEventListener('change',function(){
       var id=box.getAttribute('data-id'),nowDone=box.checked,card=box.closest('.taskcard');
@@ -363,7 +369,12 @@ const TASKS_TOGGLE_JS = `<script>(function(){
         body:'id='+encodeURIComponent(id)
       }).then(function(r){
         if(!r.ok)throw new Error(r.status);
-        if(card)card.classList.toggle('done',nowDone);
+        if(card){
+          card.classList.toggle('done',nowDone);
+          var dest=document.getElementById(nowDone?'doneList':'activeList');
+          if(dest){if(nowDone)dest.appendChild(card);else dest.insertBefore(card,dest.firstChild);}
+          reflow();
+        }
         adj('cActive',nowDone?-1:1);adj('cDone',nowDone?1:-1);
       }).catch(function(){box.checked=!nowDone;}).then(function(){box.disabled=false;});
     });
@@ -1644,7 +1655,9 @@ function start() {
           try {
             const p = new URLSearchParams(raw);
             cdb = openCrmDb();
-            const STATUS_ACTIONS = { accept: 'active', dismiss: 'dismissed', done: 'done', reopen: 'active' };
+            // `delete` IS a dismissal: the row (and its dedupe key) must survive so a
+            // re-ingest of the same ledger can never re-draft a task Nathan removed.
+            const STATUS_ACTIONS = { accept: 'active', dismiss: 'dismissed', done: 'done', reopen: 'active', delete: 'dismissed' };
             if (action === 'add') {
               if (!p.get('title')) { send(400, page('Bad request', '<p>A title is required.</p>')); return; }
               TASKS.addManual(cdb, { title: p.get('title'), deadline: parseDeadline(p.get('deadline'), new Date()), importance: p.get('importance') });
