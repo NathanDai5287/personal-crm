@@ -319,12 +319,25 @@ tr.runrow.live .tw{border-left:3px solid var(--amber)}
 .profile .fields{font-family:"Courier Prime",monospace;font-size:12.5px;color:var(--soft);
   margin:12px 0 4px;display:flex;flex-wrap:wrap;gap:5px 22px}
 .profile .fields b{color:var(--ink);font-weight:400}
-/* sub-entries of a two-tier What-I-know bullet: stepped in under their parent */
-.profile .fields.sub{margin:4px 0 4px 24px;padding-left:12px;border-left:2px solid var(--cardline)}
-.profile h2{font-size:19px;margin:28px 0 8px;padding-bottom:6px;border-bottom:2px solid var(--ink)}
-/* level-1 topic headings inside What I know (### in the markdown) */
-.profile h3{font-size:16.5px;font-weight:700;margin:24px 0 2px;letter-spacing:.01em}
-.profile p{font-size:14.5px;line-height:1.55;margin:7px 0}
+.profile h2{font-size:22px;margin:34px 0 10px;padding-bottom:6px;border-bottom:2px solid var(--ink)}
+/* Subject-heading rows (### in the markdown): typed catalog labels for the
+   What-I-know topics and the Timeline tiers. Uppercase Courier over a hairline
+   rule — the metadata block's voice, promoted to structure. The scale is
+   h1 31 / h2 22 / h3 16-caps / abstract 16.5 italic / body 15.5. */
+.profile h3{font-family:"Courier Prime",monospace;font-size:16px;font-weight:700;
+  text-transform:uppercase;letter-spacing:.08em;margin:30px 0 8px;padding-bottom:5px;
+  border-bottom:1px solid var(--rule)}
+.profile p{font-size:15.5px;line-height:1.6;margin:8px 0}
+/* The one-sentence summary right under a topic heading is an abstract, not
+   detail: Newsreader italic, soft ink, a touch larger. (A paragraph opening
+   with a bold run-in head is a sub-topic, never the abstract.) */
+.profile h3+p:not(:has(> strong:first-child)){font-size:16.5px;font-style:italic;color:var(--soft);margin:6px 0 12px}
+/* A sub-topic opens with a typed run-in head; the block groups with its detail. */
+.profile p>strong:first-child{font-family:"Courier Prime",monospace;font-size:13px;letter-spacing:.05em}
+.profile p:has(> strong:first-child){margin-top:18px}
+/* Weekly log keeps every week; past the first screenful they fold away. */
+.profile details.tl-more summary{font-family:"Courier Prime",monospace;font-size:12.5px;
+  color:var(--stamp);cursor:pointer;padding:6px 0;list-style-position:inside}
 .profile ul{list-style:none;padding:0;margin:0}
 .profile li{padding:5px 0 5px 20px;position:relative;font-size:15.5px;line-height:1.5;border-bottom:1px solid var(--cardline)}
 .profile li::before{content:"—";position:absolute;left:0;color:var(--rule)}
