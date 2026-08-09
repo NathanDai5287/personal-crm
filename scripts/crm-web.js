@@ -319,7 +319,7 @@ function page(title, bodyHtml, current) {
 // Deliberately NOT sourced from the `reminders` table: it exists in crm.db but has
 // zero rows and nothing writes to it. Reading it would imply it works.
 function taskItems() {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = ptDateKey(Date.now());
   const out = { upcoming: [], recent: [], undated: [], questions: [] };
   let files = [];
   try { files = fs.readdirSync(CONTACTS_DIR).filter((f) => f.endsWith('.md')); } catch { return out; }
@@ -416,7 +416,7 @@ function tasksPage(editId = null) {
     descHtml: t.description ? mdInline(t.description) : '',
   });
   const data = {
-    counts, editing, today: new Date().toISOString().slice(0, 10),
+    counts, editing, today: ptDateKey(Date.now()),
     active: active.map(shape), done: done.map(shape), drafts: drafts.map(shape),
   };
   return page('To do — personal-crm', render(V.tasks(data).body) + TASKS_TOGGLE_JS + TASKS_DATE_JS);
@@ -464,7 +464,8 @@ function indexPage() {
 // `dimIds` is the surrounding-context rows: rendered readable but faded, so the
 // cited message(s) are what the eye lands on.
 function msgBubbles(rows, hitId, dimIds) {
-  const fmt = (ms) => new Date(ms).toISOString().slice(0, 16).replace('T', ' ');
+  const fmt = ptLocal; // Pacific, matching every ledger/Timeline stamp
+
   return rows.map((m) => {
     const mine = /^nathan$/i.test(m.sender);
     const hit = m.id === hitId ? ' hit' : '';
@@ -771,7 +772,7 @@ function adminData() {
   try {
     const r = cdb.prepare('SELECT COUNT(*) n, MIN(sent_at) a, MAX(sent_at) b FROM messages').get();
     kept = r.n || 0;
-    if (r.a) span = `${new Date(r.a).toISOString().slice(0, 10)} → ${new Date(r.b).toISOString().slice(0, 10)}`;
+    if (r.a) span = `${ptDateKey(r.a)} → ${ptDateKey(r.b)}`;
   } finally {
     cdb.close();
   }
@@ -1493,18 +1494,25 @@ function runQueue(cmds, i) {
   });
 }
 
-// Chunk-level progress, parsed from the streamed crm-daily output. crm-daily
-// prints `[4] merge <slug> i/total (...): ok, cursor -> …` per completed chunk and
-// a `[i/total …]` banner per chunk started, so the highest total seen is the plan
-// size and the count of "ok, cursor ->" lines is chunks done. ETA extrapolates the
-// live per-chunk rate; the Timeline (compaction) phase is indeterminate.
+// Chunk-level progress, parsed from the streamed crm-daily output. What streams
+// LIVE per chunk is crm-merge's own banner (`crm-merge: <slug>: -> <model>
+// [i/total …] ...`) and its `crm-merge: <slug>: ok ($…)` completion line —
+// crm-daily's `[4] merge … ok, cursor -> …` lines are buffered in logLines and
+// only hit stdout in one dump when the whole run ends. So: highest total seen in
+// any banner is the plan size, and chunks done is the count of crm-merge ok
+// lines while running (max'd with the cursor lines so the final dump doesn't
+// double-count). ETA extrapolates the live per-chunk rate; the Timeline
+// (compaction) phase is indeterminate.
 function parseJobProgress(buf, elapsedMs) {
   const s = String(buf || '');
   const marks = [...s.matchAll(/[\[ ](\d+)\/(\d+)[\s(\]]/g)];
   let total = null;
   for (const m of marks) { const t = +m[2]; if (t > 1 && t < 1000) total = t; }
   if (total == null) return null;
-  const done = (s.match(/: ok, cursor ->/g) || []).length;
+  const done = Math.max(
+    (s.match(/: ok, cursor ->/g) || []).length,
+    (s.match(/^crm-merge: .+?: ok\b/gm) || []).length,
+  );
   const timeline = /\[5\] timeline|crm-compact:/.test(s);
   const phase = (done >= total || timeline) ? 'timeline' : 'ingest';
   let etaMs = null;
@@ -1526,7 +1534,7 @@ function jobToView() {
     kind: job.kind[0].toUpperCase() + job.kind.slice(1) + (job.deep ? ' · deep' : '') + (job.plan ? ' · plan' : ''),
     scope: job.scope,
     status,
-    startedAt: new Date(job.startedAt).toISOString().slice(11, 19) + ' UTC',
+    startedAt: ptLocal(job.startedAt) + ' PT',
     elapsed: fmtMs(elapsedMs),
     step,
     model: job.kind === 'sweep' ? 'no model' : MERGE_MODEL,
