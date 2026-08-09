@@ -319,6 +319,8 @@ tr.runrow.live .tw{border-left:3px solid var(--amber)}
 .profile .fields{font-family:"Courier Prime",monospace;font-size:12.5px;color:var(--soft);
   margin:12px 0 4px;display:flex;flex-wrap:wrap;gap:5px 22px}
 .profile .fields b{color:var(--ink);font-weight:400}
+/* sub-entries of a two-tier What-I-know bullet: stepped in under their parent */
+.profile .fields.sub{margin:4px 0 4px 24px;padding-left:12px;border-left:2px solid var(--cardline)}
 .profile h2{font-size:19px;margin:28px 0 8px;padding-bottom:6px;border-bottom:2px solid var(--ink)}
 .profile ul{list-style:none;padding:0;margin:0}
 .profile li{padding:5px 0 5px 20px;position:relative;font-size:15.5px;line-height:1.5;border-bottom:1px solid var(--cardline)}
