@@ -97,7 +97,7 @@ When the ledger touches something the profile already claims, decide which case 
 Worked example — the profile's `## What I know` already says:
 
 ```
-- **Work:** Started a summer 2026 internship at **Latch.bio** on **June 1, 2026** ⟨m84210-m84218 @m84212⟩ (SWE role, office in Mission Bay SF…). Self-deprecating that he "can't do SWE" ⟨m84619-m84623⟩.
+- **Work:** Started a summer 2026 internship at Latch.bio on June 1, 2026 ⟨m84210-m84218 @m84212⟩ (SWE role, office in Mission Bay SF…). Self-deprecating that he "can't do SWE" ⟨m84619-m84623⟩.
 ```
 
 and the ledger adds:
