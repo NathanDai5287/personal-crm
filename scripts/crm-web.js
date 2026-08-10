@@ -29,7 +29,7 @@ const TASKS = require('../lib/tasks');
 const { STYLE: BINDERY_CSS, FONTS, FONTS_DIR, THEME_INIT, THEME_JS } = require('../lib/view/shell');
 const { render, raw } = require('../lib/view/h');
 const V = require('../lib/view/pages');
-const { renderProfile, inline: mdInline } = require('../lib/view/markdown');
+const { renderProfile, inline: mdInline, staleCount } = require('../lib/view/markdown');
 const { parseDeadline } = require('../lib/deadline');
 const ARCHIVE_STATE_FILE = path.posix.join(path.posix.dirname(TRACKED), 'crm-archive-state.json');
 
@@ -99,8 +99,8 @@ function inline(s) {
   // Old comma-list citations (`⟨m1, m2⟩`) no longer match and fall through as
   // plain text — accepted: the archive is cleared and every profile rewritten
   // before this grammar goes live.
-  const GROUP = String.raw`⟨\s*m\d+(?:-m\d+)?(?:\s+@m\d+)?\s*⟩`;
-  const ONE = /⟨\s*m(\d+)(?:-m(\d+))?(?:\s+@m(\d+))?\s*⟩/g;
+  const GROUP = String.raw`⟨\s*m\d+(?:-m\d+)?(?:\s+@m\d+)?(?:\s+ts)?\s*⟩`;
+  const ONE = /⟨\s*m(\d+)(?:-m(\d+))?(?:\s+@m(\d+))?(?:\s+ts)?\s*⟩/g;
   let n = 0;
   out = out.replace(new RegExp(`${GROUP}(?:\\s*${GROUP})*`, 'g'), (run) => {
     const seen = new Set();
@@ -616,6 +616,28 @@ function sectionText(lines, span) {
   return seg.join('\n');
 }
 
+// Message-date resolver for ⟨m… ts⟩ age stamps: the newest cited message's
+// sent_at, from the archive. One connection + prepared statement per render,
+// results cached per id; close() once the page is built. No archive yet means
+// every id resolves null and stamps simply stay off.
+function msgDates() {
+  let cdb = null;
+  let q = null;
+  try { cdb = openCrmDb(); q = cdb.prepare('SELECT sent_at FROM messages WHERE id = ?'); } catch { /* no db */ }
+  const cache = new Map();
+  return {
+    dateFor(id) {
+      if (!cache.has(id)) {
+        let ms = null;
+        if (q) { try { const r = q.get(id); ms = r ? r.sent_at : null; } catch { /* archive table not created yet */ } }
+        cache.set(id, ms);
+      }
+      return cache.get(id);
+    },
+    close() { if (cdb) { try { cdb.close(); } catch { /* closed */ } } },
+  };
+}
+
 function profilePage(slug) {
   const file = path.posix.join(CONTACTS_DIR, `${slug}.md`);
   let md;
@@ -657,40 +679,51 @@ function profilePage(slug) {
   // A hand-owned field the profile lacks is still offered; a save inserts it.
   for (const [key, label] of EDITABLE_FIELDS) if (!seen.has(label)) header.push(fieldRow(label, key, null));
 
-  // Units render in file order. A bare `##` heading line whose subsections carry
-  // the content (`## What I know`, `## Timeline`) is structure, not text — it
-  // renders plain, with no pencil. Everything else gets the pencil tucked into
-  // its own heading, visible only on hover.
-  const unitHtml = units.map((u, i) => {
-    const text = sectionText(lines, u);
-    if (u.level === 2 && text === lines[u.from].trimEnd()) return renderProfile(text);
-    const view = renderProfile(text).replace(/<\/h([23])>/, `${pencil(u.heading)}</h$1>`);
-    return `<section class="eunit" data-idx="${i}" data-heading="${esc(u.heading)}">`
-      + `<div class="eview">${view}</div>`
-      + `<textarea class="esrc" hidden spellcheck="false" aria-label="edit ${esc(u.heading)}">${esc(text)}</textarea>`
-      + `</section>`;
-  }).join('');
+  // ⟨m… ts⟩ age stamps need message dates from the archive; the header carries
+  // a quiet count of claims past the 6-month line.
+  const dates = msgDates();
+  try {
+    const mdOpts = { dateFor: dates.dateFor, now: Date.now() };
+    const stale = staleCount(md, mdOpts);
+    if (stale) header.push(`<div class="stalen">${stale} fact${stale === 1 ? '' : 's'} may be stale</div>`);
 
-  const bar = `<div class="editbar" id="editbar" hidden>`
-    + `<span class="editbar-n" id="editbarN"></span>`
-    + `<button type="button" class="btn sm" id="btnDiff">Diff</button>`
-    + `<button type="button" class="btn sm" id="btnCancel">Cancel</button>`
-    + `<button type="button" class="btn sm pr" id="btnSave">Save</button></div>`;
+    // Units render in file order. A bare `##` heading line whose subsections
+    // carry the content (`## What I know`, `## Timeline`) is structure, not
+    // text — it renders plain, with no pencil. Everything else gets the pencil
+    // tucked into its own heading, visible only on hover.
+    const unitHtml = units.map((u, i) => {
+      const text = sectionText(lines, u);
+      if (u.level === 2 && text === lines[u.from].trimEnd()) return renderProfile(text, mdOpts);
+      const view = renderProfile(text, mdOpts).replace(/<\/h([23])>/, `${pencil(u.heading)}</h$1>`);
+      return `<section class="eunit" data-idx="${i}" data-heading="${esc(u.heading)}">`
+        + `<div class="eview">${view}</div>`
+        + `<textarea class="esrc" hidden spellcheck="false" aria-label="edit ${esc(u.heading)}">${esc(text)}</textarea>`
+        + `</section>`;
+    }).join('');
 
-  const modal = `<div class="modal" id="diffModal" hidden><div class="diffcard">`
-    + `<div class="diffhead"><h2>Unsaved changes — ${esc(name)}</h2>`
-    + `<span class="dmode"><button type="button" class="btn sm" id="dmInline">inline</button>`
-    + `<button type="button" class="btn sm" id="dmSplit">side by side</button></span>`
-    + `<button type="button" class="btn sm" id="dmClose">close</button></div>`
-    + `<div class="diffbody" id="diffBody"></div></div></div>`;
+    const bar = `<div class="editbar" id="editbar" hidden>`
+      + `<span class="editbar-n" id="editbarN"></span>`
+      + `<button type="button" class="btn sm" id="btnDiff">Diff</button>`
+      + `<button type="button" class="btn sm" id="btnCancel">Cancel</button>`
+      + `<button type="button" class="btn sm pr" id="btnSave">Save</button></div>`;
 
-  const cfg = { slug, baseHash, orig: md, headerTo, units: units.map((u) => ({ from: u.from, to: u.to, heading: u.heading })) };
-  const cfgJs = `<script>window.__EDIT_CFG=${JSON.stringify(cfg).replace(/</g, '\\u003c')}</script>`;
+    const modal = `<div class="modal" id="diffModal" hidden><div class="diffcard">`
+      + `<div class="diffhead"><h2>Unsaved changes — ${esc(name)}</h2>`
+      + `<span class="dmode"><button type="button" class="btn sm" id="dmInline">inline</button>`
+      + `<button type="button" class="btn sm" id="dmSplit">side by side</button></span>`
+      + `<button type="button" class="btn sm" id="dmClose">close</button></div>`
+      + `<div class="diffbody" id="diffBody"></div></div></div>`;
 
-  const body = `<div class="back"><a href="/">&larr; All people</a>`
-    + ` &middot; <a href="/c/${encodeURIComponent(slug)}/history">History &rarr;</a></div>`
-    + `<div class="profile">${header.join('')}${unitHtml}</div>${bar}${modal}`;
-  return page(name, body + cfgJs + PROFILE_EDIT_JS, '/');
+    const cfg = { slug, baseHash, orig: md, headerTo, units: units.map((u) => ({ from: u.from, to: u.to, heading: u.heading })) };
+    const cfgJs = `<script>window.__EDIT_CFG=${JSON.stringify(cfg).replace(/</g, '\\u003c')}</script>`;
+
+    const body = `<div class="back"><a href="/">&larr; All people</a>`
+      + ` &middot; <a href="/c/${encodeURIComponent(slug)}/history">History &rarr;</a></div>`
+      + `<div class="profile">${header.join('')}${unitHtml}</div>${bar}${modal}`;
+    return page(name, body + cfgJs + PROFILE_EDIT_JS, '/');
+  } finally {
+    dates.close();
+  }
 }
 
 // The whole edit state machine, in page. Mirrors the server exactly where it
@@ -2358,7 +2391,9 @@ function start() {
             try { payload = JSON.parse(raw2); } catch { sendJson(400, { ok: false, error: 'bad JSON' }); return; }
             const text = payload && typeof payload.text === 'string' ? payload.text : null;
             if (text === null || text.length > 200_000) { sendJson(400, { ok: false, error: 'bad text' }); return; }
-            sendJson(200, { ok: true, html: renderProfile(text) });
+            const dates = msgDates();
+            try { sendJson(200, { ok: true, html: renderProfile(text, { dateFor: dates.dateFor, now: Date.now() }) }); }
+            finally { dates.close(); }
           } catch (e) {
             try { sendJson(500, { ok: false, error: String(e.message).slice(0, 200) }); } catch { /* sent */ }
           }

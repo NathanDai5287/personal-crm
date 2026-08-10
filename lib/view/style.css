@@ -153,6 +153,11 @@ button{font:inherit;cursor:pointer}
   padding:0 5px;transform:rotate(-1.4deg);opacity:.88;white-space:nowrap;vertical-align:1px}
 .slip:hover{opacity:1;text-decoration:none;background:#2E4A6B12}
 .slip.ox{border-color:var(--ox);color:var(--ox);transform:rotate(1.1deg)}
+/* ⟨m… ts⟩ age stamp: a second field on the slip. Gray = as-of (6–12 months),
+   amber = said (12+) — the caution ink: aging, not yet wrong. Title has the date. */
+.slip .age{margin-left:5px;padding-left:6px;border-left:1px solid var(--rule);color:var(--soft);letter-spacing:.02em}
+.slip .age.old{color:var(--amber)}
+.stalen{font-family:"Courier Prime",monospace;font-size:11px;letter-spacing:.06em;color:var(--amber);opacity:.85;margin-top:2px}
 .stamp{position:absolute;right:12px;top:13px;border:2px solid var(--ox);color:var(--ox);
   font-family:"Courier Prime",monospace;font-weight:700;font-size:10px;letter-spacing:.13em;
   text-transform:uppercase;padding:2px 6px;transform:rotate(-7deg);opacity:.74}
