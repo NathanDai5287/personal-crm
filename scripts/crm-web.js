@@ -730,14 +730,44 @@ const PROFILE_EDIT_JS = `<script>(function(){
     u.classList.remove('editing');
     u.querySelector('.eview').hidden=false;
     u.querySelector('.esrc').hidden=true;
+    rerender(u);
     refresh();
+  }
+  // The reading view must show what the editor now holds, not what the page
+  // loaded with. The server renders the edited Markdown with the same
+  // renderProfile the page itself uses; the live pencil node (listener and all)
+  // moves into the fresh heading.
+  function rerender(u){
+    var view=u.querySelector('.eview'),ta=u.querySelector('.esrc');
+    var text=normSec(ta.value);
+    if(text===u.dataset.shown)return;
+    fetch('/render',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:text})})
+      .then(function(r){return r.json();})
+      .then(function(j){
+        if(!j||!j.ok)return;
+        var btn=u.querySelector('.ebtn');
+        view.innerHTML=j.html;
+        var h=view.querySelector('h2,h3');
+        (h||view).appendChild(btn);
+        u.dataset.shown=text;
+      })
+      .catch(function(){});
   }
   units.forEach(function(u){
     var ta=u.querySelector('.esrc');
+    u.dataset.shown=ta.defaultValue;
     u.querySelector('.ebtn').addEventListener('click',function(){openUnit(u);});
     ta.addEventListener('input',function(){size(ta);refresh();});
     ta.addEventListener('keydown',function(e){if(e.key==='Escape'){e.stopPropagation();closeUnit(u);}});
   });
+  function escText(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML;}
+  function closeFld(f){
+    var inp=f.querySelector('.efield-input'),val=f.querySelector('.efield-val');
+    f.classList.remove('editing');inp.hidden=true;val.hidden=false;
+    var v=normFld(inp.value);
+    val.innerHTML=v?escText(v):'<em>TBD</em>';
+    refresh();
+  }
   flds.forEach(function(f){
     var inp=f.querySelector('.efield-input'),val=f.querySelector('.efield-val');
     f.querySelector('.ebtn').addEventListener('click',function(){
@@ -745,10 +775,7 @@ const PROFILE_EDIT_JS = `<script>(function(){
     });
     inp.addEventListener('input',refresh);
     inp.addEventListener('keydown',function(e){
-      if(e.key==='Escape'||e.key==='Enter'){
-        e.stopPropagation();
-        f.classList.remove('editing');inp.hidden=true;val.hidden=false;refresh();
-      }
+      if(e.key==='Escape'||e.key==='Enter'){e.stopPropagation();closeFld(f);}
     });
   });
 
@@ -756,10 +783,7 @@ const PROFILE_EDIT_JS = `<script>(function(){
   document.getElementById('btnCancel').addEventListener('click',function(){
     if(!confirm('Discard all unsaved changes?'))return;
     units.forEach(function(u){var ta=u.querySelector('.esrc');ta.value=ta.defaultValue;closeUnit(u);});
-    flds.forEach(function(f){
-      var inp=f.querySelector('.efield-input');inp.value=inp.defaultValue;
-      f.classList.remove('editing');inp.hidden=true;f.querySelector('.efield-val').hidden=false;
-    });
+    flds.forEach(function(f){var inp=f.querySelector('.efield-input');inp.value=inp.defaultValue;closeFld(f);});
     refresh();
   });
 
@@ -2317,6 +2341,24 @@ function start() {
             const r = applyManualEdit(slug, payload || {});
             if (!r.ok) { sendJson(r.status, { ok: false, error: r.error }); return; }
             sendJson(200, { ok: true, changed: r.changed });
+          } catch (e) {
+            try { sendJson(500, { ok: false, error: String(e.message).slice(0, 200) }); } catch { /* sent */ }
+          }
+        }, 512_000);
+        return;
+      }
+      // Render one unit's Markdown for the profile page's in-place editor —
+      // closing an editor swaps in exactly what a reload would show.
+      if (url.pathname === '/render' && req.method === 'POST') {
+        const sfs = req.headers['sec-fetch-site'];
+        if (sfs && sfs !== 'same-origin' && sfs !== 'none') { sendJson(403, { ok: false, error: 'cross-site request refused' }); return; }
+        readBody(req, (raw2) => {
+          try {
+            let payload;
+            try { payload = JSON.parse(raw2); } catch { sendJson(400, { ok: false, error: 'bad JSON' }); return; }
+            const text = payload && typeof payload.text === 'string' ? payload.text : null;
+            if (text === null || text.length > 200_000) { sendJson(400, { ok: false, error: 'bad text' }); return; }
+            sendJson(200, { ok: true, html: renderProfile(text) });
           } catch (e) {
             try { sendJson(500, { ok: false, error: String(e.message).slice(0, 200) }); } catch { /* sent */ }
           }
