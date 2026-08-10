@@ -117,7 +117,7 @@ function inline(s) {
       n += 1;
       const href = (end === start ? `/m/${start}` : `/m/${start}-${end}`) + (primary ? `#m${primary}` : '');
       const label = end === start ? `m${start}` : `m${start}–m${end}`;
-      links.push(`<a href="${href}" title="source ${label}${primary ? `, key line m${primary}` : ''}">${n}</a>`);
+      links.push(`<a href="${href}" target="_blank" rel="noopener" title="source ${label}${primary ? `, key line m${primary}` : ''}">${n}</a>`);
     }
     return links.length ? `<sup class="cites">${links.join('')}</sup>` : run;
   });
@@ -649,18 +649,31 @@ function profilePage(slug) {
 
   const pencil = (label) => `<button type="button" class="ebtn" title="edit ${esc(label)}" aria-label="edit ${esc(label)}">&#9998;</button>`;
 
-  // Header: title + metadata bullets. The two hand-owned fields render with a
-  // hover pencil; machine-owned lines (ids, counts, contact dates) stay read-only.
+  // Header: the name, then ONE glanceable catalog strip instead of a bullet
+  // wall. Cells speak the status page's voice (small caps key over its value);
+  // hand-owned fields (Relationship, Birthday) keep the hover pencil; the
+  // Signal uuid drops to a faint footer line — present, never in the way.
   const editable = new Map(EDITABLE_FIELDS.map(([key, label]) => [label, key]));
   const seen = new Set();
   const header = [];
-  const fieldRow = (label, key, cur) => {
+  const cellMap = new Map(); // label -> cell html; emitted in ORDER, extras after
+  const foot = [];
+  const cell = (label, inner, editAttrs) =>
+    `<div class="cell${editAttrs ? ' efield' : ''}"${editAttrs || ''}>`
+    + `<span class="k">${esc(label)}</span><span class="v">${inner}</span></div>`;
+  const fieldCell = (label, key, cur) => {
     const orig = cur == null || cur === '_TBD_' ? '' : cur;
-    return `<div class="fields efield" data-key="${key}" data-label="${esc(label)}">`
-      + `<span><b>${esc(label)}:</b> <span class="efield-val">${mdInline(cur == null ? '_TBD_' : cur)}</span></span>`
-      + `<input class="efield-input" hidden maxlength="120" value="${esc(orig)}" aria-label="${esc(label)}">`
-      + pencil(label)
-      + `</div>`;
+    return cell(label,
+      `<span class="efield-val">${mdInline(cur == null ? '_TBD_' : cur)}</span>`
+        + `<input class="efield-input" hidden maxlength="120" value="${esc(orig)}" aria-label="${esc(label)}">`
+        + pencil(label),
+      ` data-key="${key}" data-label="${esc(label)}"`);
+  };
+  const valueCell = (label, value) => {
+    // The message count reads as a stat: total up top, the split underneath.
+    const m = label === 'Messages' && value.match(/^(\d+) total \((\d+) from them, (\d+) from me\)$/);
+    if (m) return cell(label, `${m[1]}<span class="sub">${m[2]} them &middot; ${m[3]} me</span>`);
+    return cell(label, mdInline(value));
   };
   for (const line of lines.slice(0, headerTo)) {
     const t = line.trim();
@@ -670,14 +683,20 @@ function profilePage(slug) {
     if (meta) {
       const label = meta[1].trim();
       const key = editable.get(label);
-      if (key) { seen.add(label); header.push(fieldRow(label, key, meta[2].trim())); }
-      else header.push(`<div class="fields"><span><b>${esc(label)}:</b> ${mdInline(meta[2])}</span></div>`);
+      if (key) { seen.add(label); cellMap.set(label, fieldCell(label, key, meta[2].trim())); }
+      else if (label === 'Signal ID') foot.push(`<div class="uuidln">signal ${esc(meta[2].trim())}</div>`);
+      else cellMap.set(label, valueCell(label, meta[2].trim()));
       continue;
     }
     header.push(`<p>${mdInline(t)}</p>`);
   }
   // A hand-owned field the profile lacks is still offered; a save inserts it.
-  for (const [key, label] of EDITABLE_FIELDS) if (!seen.has(label)) header.push(fieldRow(label, key, null));
+  for (const [key, label] of EDITABLE_FIELDS) if (!seen.has(label)) cellMap.set(label, fieldCell(label, key, null));
+  const ORDER = ['Relationship', 'Birthday', 'First contact', 'Last contact', 'Messages', 'Phone'];
+  header.push(`<div class="idcard">${
+    [...ORDER.filter((l) => cellMap.has(l)), ...[...cellMap.keys()].filter((l) => !ORDER.includes(l))]
+      .map((l) => cellMap.get(l)).join('')
+  }</div>`);
 
   // ⟨m… ts⟩ age stamps need message dates from the archive; the header carries
   // a quiet count of claims past the 6-month line.
@@ -686,6 +705,7 @@ function profilePage(slug) {
     const mdOpts = { dateFor: dates.dateFor, now: Date.now() };
     const stale = staleCount(md, mdOpts);
     if (stale) header.push(`<div class="stalen">${stale} fact${stale === 1 ? '' : 's'} may be stale</div>`);
+    header.push(...foot);
 
     // Units render in file order. A bare `##` heading line whose subsections
     // carry the content (`## What I know`, `## Timeline`) is structure, not

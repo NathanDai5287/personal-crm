@@ -6,7 +6,7 @@ system: |
 ---
 {{PERIOD_SENTENCE}}
 {{STYLE_INSTRUCTION}}
-Each message line starts with a ⟨m…⟩ source id. For each key fact in your summary, cite the id(s) of the message(s) it came from by copying their ⟨m…⟩ marker inline right after the fact (e.g. "planned camping trip ⟨m88123⟩"). Cite at least 1 and at most 5 ids total — only the load-bearing messages. Single ids only, one per ⟨…⟩ — a hyphenated range like ⟨m88123-m88130⟩ is illegal here. Copy ids EXACTLY as they appear; NEVER invent or alter an id. If the bucket holds nothing durable, write one short line saying so and cite the message(s) that filled it — a citation records where a line came from, not that it mattered.
+Every input line carries its ⟨m…⟩ source id(s). For each key fact in your summary, cite the id(s) of the message(s) it came from by copying their ⟨m…⟩ marker inline right after the fact (e.g. "planned camping trip ⟨m88123⟩"). Cite at least 1 and at most 5 ids total — only the load-bearing messages. Single ids only, one per ⟨…⟩ — a hyphenated range like ⟨m88123-m88130⟩ is illegal here. Copy ids EXACTLY as they appear; NEVER invent or alter an id. If the bucket holds nothing durable, write one short line saying so and cite the message(s) that filled it — a citation records where a line came from, not that it mattered.
 
 Messages:
 {{MESSAGES}}
