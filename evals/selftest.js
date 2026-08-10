@@ -466,6 +466,20 @@ function main() {
   console.log(`sectioned (v11) reference: ${sect.score}/${sect.maxScore}${sectBad.length ? '  <-- UNEXPECTED FAILURES' : '  ok'}`);
   for (const f of sectBad) { failures++; console.log(`   !! ${f.id}: ${f.detail}`); }
 
+  // 2f2. `### Notes` opens directly with a `**Label:**` entry — cited and bold
+  // BY CONTRACT — and must not be mistaken for a section summary. This is the
+  // exact false positive the first Sonnet run produced (vlad's Notes rewrite).
+  const notes = score(SECTIONED.replace('### Living', [
+    '### Notes',
+    '',
+    '**Espresso:** Finally ordered the machine ⟨m1000⟩.',
+    '',
+    '### Living',
+  ].join('\n')));
+  const notesShape = notes.results.find((r) => r.id === 'wik_section_shape');
+  console.log(`cited Notes entry as a section's first block: ${notesShape.pass ? 'ok' : `FAIL — ${notesShape.detail}`}`);
+  if (!notesShape.pass) failures++;
+
   // 2g. Blocks the merge did NOT touch are never shape-judged — a hand-authored
   // or legacy profile carrying a violation is not this run's fault.
   const dirty = SECTIONED.replace('Starting at Tesla in August 2026.', 'Starting at Tesla in August 2026 ⟨m1002⟩.');

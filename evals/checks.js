@@ -197,12 +197,14 @@ function bullets(body) {
 // ### section it sits under and its role in the v11 shape:
 //   legacy  — content before any ### heading (the old one-bullet-per-topic form)
 //   bullet  — a list item (old-format content surviving inside a section)
-//   summary — the first block under a ### heading: one plain uncited sentence
-//   label   — a `**Sub-topic:**`/`**Label:**` line
+//   summary — the first PLAIN block under a ### heading: one uncited sentence
+//   label   — a `**Sub-topic:**`/`**Label:**` line, wherever it sits
 //   detail  — cited fact paragraphs, everything else
-// The tagging is positional, not aspirational: whatever actually occupies the
-// summary slot is tagged `summary`, so a cited paragraph parked there shows up
-// as a shape violation rather than being excused as detail.
+// Labels classify by CONTENT, summaries by position: `### Notes` legitimately
+// opens with a `**Label:**` entry (cited, by contract), so a `**X:**`-led first
+// block is a label, never a mislabeled summary — while a plain paragraph parked
+// in the summary slot is tagged `summary`, so citations there still show up as
+// the shape violation they are.
 function wikBlocks(body) {
   const out = [];
   let section = null;
@@ -214,8 +216,8 @@ function wikBlocks(body) {
     let kind;
     if (section === null) kind = 'legacy';
     else if (/^[-*]\s/.test(t)) kind = 'bullet';
-    else if (summarySlot) kind = 'summary';
     else if (/^\*\*[^*]+:\*\*/.test(t)) kind = 'label';
+    else if (summarySlot) kind = 'summary';
     else kind = 'detail';
     out.push({ section, kind, text: cur.join('\n') });
     if (section !== null) summarySlot = false;
