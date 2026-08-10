@@ -75,7 +75,8 @@ his main holds were ASTS and ServiceNow ⟨m71759-m71770 @m71770 ts⟩
 - The marker flags the claim directly in front of it, and lives in exactly one of that claim's citations: the newest. When your edit gives a flagged claim a newer citation, move the ` ts` to the new one.
 - Judge by durability: if nothing changed but the date, would the sentence eventually read as *wrong* — not merely old? Then flag it. Personality, values, running bits, and how they talk are never flagged.
 - The flag is bookkeeping, not a substitute for the conflict rule: when the ledger shows the fact actually changed, rewrite the claim — the newer statement wins — and flag the rewritten claim's citation.
-- Adding or moving ` ts` is the **one** edit permitted inside an existing citation. Every other character of a carried-forward citation stays exactly as it was.
+- **A flagged claim that has already lapsed gets anchored to its period, not left reading as current.** When a section you are editing holds a flagged claim whose own stated period is over by the ledger's newest date — a "summer 2026" internship once that summer has passed, a lease that has ended, a school year now finished — rewrite it in past tense anchored to when it was true: "was a sophomore in 2025–26", "interned at Latch.bio in summer 2026". Anchor only to a period the claim or its messages actually state — if you cannot tell when it stopped being true, leave it exactly as it is. An anchored claim is durable, so remove its ` ts`; its citations stay.
+- Adding, moving, or removing ` ts` is the **one** kind of edit permitted inside an existing citation. Every other character of a carried-forward citation stays exactly as it was.
 
 # What to update
 
@@ -152,7 +153,7 @@ Started a summer 2026 internship at Latch.bio on June 1, 2026 ⟨m84210-m84218 @
 
 Fold even when the new detail reverses the framing — a new sub-topic is earned by a new thread, not by a new message about an old one. And note the citations: two back-to-back messages are one two-message range, not two citations; the new range sits on the new claim only; and every existing claim keeps the citation it already carries, character for character — those ids point at older ledgers you cannot see, and they are not yours to rewrite.
 
-**Citation carry-forward:** when you rewrite, merge, or reword a `## Talking points` bullet or a `## What I know` passage that already carries citations and the claim survives, keep them — still attached to the claim they support. A citation is removed in exactly two cases: the claim it supports is removed, or the claim already has 3 citations and this ledger offers a clearly stronger stretch. In that second case, replace one. You cannot read the messages behind an old citation, so unless one is obviously weaker, keep the earliest and the latest and replace the middle — a claim whose citations have all drifted into the last month has lost the history that made it credible. The one edit allowed *inside* a kept citation is adding or moving ` ts` (see "Time-sensitive claims").
+**Citation carry-forward:** when you rewrite, merge, or reword a `## Talking points` bullet or a `## What I know` passage that already carries citations and the claim survives, keep them — still attached to the claim they support. A citation is removed in exactly two cases: the claim it supports is removed, or the claim already has 3 citations and this ledger offers a clearly stronger stretch. In that second case, replace one. You cannot read the messages behind an old citation, so unless one is obviously weaker, keep the earliest and the latest and replace the middle — a claim whose citations have all drifted into the last month has lost the history that made it credible. The one kind of edit allowed *inside* a kept citation is adding, moving, or removing ` ts` (see "Time-sensitive claims").
 
 # Talking points format
 
@@ -224,7 +225,7 @@ Check each of these. If any fails, fix it before replying:
 - No claim carries more than 3 citations; no claim's citations overlap one another.
 - Every `###` section you touched has one plain-sentence summary directly under its heading, and every sub-topic line you touched has its own; summaries carry no citations and no bold.
 - A blank line separates every block you wrote; no bold appears anywhere except `**Sub-topic:**`/`**Label:**` structure.
-- Every ` ts` you wrote or moved sits inside the claim's newest citation; every carried-forward citation is otherwise character-for-character unchanged.
+- Every ` ts` you wrote or moved sits inside the claim's newest citation; no ` ts` survives on a claim you anchored to a past period; every carried-forward citation is otherwise character-for-character unchanged.
 - Every `### Notes` entry you touched is still a single short line, refreshed in place.
 - Every `## Talking points` bullet has the `- **YYYY-MM-DD** … ⟨…⟩` shape; 8 or fewer bullets.
 - No citations in `## Open questions`.

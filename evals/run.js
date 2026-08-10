@@ -172,6 +172,29 @@ const VARIANTS = {
     prompt: 'prompts/merge-v10.md',
     user: (c, today) => VARIANTS.b.user(c, today),
   },
+  // L = J plus the 2026-08-09 What-I-know restructure (Nathan's redesign): ###
+  // topic sections with plain uncited summary sentences, **Sub-topic:** threads,
+  // the ` ts` time-sensitive flag riding in a claim's newest citation (with
+  // lapsed claims anchored to their period), and Relationship/Birthday fillable
+  // only from _TBD_. J is the control.
+  l: {
+    label: 'L (J + sections)',
+    prompt: 'prompts/merge-v11.md',
+    user: (c, today) => VARIANTS.b.user(c, today),
+  },
+  // The same pair on the PRODUCTION model. The G→H→I→J lineage was promoted on
+  // Opus evidence alone, so J has never been measured where it actually ships;
+  // running incumbent and candidate together prices that in. Both PAID.
+  kj_high: {
+    label: 'K3+J think=high', prompt: 'prompts/merge-v10.md',
+    model: 'moonshotai/kimi-k3', thinking: 'high',
+    user: (c, today) => VARIANTS.b.user(c, today),
+  },
+  kl_high: {
+    label: 'K3+L think=high', prompt: 'prompts/merge-v11.md',
+    model: 'moonshotai/kimi-k3', thinking: 'high',
+    user: (c, today) => VARIANTS.b.user(c, today),
+  },
   // K3 on F, to confirm the weaker model can carry the extra convention.
   kf_high: {
     label: 'K3+F think=high', prompt: 'prompts/merge-v6.md',

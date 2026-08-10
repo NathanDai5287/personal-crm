@@ -17,20 +17,25 @@
 
 // THE CITATION GRAMMAR — docs/PROVENANCE-SPEC.md §1.
 //
-//   citation := "⟨" range [ " @" id ] "⟩"
+//   citation := "⟨" range [ " @" id ] [ " ts" ] "⟩"
 //   range    := id "-" id  |  id          ; the second form is start == end
 //   id       := "m" 1*DIGIT
 //
 // `⟨m90211-m90219 @m90215⟩` is a thread-scoped stretch plus the one line the
 // claim rests on. `⟨m88104⟩` is still legal — a degenerate range. Id LISTS
 // (`⟨m89166, m89167⟩`) are gone: two adjacent messages are a two-message range,
-// and genuinely separate moments get separate citations (§2).
-const CITE_SRC = String.raw`⟨\s*m\d+(?:-m\d+)?(?:\s+@m\d+)?\s*⟩`;
+// and genuinely separate moments get separate citations (§2). ` ts` (merge-v11
+// onward) marks the claim in front as time-sensitive; it rides in the claim's
+// newest citation, always last inside the brackets. It MUST be in this grammar:
+// a parser without it would drop every flagged citation from the id harvest,
+// and the strongest anti-hallucination checks would go blind to exactly the
+// citations the new prompt writes.
+const CITE_SRC = String.raw`⟨\s*m\d+(?:-m\d+)?(?:\s+@m\d+)?(?:\s+ts)?\s*⟩`;
 const CITE = new RegExp(CITE_SRC, 'g');
 const CITE_ID = /m(\d+)/g;
 // Same grammar, capturing: 1 = start, 2 = end (absent when degenerate),
 // 3 = primary (absent when there is none).
-const CITE_PARTS = /⟨\s*m(\d+)(?:-m(\d+))?(?:\s+@m(\d+))?\s*⟩/g;
+const CITE_PARTS = /⟨\s*m(\d+)(?:-m(\d+))?(?:\s+@m(\d+))?(?:\s+ts)?\s*⟩/g;
 
 // V4: a range may cover at most this many messages OF ITS OWN THREAD. Counted
 // from resolved rows, never as `end - start` — at the measured 2-6% density a
@@ -57,6 +62,12 @@ const MALFORMED = [
   { re: /⟨\s*m\d+\s*\.\.\.?\s*m?\d+[^⟩\n]*⟩/g, why: '.. range separator (use ASCII -)' },
   { re: /⟨\s*m\d+(?:\s*,\s*m\d+)+\s*⟩/g, why: 'comma-separated id list (use a range)' },
   { re: /⟨\s*m\d+-\d+[^⟩\n]*⟩/g, why: 'range end missing its m (⟨m1-2⟩)' },
+  // ` ts` drift (the grammar's newest affordance): the flag is lowercase, spaced,
+  // and LAST inside the brackets — `⟨m1-m2 ts @m3⟩`, `⟨m9651ts⟩` and `⟨m9651 TS⟩`
+  // all miss the canonical parser and would otherwise vanish without a trace.
+  { re: /⟨[^⟩\n]*\bts\b\s+[^⟩\s][^⟩\n]*⟩/g, why: 'ts not last inside the citation' },
+  { re: /⟨\s*m\d+(?:-m\d+)?(?:\s+@m\d+)?ts\s*⟩/g, why: 'ts glued on without a space' },
+  { re: /⟨[^⟩\n]*\s(?:TS|Ts|tS)\s*⟩/g, why: 'ts must be lowercase' },
   {
     find: (text) => citations(text).filter((c) => c.end < c.start).map((c) => c.raw),
     why: 'reversed range (end before start)',
@@ -180,6 +191,43 @@ function makeLedgerRangeResolver(ledger) {
 
 function bullets(body) {
   return String(body || '').split('\n').filter((l) => /^\s*[-*]\s+\S/.test(l));
+}
+
+// A `## What I know` body as blank-line-separated BLOCKS, each tagged with the
+// ### section it sits under and its role in the v11 shape:
+//   legacy  — content before any ### heading (the old one-bullet-per-topic form)
+//   bullet  — a list item (old-format content surviving inside a section)
+//   summary — the first block under a ### heading: one plain uncited sentence
+//   label   — a `**Sub-topic:**`/`**Label:**` line
+//   detail  — cited fact paragraphs, everything else
+// The tagging is positional, not aspirational: whatever actually occupies the
+// summary slot is tagged `summary`, so a cited paragraph parked there shows up
+// as a shape violation rather than being excused as detail.
+function wikBlocks(body) {
+  const out = [];
+  let section = null;
+  let summarySlot = false;
+  let cur = [];
+  const flush = () => {
+    if (!cur.length) return;
+    const t = cur[0].trimStart();
+    let kind;
+    if (section === null) kind = 'legacy';
+    else if (/^[-*]\s/.test(t)) kind = 'bullet';
+    else if (summarySlot) kind = 'summary';
+    else if (/^\*\*[^*]+:\*\*/.test(t)) kind = 'label';
+    else kind = 'detail';
+    out.push({ section, kind, text: cur.join('\n') });
+    if (section !== null) summarySlot = false;
+    cur = [];
+  };
+  for (const line of String(body || '').split('\n')) {
+    if (/^###\s+/.test(line)) { flush(); section = line.replace(/^###\s+/, '').trim(); summarySlot = true; continue; }
+    if (!line.trim()) { flush(); continue; }
+    cur.push(line);
+  }
+  flush();
+  return out;
 }
 
 // ---- individual checks ---------------------------------------------------------
@@ -444,8 +492,18 @@ function checkWhatIKnowCited(ctx) {
     return { id: 'wik_cited', severity: 'medium', pass: true, detail: 'no What I know section' };
   }
   const priorText = before === undefined ? '' : before;
-  const priorBullets = new Set(bullets(priorText).map((b) => b.trim()));
-  const changed = bullets(after).filter((b) => !priorBullets.has(b.trim()));
+  const norm = (s) => String(s).replace(/\s+/g, ' ').trim();
+  const priorBullets = new Set(bullets(priorText).map(norm));
+  const changedBullets = bullets(after).filter((b) => !priorBullets.has(norm(b)));
+  // The v11 sectioned shape carries its facts in detail PARAGRAPHS rather than
+  // bullets, and the same fairness question applies to them: of the blocks this
+  // merge added or changed, did any gain content without an id? Summaries and
+  // sub-topic lines are uncited BY CONTRACT — wik_section_shape owns those.
+  const priorBlocks = new Set(wikBlocks(priorText).map((b) => norm(b.text)));
+  const changedDetail = wikBlocks(after)
+    .filter((b) => b.kind === 'detail' && !priorBlocks.has(norm(b.text)))
+    .map((b) => b.text);
+  const changed = [...changedBullets, ...changedDetail];
   if (!changed.length) {
     return { id: 'wik_cited', severity: 'medium', pass: true, detail: 'section unchanged' };
   }
@@ -458,9 +516,47 @@ function checkWhatIKnowCited(ctx) {
     id: 'wik_cited', severity: 'medium',
     pass: uncited.length === 0,
     detail: uncited.length
-      ? `${uncited.length} of ${changed.length} added/changed bullet(s) carry no ⟨m…⟩: `
+      ? `${uncited.length} of ${changed.length} added/changed unit(s) carry no ⟨m…⟩: `
         + uncited.map((b) => `"${b.trim().slice(0, 60)}…"`).join(' ')
-      : `${changed.length} added/changed bullet(s), all carry provenance`,
+      : `${changed.length} added/changed unit(s), all carry provenance`,
+  };
+}
+
+// The v11 section contract, checked only on blocks THIS merge wrote: a ###
+// section's summary is one plain sentence — no citations, no bold; a
+// `**Sub-topic:**` line outside ### Notes is an uncited summary too (Notes
+// entries DO cite — they bring a citation forward on every refresh); and bold
+// never appears inside summary or detail prose, only in structure labels.
+// Old-format output has no ### sections in `## What I know`, so this passes
+// vacuously there — the mirror image of wik_cited's bullet arm, which is
+// vacuous for the sectioned shape. Untouched blocks are never judged: a legacy
+// or hand-authored profile is not the merge's fault.
+function checkWikSectionShape(ctx) {
+  const after = ctx.after.sections.get('## What I know');
+  if (after === undefined) {
+    return { id: 'wik_section_shape', severity: 'medium', pass: true, detail: 'no What I know section' };
+  }
+  const norm = (s) => String(s).replace(/\s+/g, ' ').trim();
+  const prior = new Set(wikBlocks(ctx.before.sections.get('## What I know') || '').map((b) => norm(b.text)));
+  const wrote = wikBlocks(after).filter((b) => !prior.has(norm(b.text)));
+  const problems = [];
+  for (const b of wrote) {
+    const head = b.text.trim().slice(0, 48);
+    if (b.kind === 'summary') {
+      if (citationIds(b.text).size) problems.push(`summary under "${b.section}" carries a citation`);
+      if (b.text.includes('**')) problems.push(`summary under "${b.section}" carries bold`);
+    } else if (b.kind === 'label') {
+      if (!/^notes$/i.test(b.section || '') && citationIds(b.text).size) {
+        problems.push(`sub-topic line carries a citation: "${head}…"`);
+      }
+    } else if (b.kind === 'detail') {
+      if (b.text.includes('**')) problems.push(`bold inside detail prose: "${head}…"`);
+    }
+  }
+  return {
+    id: 'wik_section_shape', severity: 'medium',
+    pass: problems.length === 0,
+    detail: problems.length ? problems.slice(0, 3).join('; ') : 'blocks well-formed (or none written)',
   };
 }
 
@@ -557,7 +653,8 @@ const ALL = [
   checkWriteScope, checkTimeline, checkCitedIdsFromLedger, checkCitationsResolve,
   checkCitationRangeValid,
   checkCitationCarryForward, checkCitationSyntax, checkTalkingPointFormat,
-  checkTalkingPointCap, checkOpenQuestionsUncited, checkWhatIKnowCited, checkSectionOrder, checkMetadata,
+  checkTalkingPointCap, checkOpenQuestionsUncited, checkWhatIKnowCited, checkWikSectionShape,
+  checkSectionOrder, checkMetadata,
   checkNoDerivedFacts, checkLastContact, checkInjection, checkNoop,
 ];
 
@@ -586,6 +683,6 @@ function runChecks(input) {
 }
 
 module.exports = {
-  runChecks, parseProfile, citationIds, citations, bullets, makeLedgerRangeResolver,
+  runChecks, parseProfile, citationIds, citations, bullets, wikBlocks, makeLedgerRangeResolver,
   WEIGHT, MAX_TALKING_POINTS, MAX_RANGE_MESSAGES, CITE, CITE_SRC,
 };

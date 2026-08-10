@@ -72,6 +72,29 @@ const GOOD = BEFORE
   .replace('- **2026-06-30** ask how the move went ⟨m900⟩',
     '- **2026-06-30** ask how the move went ⟨m900⟩\n- **2026-07-06** ask how the new espresso machine is working out ⟨m1000⟩');
 
+// The v11 SECTIONED shape (prompts/merge-v11.md): ### topic sections, a plain
+// uncited summary sentence under each heading, cited detail paragraphs, and the
+// ` ts` flag riding in a claim's newest citation. This is the clean reference
+// for wik_section_shape, for wik_cited's paragraph arm, and for the widened
+// citation grammar — if the parser ever drops ` ts`, the mutants built on this
+// text stop being seen at all, which is exactly the failure they exist to catch.
+const SECTIONED = GOOD.replace(
+  '- Lives in Oakland; starting at Tesla in August 2026 ⟨m1002⟩.',
+  [
+    '### Living',
+    '',
+    'Lives in Oakland and staying put for the new job.',
+    '',
+    'Staying in Oakland for the Tesla job, ~40 min commute each way ⟨m1008-m1010 @m1010⟩.',
+    '',
+    '### Work',
+    '',
+    'Starting at Tesla in August 2026.',
+    '',
+    'Starting at Tesla in August 2026, powertrain team, starts on the 3rd ⟨m1002-m1006 @m1002 ts⟩.',
+  ].join('\n'),
+);
+
 const FILES_BEFORE = new Map([['data/contacts/test.md', 'h0'], ['data/contacts/_refresh/test.new.txt', 'hL']]);
 const FILES_AFTER = new Map([['data/contacts/test.md', 'h1'], ['data/contacts/_refresh/test.new.txt', 'hL']]);
 
@@ -317,6 +340,61 @@ const MUTANTS = [
     expect: 'last_contact_current',
     after: GOOD.replace('- **Last contact:** 2026-07-07', '- **Last contact:** 2026-06-30'),
   },
+  // ---- the ` ts` flag (merge-v11) -------------------------------------------
+  // Parser-vision guard, the most important one: an invented id inside a
+  // ts-flagged citation must still be caught. If the grammar regexes ever lose
+  // ` ts`, flagged citations drop out of the id harvest entirely and this sails
+  // through — the whole reason the flag had to enter CITE_SRC, not just the
+  // prompt.
+  {
+    name: 'invented id inside a ts citation',
+    expect: 'no_invented_citations',
+    after: SECTIONED.replace('⟨m1002-m1006 @m1002 ts⟩', '⟨m9998 ts⟩'),
+  },
+  {
+    name: 'ts not last inside the citation',
+    expect: 'citation_syntax',
+    after: SECTIONED.replace('⟨m1002-m1006 @m1002 ts⟩', '⟨m1002-m1006 ts @m1002⟩'),
+  },
+  {
+    name: 'ts glued on without a space',
+    expect: 'citation_syntax',
+    after: SECTIONED.replace('⟨m1002-m1006 @m1002 ts⟩', '⟨m1002-m1006 @m1002ts⟩'),
+  },
+  {
+    name: 'uppercase TS',
+    expect: 'citation_syntax',
+    after: SECTIONED.replace('⟨m1002-m1006 @m1002 ts⟩', '⟨m1002-m1006 @m1002 TS⟩'),
+  },
+  // ---- the v11 section shape ------------------------------------------------
+  {
+    name: 'section summary carries a citation',
+    expect: 'wik_section_shape',
+    after: SECTIONED.replace('Starting at Tesla in August 2026.', 'Starting at Tesla in August 2026 ⟨m1002⟩.'),
+  },
+  {
+    name: 'section summary carries bold',
+    expect: 'wik_section_shape',
+    after: SECTIONED.replace('Starting at Tesla in August 2026.', 'Starting at **Tesla** in August 2026.'),
+  },
+  {
+    name: 'sub-topic line carries a citation',
+    expect: 'wik_section_shape',
+    after: SECTIONED.replace('Staying in Oakland for the Tesla job,',
+      '**Commute:** 40 min each way ⟨m1010⟩\n\nStaying in Oakland for the Tesla job,'),
+  },
+  {
+    name: 'bold inside detail prose',
+    expect: 'wik_section_shape',
+    after: SECTIONED.replace('powertrain team', '**powertrain** team'),
+  },
+  // wik_cited's PARAGRAPH arm: a sectioned detail block is held to the same
+  // provenance bar as a bullet.
+  {
+    name: 'sectioned detail paragraph with no citation',
+    expect: 'wik_cited',
+    after: SECTIONED.replace(' ⟨m1002-m1006 @m1002 ts⟩.', '.'),
+  },
 ];
 
 function main() {
@@ -379,6 +457,21 @@ function main() {
   const skip = score(unarchived).results.find((r) => r.id === 'citation_range_valid');
   console.log(`ledger oracle skips an out-of-chunk citation: ${skip.pass ? 'ok' : `FAIL — ${skip.detail}`}`);
   if (!skip.pass) failures++;
+
+  // 2f. The v11 sectioned shape is a legal output: the widened grammar accepts
+  // ` ts`, cited detail paragraphs satisfy wik_cited, and the shape check
+  // passes its own clean reference.
+  const sect = score(SECTIONED);
+  const sectBad = sect.failed.filter((f) => f.id !== 'noop_respected');
+  console.log(`sectioned (v11) reference: ${sect.score}/${sect.maxScore}${sectBad.length ? '  <-- UNEXPECTED FAILURES' : '  ok'}`);
+  for (const f of sectBad) { failures++; console.log(`   !! ${f.id}: ${f.detail}`); }
+
+  // 2g. Blocks the merge did NOT touch are never shape-judged — a hand-authored
+  // or legacy profile carrying a violation is not this run's fault.
+  const dirty = SECTIONED.replace('Starting at Tesla in August 2026.', 'Starting at Tesla in August 2026 ⟨m1002⟩.');
+  const untouched = score(dirty, { beforeText: dirty }).results.find((r) => r.id === 'wik_section_shape');
+  console.log(`untouched shape violation left unjudged: ${untouched.pass ? 'ok' : `FAIL — ${untouched.detail}`}`);
+  if (!untouched.pass) failures++;
 
   // 3. Every mutant must be caught BY THE CHECK IT TARGETS.
   console.log('\nmutants (each must trip its own check):');
