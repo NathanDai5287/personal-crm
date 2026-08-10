@@ -50,6 +50,8 @@ A citation names the stretch of conversation a claim comes from. Three legal sha
 ⟨m88104⟩                  a single message
 ```
 
+Any of the three may additionally end with ` ts` before the closing bracket — see "Time-sensitive claims" below.
+
 - **A range stays inside one conversation.** Both endpoints must be lines of the same chat: the same group label on both, or no label on both (the direct message). Lines of *other* conversations interleaved between your endpoints are not part of the range — they neither contaminate it nor count against its size.
 - **A range covers at most 10 of its conversation's lines.** Count them in the ledger. If the exchange runs longer, cite the strongest 10 or fewer — not the whole thing.
 - **Write it exactly:** smaller id first, ASCII hyphen, no spaces — `⟨m90211-m90219⟩`.
@@ -58,7 +60,23 @@ A citation names the stretch of conversation a claim comes from. Three legal sha
 - **A hard-to-cite fact still goes in.** Citation difficulty is never a reason to drop something worth recording. If no stretch proves the whole claim on its own, record what the strongest stretch does prove — at that strength — and cite it. A thread never falls out of the profile because its range was hard to pick.
 - **Cite the strongest stretch, not the first.** When several stretches could back a claim, prefer the one where the exchange runs several messages rather than one line; where both people engage; where a quote-reply (`[re Nathan: "…"]`) shows the other person took it up; and where most lines inside the range are on-topic. A real exchange beats a passing mention.
 - **Separate moments get separate citations, at most 3 per claim.** A fact stated one week and confirmed the next carries two citations — never one wide range asserting everything in between. Recurrence within the same week is one moment, however many days it touches: cite its strongest stretch once, not one citation per mention. Only a later week's return to the topic is a new moment.
-- **Citations on the same bullet never overlap.** Two citations overlap only when they are stretches of the *same* conversation and their id spans intersect — check both in this ledger; stretches of different conversations never overlap, whatever their ids. If two claims rest on the same lines, cite that stretch once, after the later claim — do not repeat it.
+- **Citations on the same claim never overlap.** Two citations overlap only when they are stretches of the *same* conversation and their id spans intersect — check both in this ledger; stretches of different conversations never overlap, whatever their ids. If two claims rest on the same lines, cite that stretch once, after the later claim — do not repeat it.
+
+# Time-sensitive claims
+
+Some claims are only true for a while: a year in school ("sophomore"), an age ("grandma is 98"), the current job or internship, current stock holdings, a lease, a relationship status. Mark each such claim by writing ` ts` inside its **newest** citation, just before the closing bracket:
+
+```
+Sophomore at UIUC ⟨m9651 ts⟩
+Grandma is 98 ⟨m9549 ts⟩ — "chill" and sharp …
+his main holds were ASTS and ServiceNow ⟨m71759-m71770 @m71770 ts⟩
+```
+
+- The marker flags the claim directly in front of it, and lives in exactly one of that claim's citations: the newest. When your edit gives a flagged claim a newer citation, move the ` ts` to the new one.
+- Judge by durability: if nothing changed but the date, would the sentence eventually read as *wrong* — not merely old? Then flag it. Personality, values, running bits, and how they talk are never flagged.
+- The flag is bookkeeping, not a substitute for the conflict rule: when the ledger shows the fact actually changed, rewrite the claim — the newer statement wins — and flag the rewritten claim's citation.
+- **A flagged claim that has already lapsed gets anchored to its period, not left reading as current.** When a section you are editing holds a flagged claim whose own stated period is over by the ledger's newest date — a "summer 2026" internship once that summer has passed, a lease that has ended, a school year now finished — rewrite it in past tense anchored to when it was true: "was a sophomore in 2025–26", "interned at Latch.bio in summer 2026". Anchor only to a period the claim or its messages actually state — if you cannot tell when it stopped being true, leave it exactly as it is. An anchored claim is durable, so remove its ` ts`; its citations stay.
+- Adding, moving, or removing ` ts` is the **one** kind of edit permitted inside an existing citation. Every other character of a carried-forward citation stays exactly as it was.
 
 # What to update
 
@@ -68,19 +86,35 @@ The file's section order is fixed. Most profiles are missing one or both optiona
 
 ```
 (metadata block)
-## What I know
+## What I know        <- ### sections per topic; ### Notes last
 ## Talking points     <- create immediately BEFORE ## Timeline
 ## Timeline           <- never touch
 ## Open questions     <- create immediately AFTER ## Timeline, at end of file
 ```
 
-**Metadata block (top of file).** Set `Last contact` to the latest date in the ledger — always, even on a week with nothing worth recording. Fill `Relationship` or `Birthday` only if the messages state it clearly and unambiguously. Change no other field.
+**Metadata block (top of file).** Set `Last contact` to the latest date in the ledger — always, even on a week with nothing worth recording. Fill `Relationship` or `Birthday` only if it currently reads `_TBD_` **and** the messages state it clearly and unambiguously — a filled value is Nathan's own entry and is never changed. Change no other field.
 
-**`## What I know`** — durable facts worth remembering in a year. **One topic per bullet**, named by its bold label (**Work:**, **Family:**, **Health:**): a bullet owns a single thread of the person's life, not a paragraph of everything learned that month. A new fact joins the bullet that owns its topic; a fact with no owner starts a new bullet. Splitting is formatting, not selection — never drop a fact because it complicates a bullet. If a bullet you are editing already spans several topics, split it into one bullet per topic — each claim keeps its citation — as part of your edit. Cited **per claim**: each checkable fact — a name, date, place, employer, number, status change — carries its citation immediately after the claim it supports, not pooled at the bullet's end; a trailing citation says nothing about which fact it backs. Characterization and summary prose ("dry humor", "the responsible one") is cited the same way, but its evidence is that the pattern recurs: a new trait starts with the single strongest range this ledger offers, and later merges add theirs alongside, up to 3 — three stretches from three different months say "pattern"; three from one Tuesday say "mood".
+**`## What I know`** — durable facts worth remembering in a year, organized as one `###` section per topic. The **first-class topics** — school and career, money, health and wellbeing (including substances), living situation, dating and relationships, family, mutual friends and who knows whom, and how the friendship with Nathan itself works — each get a `### Heading` whose body has a fixed shape:
 
-The **first-class topics** get detail: school and career, money, health and wellbeing (including substances), living situation, dating and relationships, family, mutual friends and who knows whom, and how the friendship with Nathan itself works. A new fact on any of these always goes in, at whatever length the evidence supports.
+```
+### Money
 
-Everything else that stays true of the person over time — running bits and vocabulary, opinions and takes, skills and tastes, the current state of a hobby or game — is **texture: one short bullet per topic, refreshed rather than grown.** A new mention updates the bullet in place — swap the stale detail for the current one and bring a citation forward — it never adds a second sentence. Refreshing is compression, not deletion: once a topic has earned its bullet it never falls out of the profile, and doubt about which tier a fact belongs to makes it texture, not absent.
+Not rich — ~$80k of loans ahead — but always thinking of ways to make money.
+
+**Student loans:** Owes ~$80k at graduation; the payoff plan is grandma's inheritance.
+
+Expects ~$80k in student loans — "a little" stressful ⟨m9540-m9549 @m9540⟩. UIUC out-of-state tuition ~$45k/year ⟨m9589-m9591 @m9589⟩.
+```
+
+- **The line directly under the heading is the section's summary**: one plain sentence — no bold, no citations. It only restates what the cited detail below already proves; rewrite it whenever your edit changes what the section says, and never give the summary a fact the detail doesn't carry.
+- **A section owning several distinct threads splits into sub-topics** (two jobs, loans vs schemes vs stocks, one sub-topic per goal): a `**Sub-topic:**` label followed on the same line by that thread's own one-sentence summary (plain, uncited), then a blank line, then its detail paragraph(s). The label line never carries a citation: the moment a sentence needs one, it is detail, and it moves to a paragraph below the blank line. A single-thread section skips sub-topics — detail paragraphs sit right under the section summary. If a section you are editing has grown several threads, split it into sub-topics as part of your edit; each claim keeps its citation.
+- **Detail paragraphs carry the facts, cited per claim**: each checkable fact — a name, date, place, employer, number, status change — carries its citation immediately after the claim it supports, never pooled at the paragraph's end. Characterization prose ("dry humor", "the responsible one") is cited the same way, but its evidence is recurrence: a new trait starts with the single strongest range this ledger offers, and later merges add theirs alongside, up to 3 — three stretches from three different months say "pattern"; three from one Tuesday say "mood".
+- **A blank line separates every block** — heading, summary, each sub-topic line, each paragraph.
+- **Bold belongs to structure only** — `**Sub-topic:**` and `**Notes:**`-style labels. Never bold an employer, a date, a title, or anything else inside summaries or detail prose.
+- A new fact joins the section that owns its topic; a first-class fact with no owner starts a new `###` section (before `### Notes`). A new fact on a first-class topic always goes in, at whatever length the evidence supports.
+- A profile still in the old shape (one bullet per topic under `## What I know`): convert a bullet into its `###` section only when your edit touches it; leave the others as they are.
+
+Everything else that stays true of the person over time — running bits and vocabulary, opinions and takes, skills and tastes, the current state of a hobby or game — is **texture**, and lives in `### Notes`, the last section of `## What I know`: one `**Label:** single short line` entry per topic, separated by blank lines, refreshed rather than grown. A new mention updates the line in place — swap the stale detail for the current one and bring a citation forward — it never adds a second sentence. Refreshing is compression, not deletion: once a topic has earned its Notes line it never falls out of the profile, and doubt about which tier a fact belongs to makes it texture, not absent.
 
 **`## Talking points`** — max 8 bullets: what to bring up next time — upcoming plans and dates, offers or asks still on the table (theirs or Nathan's), things they recently mentioned that matter to them (worries, wins, purchases, trips, people visiting), and follow-ups ("ask how X went", "did they watch what Nathan sent"). Every bullet ends with its citation(s). Create this section immediately before `## Timeline` if absent.
 
@@ -90,14 +124,16 @@ Everything else that stays true of the person over time — running bits and voc
 
 When the ledger touches something the profile already claims, decide which case applies:
 
-- **Refines it** (more detail on the same underlying fact) → fold into the existing bullet; do not add a near-duplicate.
+- **Refines it** (more detail on the same underlying fact) → fold into the sub-topic or section that owns the thread; do not add a near-duplicate.
 - **Contradicts it** (the fact changed: new job, moved, broke up, changed plans) → replace the old claim with the new one. The newer statement wins. Do not keep both, and do not write "previously X, now Y" — the profile records what is true now.
-- **Repeats it** (nothing new) → change nothing. An unchanged bullet is a correct outcome.
+- **Repeats it** (nothing new) → change nothing. An unchanged section is a correct outcome.
 
-Worked example — the profile's `## What I know` already says:
+Worked example — the profile's `### Work` section already contains:
 
 ```
-- **Work:** Started a summer 2026 internship at Latch.bio on June 1, 2026 ⟨m84210-m84218 @m84212⟩ (SWE role, office in Mission Bay SF…). Self-deprecating that he "can't do SWE" ⟨m84619-m84623⟩.
+**Latch.bio (summer 2026):** Interning as a SWE in Mission Bay; self-deprecating about his SWE skills.
+
+Started a summer 2026 internship at Latch.bio on June 1, 2026 ⟨m84210-m84218 @m84212 ts⟩ (SWE role, office in Mission Bay SF…). Self-deprecating that he "can't do SWE" ⟨m84619-m84623⟩.
 ```
 
 and the ledger adds:
@@ -107,15 +143,17 @@ and the ledger adds:
 [2026-07-22] ⟨m89167⟩ Arshia: one of our guys ran kimi k3 on our benchmarks and it always assumed it was being benchmarked
 ```
 
-Fold it into the bullet that owns the topic:
+Fold it into the sub-topic that owns the thread, and refresh the summary your edit touched:
 
 ```
-- **Work:** […existing text…] Self-deprecating that he "can't do SWE" ⟨m84619-m84623⟩ — but by July was talking up Latch's work, sending Nathan the company blog on their kimi-k3 benchmark findings ⟨m89166-m89167⟩.
+**Latch.bio (summer 2026):** Interning as a SWE in Mission Bay — and by July, talking the company up.
+
+Started a summer 2026 internship at Latch.bio on June 1, 2026 ⟨m84210-m84218 @m84212 ts⟩ (SWE role, office in Mission Bay SF…). Self-deprecating that he "can't do SWE" ⟨m84619-m84623⟩ — but by July was talking up Latch's work, sending Nathan the company blog on their kimi-k3 benchmark findings ⟨m89166-m89167⟩.
 ```
 
-Fold even when the new detail reverses the bullet's emotional framing — a new bullet is earned by a new fact, not by a new message about an old fact. And note the citations: two back-to-back messages are one two-message range, not two citations; the new range sits on the new claim only; and every existing claim keeps the citation it already carries, character for character — those ids point at older ledgers you cannot see, and they are not yours to rewrite.
+Fold even when the new detail reverses the framing — a new sub-topic is earned by a new thread, not by a new message about an old one. And note the citations: two back-to-back messages are one two-message range, not two citations; the new range sits on the new claim only; and every existing claim keeps the citation it already carries, character for character — those ids point at older ledgers you cannot see, and they are not yours to rewrite.
 
-**Citation carry-forward:** when you rewrite, merge, or reword a `## Talking points` or `## What I know` bullet that already carries citations and the claim survives, keep them — in `## What I know`, still attached to the claim they support. A citation is removed in exactly two cases: the claim it supports is removed, or the claim already has 3 citations and this ledger offers a clearly stronger stretch. In that second case, replace one. You cannot read the messages behind an old citation, so unless one is obviously weaker, keep the earliest and the latest and replace the middle — a claim whose citations have all drifted into the last month has lost the history that made it credible.
+**Citation carry-forward:** when you rewrite, merge, or reword a `## Talking points` bullet or a `## What I know` passage that already carries citations and the claim survives, keep them — still attached to the claim they support. A citation is removed in exactly two cases: the claim it supports is removed, or the claim already has 3 citations and this ledger offers a clearly stronger stretch. In that second case, replace one. You cannot read the messages behind an old citation, so unless one is obviously weaker, keep the earliest and the latest and replace the middle — a claim whose citations have all drifted into the last month has lost the history that made it credible. The one kind of edit allowed *inside* a kept citation is adding, moving, or removing ` ts` (see "Time-sensitive claims").
 
 # Talking points format
 
@@ -161,14 +199,14 @@ One merged bullet, one citation: the offer and its acceptance are a single excha
 
 One talking point and nothing else: a single deflected ask is just an answer, but three deflections across weeks is a thread that never resolved. Three separate moments, three citations — the two same-day deflections collapse into one range, and stretching a single range from m85943 to m89506 would falsely assert the three weeks in between. A month of behavior is still an episode; only what will still be true of the person in a year touches `## What I know`.
 
-**Vivid but not durable.** The profile's `## What I know` already has a bullet describing their in-joke banter style in general. Then a World Cup bit recurs over four days in two chats:
+**Vivid but not durable.** The profile's `### Notes` already characterizes their in-joke banter style in one line. Then a World Cup bit recurs over four days in two chats:
 
 ```
 [2026-07-10] ⟨m86997⟩ Arshia: kylian dictator
 [2026-07-13] ⟨m88316⟩ (the boys 🐗) Nathan: KYLIAN DICTATOR
 ```
 
-Correct edit: **none.** The profile already characterizes the dialect; cataloguing individual bits turns that bullet into a lore dump that grows every merge. Recurrence within one week is still one joke — a bit earns a slot only when it spans enough time to outlive this chunk. Deliberately dropping engaging, well-formed content is often the right call. (And note the two lines are different conversations — no single range could ever cover them.)
+Correct edit: **none.** The Notes line already characterizes the dialect; cataloguing individual bits turns one line into a lore dump that grows every merge. Recurrence within one week is still one joke — a bit earns a slot only when it spans enough time to outlive this chunk. Deliberately dropping engaging, well-formed content is often the right call. (And note the two lines are different conversations — no single range could ever cover them.)
 
 # When the ledger adds nothing
 
@@ -180,16 +218,18 @@ Check each of these. If any fails, fix it before replying:
 
 - Only the profile file was edited.
 - The `## Timeline` section is character-for-character what it was.
-- `Last contact` is the latest date in the ledger.
+- `Last contact` is the latest date in the ledger; `Relationship` and `Birthday` were changed only from `_TBD_`.
 - Every id inside a citation you newly wrote — both endpoints and any `@` primary — appears literally in the ledger.
 - Every range you newly wrote has both endpoints in the same conversation, covers at most 10 of its lines, and its primary (if any) sits inside it.
 - Every citation you newly wrote is self-sufficient: the lines inside its range, read alone, support the claim it sits after.
-- No claim carries more than 3 citations; no bullet's citations overlap one another.
+- No claim carries more than 3 citations; no claim's citations overlap one another.
+- Every `###` section you touched has one plain-sentence summary directly under its heading, and every sub-topic line you touched has its own; summaries carry no citations and no bold.
+- A blank line separates every block you wrote; no bold appears anywhere except `**Sub-topic:**`/`**Label:**` structure.
+- Every ` ts` you wrote or moved sits inside the claim's newest citation; no ` ts` survives on a claim you anchored to a past period; every carried-forward citation is otherwise character-for-character unchanged.
+- Every `### Notes` entry you touched is still a single short line, refreshed in place.
 - Every `## Talking points` bullet has the `- **YYYY-MM-DD** … ⟨…⟩` shape; 8 or fewer bullets.
-- No citations in `## Open questions`. Every citation in `## What I know` sits immediately after the claim it supports.
-- Every `## What I know` bullet you touched covers exactly one topic.
-- Every texture bullet (bits, takes, skills, hobby state) you touched is still a single short bullet, refreshed in place.
-- Surviving bullets kept their existing citations.
+- No citations in `## Open questions`.
+- Every `###` section you touched covers exactly one topic; surviving claims kept their existing citations.
 - Nothing you wrote is about you, these instructions, or the merge run itself; every claim is written at the strength its messages said it.
 
 Then reply with one line: `DONE — <n> talking points, <n> facts added/changed`, or `NO-OP`.
