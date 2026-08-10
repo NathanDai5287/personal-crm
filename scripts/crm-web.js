@@ -578,18 +578,347 @@ function spanPage(start, end) {
   }
 }
 
+// ---- profile page, with per-section hand editing ----------------------------
+// The profile is plain Markdown on disk, so "edit" means editing that Markdown
+// directly: every `##` section carries its own ✎ button that swaps the rendered
+// view for a textarea of the section's raw source, and the two hand-owned header
+// fields (Relationship, Birthday) swap to an inline input. All pending changes
+// share ONE state: a bottom bar appears with Cancel (discard everything), Diff
+// (PR-style line diff, inline or side-by-side), and Save (one manual run).
+
+// Split a profile into its header (title + metadata, before the first `##`) and
+// its `##` sections. Spans are [from, to) line indexes into `lines`. The same
+// split runs client-side (assemble() in PROFILE_EDIT_JS) — keep them in step.
+function splitProfile(md) {
+  const lines = md.split('\n');
+  const heads = [];
+  for (let i = 0; i < lines.length; i += 1) if (/^## /.test(lines[i])) heads.push(i);
+  const sections = heads.map((from, k) => ({
+    from,
+    to: k + 1 < heads.length ? heads[k + 1] : lines.length,
+    heading: lines[from].replace(/^##\s+/, '').trim(),
+  }));
+  return { lines, headerTo: heads.length ? heads[0] : lines.length, sections };
+}
+
+// A section's canonical text: its lines with trailing blank lines stripped, so
+// what the textarea holds is exactly what a save writes back (assemble adds the
+// one blank line that separates sections).
+function sectionText(lines, span) {
+  const seg = lines.slice(span.from, span.to);
+  while (seg.length && seg[seg.length - 1].trim() === '') seg.pop();
+  return seg.join('\n');
+}
+
 function profilePage(slug) {
   const file = path.posix.join(CONTACTS_DIR, `${slug}.md`);
   let md;
   try { md = fs.readFileSync(file, 'utf8'); } catch { return null; }
-  const titleLine = md.split(/\r?\n/).find((l) => l.startsWith('# '));
+  const baseHash = crypto.createHash('sha256').update(md).digest('hex');
+  const { lines, headerTo, sections } = splitProfile(md);
+  const titleLine = lines.find((l) => l.startsWith('# '));
   const name = titleLine ? titleLine.slice(2).trim() : slug;
+
+  // Header: title + metadata bullets. The two hand-owned fields render with an
+  // inline ✎; machine-owned lines (ids, counts, contact dates) stay read-only.
+  const editable = new Map(EDITABLE_FIELDS.map(([key, label]) => [label, key]));
+  const seen = new Set();
+  const header = [];
+  const fieldRow = (label, key, cur) => {
+    const orig = cur == null || cur === '_TBD_' ? '' : cur;
+    return `<div class="fields efield" data-key="${key}" data-label="${esc(label)}">`
+      + `<span><b>${esc(label)}:</b> <span class="efield-val">${mdInline(cur == null ? '_TBD_' : cur)}</span></span>`
+      + `<button type="button" class="btn sm efield-btn" title="edit ${esc(label)}">&#9998;</button>`
+      + `<input class="fld tw efield-input" hidden maxlength="120" value="${esc(orig)}" aria-label="${esc(label)}">`
+      + `</div>`;
+  };
+  for (const line of lines.slice(0, headerTo)) {
+    const t = line.trim();
+    if (t === '') continue;
+    if (t.startsWith('# ')) { header.push(`<h1>${mdInline(t.slice(2))}</h1>`); continue; }
+    const meta = t.match(/^-\s+\*\*([^:*]+):\*\*\s*(.+)$/);
+    if (meta) {
+      const label = meta[1].trim();
+      const key = editable.get(label);
+      if (key) { seen.add(label); header.push(fieldRow(label, key, meta[2].trim())); }
+      else header.push(`<div class="fields"><span><b>${esc(label)}:</b> ${mdInline(meta[2])}</span></div>`);
+      continue;
+    }
+    header.push(`<p>${mdInline(t)}</p>`);
+  }
+  // A hand-owned field the profile lacks is still offered; a save inserts it.
+  for (const [key, label] of EDITABLE_FIELDS) if (!seen.has(label)) header.push(fieldRow(label, key, null));
+
+  const secHtml = sections.map((s, i) => {
+    const text = sectionText(lines, s);
+    return `<section class="esec" data-idx="${i}" data-heading="${esc(s.heading)}">`
+      + `<div class="esec-tools"><span class="mk amber edmark" hidden>edited</span>`
+      + `<button type="button" class="btn sm esec-btn">&#9998; edit</button></div>`
+      + `<div class="esec-view">${renderProfile(text)}</div>`
+      + `<textarea class="esec-src fld tw" hidden spellcheck="false" aria-label="edit ${esc(s.heading)}">${esc(text)}</textarea>`
+      + `</section>`;
+  }).join('');
+
+  const bar = `<div class="editbar" id="editbar" hidden>`
+    + `<span class="editbar-n" id="editbarN"></span>`
+    + `<input class="fld tw" id="editWhy" placeholder="why — optional, kept in the ledger" maxlength="500">`
+    + `<button type="button" class="btn" id="btnDiff">Diff</button>`
+    + `<button type="button" class="btn" id="btnCancel">Cancel</button>`
+    + `<button type="button" class="btn pr" id="btnSave">Save</button></div>`;
+
+  const modal = `<div class="modal" id="diffModal" hidden><div class="diffcard">`
+    + `<div class="diffhead"><h2>Unsaved changes — ${esc(name)}</h2>`
+    + `<span class="dmode"><button type="button" class="btn sm" id="dmInline">inline</button>`
+    + `<button type="button" class="btn sm" id="dmSplit">side by side</button></span>`
+    + `<button type="button" class="btn sm" id="dmClose">close</button></div>`
+    + `<div class="diffbody" id="diffBody"></div></div></div>`;
+
+  const cfg = { slug, baseHash, orig: md, headerTo, sections: sections.map((s) => ({ from: s.from, to: s.to, heading: s.heading })) };
+  const cfgJs = `<script>window.__EDIT_CFG=${JSON.stringify(cfg).replace(/</g, '\\u003c')}</script>`;
+
   const body = `<div class="back"><a href="/">&larr; All people</a>`
-    + ` &middot; <a href="/c/${encodeURIComponent(slug)}/fields">Edit fields</a>`
     + ` &middot; <a href="/c/${encodeURIComponent(slug)}/history">History &rarr;</a></div>`
-    + `<div class="profile">${renderProfile(md)}</div>`;
-  return page(name, body, '/');
+    + `<div class="profile">${header.join('')}${secHtml}</div>${bar}${modal}`;
+  return page(name, body + cfgJs + PROFILE_EDIT_JS, '/');
 }
+
+// The whole edit state machine, in page. Mirrors the server exactly where it
+// must: assemble() re-derives the saved file from the pristine Markdown plus the
+// dirty sections/fields, the same splice applyManualEdit performs — so the Diff
+// overlay shows character-for-character what Save will commit.
+const PROFILE_EDIT_JS = `<script>(function(){
+  var CFG=window.__EDIT_CFG;if(!CFG)return;
+  var secs=[].slice.call(document.querySelectorAll('.esec'));
+  var flds=[].slice.call(document.querySelectorAll('.efield'));
+  var bar=document.getElementById('editbar'),barN=document.getElementById('editbarN');
+  var modal=document.getElementById('diffModal'),diffBody=document.getElementById('diffBody');
+  var mode=window.matchMedia('(min-width: 980px)').matches?'split':'inline';
+
+  function normSec(v){return v.replace(/\\r/g,'').replace(/^\\n+/,'').replace(/\\n+$/,'');}
+  function normFld(v){return v.replace(/[\\r\\n]+/g,' ').trim().slice(0,120);}
+  function dirtySecs(){return secs.filter(function(s){var ta=s.querySelector('.esec-src');return normSec(ta.value)!==ta.defaultValue;});}
+  function dirtyFlds(){return flds.filter(function(f){var inp=f.querySelector('.efield-input');return normFld(inp.value)!==inp.defaultValue;});}
+
+  function refresh(){
+    var ds=dirtySecs(),df=dirtyFlds(),n=ds.length+df.length;
+    secs.forEach(function(s){s.querySelector('.edmark').hidden=ds.indexOf(s)===-1;});
+    bar.hidden=n===0;
+    if(n)barN.textContent=n+' unsaved change'+(n===1?'':'s');
+  }
+
+  // ---- per-section + per-field edit toggles ----
+  secs.forEach(function(s){
+    var btn=s.querySelector('.esec-btn'),ta=s.querySelector('.esec-src'),view=s.querySelector('.esec-view');
+    function size(){ta.style.height='auto';ta.style.height=Math.min(ta.scrollHeight+4,window.innerHeight*0.7)+'px';}
+    btn.addEventListener('click',function(){
+      var editing=!ta.hidden;
+      ta.hidden=editing;view.style.display=editing?'':'none';
+      btn.innerHTML=editing?'&#9998; edit':'done';
+      if(!editing){size();ta.focus();}
+      refresh();
+    });
+    ta.addEventListener('input',function(){size();refresh();});
+  });
+  flds.forEach(function(f){
+    var btn=f.querySelector('.efield-btn'),inp=f.querySelector('.efield-input'),val=f.querySelector('.efield-val');
+    btn.addEventListener('click',function(){
+      var editing=!inp.hidden;
+      inp.hidden=editing;val.style.display=editing?'':'none';
+      btn.innerHTML=editing?'&#9998;':'done';
+      if(!editing)inp.focus();
+      refresh();
+    });
+    inp.addEventListener('input',refresh);
+  });
+
+  // ---- Cancel: reset every section and field to what the page loaded with ----
+  document.getElementById('btnCancel').addEventListener('click',function(){
+    if(!confirm('Discard all unsaved changes?'))return;
+    secs.forEach(function(s){
+      var ta=s.querySelector('.esec-src');ta.value=ta.defaultValue;
+      ta.hidden=true;s.querySelector('.esec-view').style.display='';
+      s.querySelector('.esec-btn').innerHTML='&#9998; edit';
+    });
+    flds.forEach(function(f){
+      var inp=f.querySelector('.efield-input');inp.value=inp.defaultValue;
+      inp.hidden=true;f.querySelector('.efield-val').style.display='';
+      f.querySelector('.efield-btn').innerHTML='&#9998;';
+    });
+    refresh();
+  });
+
+  // ---- assemble: pristine Markdown + dirty edits -> the file a save writes ----
+  // MIRRORS applyManualEdit in crm-web.js. Sections splice bottom-up (spans stay
+  // valid), each followed by the one separating blank line; an emptied textarea
+  // deletes its section. Fields rewrite (or insert into) the header block.
+  function assemble(){
+    var lines=CFG.orig.split('\\n');
+    dirtySecs().sort(function(a,b){return b.dataset.idx-a.dataset.idx;}).forEach(function(s){
+      var span=CFG.sections[Number(s.dataset.idx)];
+      var text=normSec(s.querySelector('.esec-src').value);
+      var repl=text===''?[]:text.split('\\n').concat(['']);
+      lines.splice.apply(lines,[span.from,span.to-span.from].concat(repl));
+    });
+    dirtyFlds().forEach(function(f){
+      var label=f.dataset.label;
+      var value=normFld(f.querySelector('.efield-input').value)||'_TBD_';
+      var headerEnd=lines.length;
+      for(var i=0;i<lines.length;i++)if(/^## /.test(lines[i])){headerEnd=i;break;}
+      var re=new RegExp('^- \\\\*\\\\*'+label+':\\\\*\\\\* (.*)$'),idx=-1;
+      for(var j=0;j<headerEnd;j++)if(re.test(lines[j])){idx=j;break;}
+      if(idx!==-1)lines[idx]='- **'+label+':** '+value;
+      else{
+        var k=0;
+        for(var t=0;t<headerEnd;t++)if(lines[t].indexOf('# ')===0){k=t+1;break;}
+        while(k<headerEnd&&(lines[k].trim()===''||lines[k].indexOf('- ')===0))k++;
+        while(k>0&&lines[k-1].trim()==='')k--;
+        lines.splice(k,0,'- **'+label+':** '+value);
+      }
+    });
+    var out=lines.join('\\n');
+    return out.slice(-1)==='\\n'?out:out+'\\n';
+  }
+
+  // ---- line diff (LCS with common prefix/suffix trim) ----
+  function diffLines(a,b){
+    var s=0;while(s<a.length&&s<b.length&&a[s]===b[s])s++;
+    var e=0;while(e<a.length-s&&e<b.length-s&&a[a.length-1-e]===b[b.length-1-e])e++;
+    var ac=a.slice(s,a.length-e),bc=b.slice(s,b.length-e),n=ac.length,m=bc.length;
+    var dp=new Uint32Array((n+1)*(m+1)),W=m+1;
+    for(var i=n-1;i>=0;i--)for(var j=m-1;j>=0;j--)
+      dp[i*W+j]=ac[i]===bc[j]?dp[(i+1)*W+j+1]+1:Math.max(dp[(i+1)*W+j],dp[i*W+j+1]);
+    var ops=[],ai=0,bi=0,x=0,y=0;
+    for(ai=0;ai<s;ai++)ops.push({t:'=',a:ai,b:ai});
+    x=0;y=0;
+    while(x<n&&y<m){
+      if(ac[x]===bc[y]){ops.push({t:'=',a:s+x,b:s+y});x++;y++;}
+      else if(dp[(x+1)*W+y]>=dp[x*W+y+1]){ops.push({t:'-',a:s+x});x++;}
+      else{ops.push({t:'+',b:s+y});y++;}
+    }
+    while(x<n){ops.push({t:'-',a:s+x});x++;}
+    while(y<m){ops.push({t:'+',b:s+y});y++;}
+    for(var z=0;z<e;z++)ops.push({t:'=',a:a.length-e+z,b:b.length-e+z});
+    return ops;
+  }
+
+  // Group ops into hunks with 3 lines of context, like a PR.
+  function hunks(ops){
+    var CTX=3,out=[],cur=null,gap=0;
+    for(var i=0;i<ops.length;i++){
+      var op=ops[i];
+      if(op.t==='='){
+        if(cur){
+          if(gap<CTX){cur.ops.push(op);gap++;}
+          else{
+            var more=false;
+            for(var j=i;j<ops.length&&j<i+CTX+1;j++)if(ops[j].t!=='='){more=true;break;}
+            if(more){cur.ops.push(op);gap=0;}
+            else{out.push(cur);cur=null;gap=0;}
+          }
+        }
+      }else{
+        if(!cur){
+          cur={ops:[]};
+          for(var k=Math.max(0,i-CTX);k<i;k++)cur.ops.push(ops[k]);
+        }
+        cur.ops.push(op);gap=0;
+      }
+    }
+    if(cur)out.push(cur);
+    return out;
+  }
+
+  function escH(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+  function hunkHeader(h,cols){
+    var oa=null,ob=null,na=0,nb=0;
+    h.ops.forEach(function(o){
+      if(o.a!=null){if(oa==null)oa=o.a;na++;}
+      if(o.b!=null){if(ob==null)ob=o.b;nb++;}
+    });
+    return '<tr class="dhunk"><td colspan="'+cols+'">@@ -'+((oa==null?0:oa+1))+','+na+' +'+((ob==null?0:ob+1))+','+nb+' @@</td></tr>';
+  }
+
+  function renderInline(hs,A,B){
+    var rows=[];
+    hs.forEach(function(h){
+      rows.push(hunkHeader(h,4));
+      h.ops.forEach(function(o){
+        if(o.t==='=')rows.push('<tr><td class="dn">'+(o.a+1)+'</td><td class="dn">'+(o.b+1)+'</td><td class="dsign"> </td><td class="dc">'+escH(A[o.a])+'</td></tr>');
+        else if(o.t==='-')rows.push('<tr class="ddel"><td class="dn">'+(o.a+1)+'</td><td class="dn"></td><td class="dsign">-</td><td class="dc">'+escH(A[o.a])+'</td></tr>');
+        else rows.push('<tr class="dadd"><td class="dn"></td><td class="dn">'+(o.b+1)+'</td><td class="dsign">+</td><td class="dc">'+escH(B[o.b])+'</td></tr>');
+      });
+    });
+    return '<table class="dtab">'+rows.join('')+'</table>';
+  }
+
+  function renderSplit(hs,A,B){
+    var rows=[];
+    hs.forEach(function(h){
+      rows.push(hunkHeader(h,4));
+      var i=0;
+      while(i<h.ops.length){
+        var o=h.ops[i];
+        if(o.t==='='){
+          rows.push('<tr><td class="dn">'+(o.a+1)+'</td><td class="dc">'+escH(A[o.a])+'</td><td class="dn">'+(o.b+1)+'</td><td class="dc">'+escH(B[o.b])+'</td></tr>');
+          i++;continue;
+        }
+        var del=[],add=[];
+        while(i<h.ops.length&&h.ops[i].t==='-'){del.push(h.ops[i]);i++;}
+        while(i<h.ops.length&&h.ops[i].t==='+'){add.push(h.ops[i]);i++;}
+        for(var r=0;r<Math.max(del.length,add.length);r++){
+          var L=del[r],R=add[r];
+          rows.push('<tr>'
+            +(L?'<td class="dn ddel">'+(L.a+1)+'</td><td class="dc ddel">'+escH(A[L.a])+'</td>':'<td class="dn"></td><td class="dc dgap"></td>')
+            +(R?'<td class="dn dadd">'+(R.b+1)+'</td><td class="dc dadd">'+escH(B[R.b])+'</td>':'<td class="dn"></td><td class="dc dgap"></td>')
+            +'</tr>');
+        }
+      }
+    });
+    return '<table class="dtab split">'+rows.join('')+'</table>';
+  }
+
+  function showDiff(){
+    var A=CFG.orig.split('\\n'),B=assemble().split('\\n');
+    var hs=hunks(diffLines(A,B));
+    diffBody.innerHTML=hs.length?(mode==='split'?renderSplit(hs,A,B):renderInline(hs,A,B)):'<p style="padding:14px">No changes.</p>';
+    document.getElementById('dmInline').classList.toggle('on',mode==='inline');
+    document.getElementById('dmSplit').classList.toggle('on',mode==='split');
+    modal.hidden=false;
+  }
+  document.getElementById('btnDiff').addEventListener('click',showDiff);
+  document.getElementById('dmInline').addEventListener('click',function(){mode='inline';showDiff();});
+  document.getElementById('dmSplit').addEventListener('click',function(){mode='split';showDiff();});
+  document.getElementById('dmClose').addEventListener('click',function(){modal.hidden=true;});
+  modal.addEventListener('click',function(e){if(e.target===modal)modal.hidden=true;});
+  document.addEventListener('keydown',function(e){if(e.key==='Escape')modal.hidden=true;});
+
+  // ---- Save: one POST, one manual run; reload shows the saved render ----
+  document.getElementById('btnSave').addEventListener('click',function(){
+    var payload={
+      baseHash:CFG.baseHash,
+      message:document.getElementById('editWhy').value.trim().slice(0,500),
+      sections:dirtySecs().map(function(s){return{idx:Number(s.dataset.idx),heading:s.dataset.heading,text:normSec(s.querySelector('.esec-src').value)};}),
+      fields:dirtyFlds().map(function(f){return{key:f.dataset.key,value:normFld(f.querySelector('.efield-input').value)};})
+    };
+    if(!payload.sections.length&&!payload.fields.length)return;
+    var btns=[].slice.call(bar.querySelectorAll('.btn'));
+    btns.forEach(function(b){b.disabled=true;});
+    fetch('/c/'+encodeURIComponent(CFG.slug)+'/edit',{
+      method:'POST',
+      headers:{'Content-Type':'application/json','X-Requested-With':'fetch'},
+      body:JSON.stringify(payload)
+    }).then(function(r){return r.json().catch(function(){return{ok:false,error:'HTTP '+r.status};});})
+      .then(function(d){
+        if(d.ok)location.reload();
+        else{alert(d.error||'save failed');btns.forEach(function(b){b.disabled=false;});}
+      }).catch(function(){alert('save failed — network error');btns.forEach(function(b){b.disabled=false;});});
+  });
+
+  // Typing anywhere with pending edits should not be lost to a stray navigation.
+  window.addEventListener('beforeunload',function(e){
+    if(!bar.hidden&&!bar.querySelector('.btn').disabled){e.preventDefault();e.returnValue='';}
+  });
+})();</script>`;
 
 // ---- rename a contact's display name ---------------------------------------
 // The roster name is the profile's `# ` title line (listContacts reads it), so a
@@ -629,48 +958,38 @@ function renameContact(slug, newName) {
   return { ok: true };
 }
 
-// ---- hand-edit header fields (Relationship, Birthday) -----------------------
-// These two are Nathan's knowledge, not message-derivable; every other metadata
-// line is pipeline-owned and not offered. A save is treated as a real pass: it
-// refuses to run while a pipeline run holds the profile (a merge rewriting the
-// same file would clobber the edit), commits to the isolated history, and lands
-// in the runs ledger as kind 'manual' — one run per profile per save.
+// ---- manual edit: apply a save from the profile page -------------------------
+// One POST carries every dirty unit: `##` sections as replacement Markdown, and
+// the two hand-owned header fields (Relationship, Birthday — Nathan's knowledge,
+// not message-derivable; every other metadata line is pipeline-owned and stays
+// read-only). A save is treated as a real pass: it refuses to run while a
+// pipeline run holds the profile (a merge rewriting the same file would clobber
+// the edit), commits to the isolated history, and lands in the runs ledger as
+// kind 'manual' — one run per profile per save. `baseHash` is the sha256 of the
+// file as the page rendered it: if anything rewrote the profile since, the save
+// is refused rather than silently merged.
 const EDITABLE_FIELDS = [
   ['relationship', 'Relationship'],
   ['birthday', 'Birthday'],
 ];
 
-function readField(md, label) {
-  const m = md.match(new RegExp(`^- \\*\\*${label}:\\*\\* (.*)$`, 'm'));
-  return m ? m[1].trim() : null;
+// Added/removed line counts for a section edit's step label. A multiset diff,
+// not an LCS: close enough for a summary, and O(n).
+function lineDelta(oldText, newText) {
+  const count = new Map();
+  for (const l of oldText.split('\n')) count.set(l, (count.get(l) || 0) + 1);
+  let added = 0;
+  for (const l of newText.split('\n')) {
+    const c = count.get(l) || 0;
+    if (c > 0) count.set(l, c - 1);
+    else added += 1;
+  }
+  let removed = 0;
+  for (const c of count.values()) removed += c;
+  return { added, removed };
 }
 
-function fieldsPage(slug) {
-  const file = path.posix.join(CONTACTS_DIR, `${slug}.md`);
-  let md;
-  try { md = fs.readFileSync(file, 'utf8'); } catch { return null; }
-  const titleLine = md.split(/\r?\n/).find((l) => l.startsWith('# '));
-  const name = titleLine ? titleLine.slice(2).trim() : slug;
-  const cur = (label) => {
-    const v = readField(md, label);
-    return v == null || v === '_TBD_' ? '' : v;
-  };
-  const v = V.fields({ slug, name, relationship: cur('Relationship'), birthday: cur('Birthday') });
-  return page(v.title, render(v.body));
-}
-
-// A metadata line the profile lacks is added at the end of the block: after the
-// last `- ` bullet that follows the `# ` title.
-function insertMetaLine(md, line) {
-  const lines = md.split('\n');
-  let i = lines.findIndex((l) => l.startsWith('# ')) + 1;
-  while (i < lines.length && (lines[i].trim() === '' || lines[i].startsWith('- '))) i += 1;
-  while (i > 0 && lines[i - 1].trim() === '') i -= 1;
-  lines.splice(i, 0, line);
-  return lines.join('\n');
-}
-
-function updateFields(slug, form) {
+function applyManualEdit(slug, payload) {
   const file = path.posix.join(CONTACTS_DIR, `${slug}.md`);
   let md;
   try { md = fs.readFileSync(file, 'utf8'); } catch { return { ok: false, status: 404, error: 'no such contact' }; }
@@ -682,22 +1001,71 @@ function updateFields(slug, form) {
   if (!lock.ok) return { ok: false, status: 409, error: `a run is in progress (${lock.holderDesc}) — save again when it finishes` };
   const startedAt = Date.now();
   try {
-    const changes = [];
-    for (const [key, label] of EDITABLE_FIELDS) {
-      if (form[key] == null) continue; // not in the form -> untouched
-      const next = String(form[key]).replace(/[\r\n]+/g, ' ').trim().slice(0, 120) || '_TBD_';
-      const cur = readField(md, label);
-      if (cur === next || (cur == null && next === '_TBD_')) continue;
-      if (cur == null) md = insertMetaLine(md, `- **${label}:** ${next}`);
-      else md = md.replace(new RegExp(`^- \\*\\*${label}:\\*\\* .*$`, 'm'), `- **${label}:** ${next}`);
-      changes.push({ field: label, from: cur == null ? '(absent)' : cur, to: next });
+    const hash = crypto.createHash('sha256').update(md).digest('hex');
+    if (payload.baseHash !== hash) {
+      return { ok: false, status: 409, error: 'the profile changed since this page loaded — reload and re-apply your edits' };
     }
-    if (!changes.length) return { ok: true, changed: 0 };
+    const { lines, sections } = splitProfile(md);
+
+    // Sections splice bottom-up so earlier spans stay valid; each replacement is
+    // followed by the one blank line that separates sections. An empty text
+    // deletes the section outright. MIRRORS assemble() in PROFILE_EDIT_JS.
+    const secChanges = [];
+    const secEdits = (Array.isArray(payload.sections) ? payload.sections : [])
+      .filter((e) => Number.isInteger(e.idx) && sections[e.idx] && typeof e.text === 'string')
+      .sort((a, b) => b.idx - a.idx);
+    for (const e of secEdits) {
+      const span = sections[e.idx];
+      if (String(e.heading || '') !== span.heading) {
+        return { ok: false, status: 409, error: 'section layout changed — reload and re-apply your edits' };
+      }
+      const text = String(e.text).replace(/\r/g, '').replace(/^\n+/, '').replace(/\n+$/, '');
+      if (text.length > 200_000) return { ok: false, status: 400, error: `section "${span.heading}" too large` };
+      const oldText = sectionText(lines, span);
+      if (text === oldText) continue;
+      lines.splice(span.from, span.to - span.from, ...(text === '' ? [] : [...text.split('\n'), '']));
+      secChanges.push({ section: span.heading, ...lineDelta(oldText, text) });
+    }
+    secChanges.reverse(); // back into file order for the run record
+
+    // Fields rewrite (or insert into) the header block only — a `- **X:**` line
+    // in an old-shape What-I-know bullet must never match.
+    const byKey = new Map(EDITABLE_FIELDS);
+    const fieldChanges = [];
+    for (const f of (Array.isArray(payload.fields) ? payload.fields : [])) {
+      const label = byKey.get(f && f.key);
+      if (!label) continue;
+      const value = String(f.value == null ? '' : f.value).replace(/[\r\n]+/g, ' ').trim().slice(0, 120) || '_TBD_';
+      let headerEnd = lines.findIndex((l) => /^## /.test(l));
+      if (headerEnd === -1) headerEnd = lines.length;
+      const re = new RegExp(`^- \\*\\*${label}:\\*\\* (.*)$`);
+      let idx = -1;
+      let cur = null;
+      for (let i = 0; i < headerEnd; i += 1) {
+        const m = lines[i].match(re);
+        if (m) { idx = i; cur = m[1].trim(); break; }
+      }
+      if (cur === value || (cur == null && value === '_TBD_')) continue;
+      if (idx !== -1) lines[idx] = `- **${label}:** ${value}`;
+      else {
+        // A metadata line the profile lacks is added at the end of the block:
+        // after the last `- ` bullet that follows the `# ` title.
+        let i = lines.findIndex((l) => l.startsWith('# ')) + 1;
+        while (i < headerEnd && (lines[i].trim() === '' || lines[i].startsWith('- '))) i += 1;
+        while (i > 0 && lines[i - 1].trim() === '') i -= 1;
+        lines.splice(i, 0, `- **${label}:** ${value}`);
+      }
+      fieldChanges.push({ field: label, from: cur == null ? '(absent)' : cur, to: value });
+    }
+
+    if (!fieldChanges.length && !secChanges.length) return { ok: true, changed: 0 };
     // Nathan's "why" — the commit message for this set of edits. Subject stays
     // machine-shaped; his context rides as the body, and both land in the run
     // record so the provenance view can show them without a git subprocess.
-    const message = String(form.message || '').replace(/\r/g, '').trim().slice(0, 500);
-    fs.writeFileSync(file, md);
+    const message = String(payload.message || '').replace(/\r/g, '').trim().slice(0, 500);
+    let out = lines.join('\n');
+    if (!out.endsWith('\n')) out += '\n';
+    fs.writeFileSync(file, out);
     // Same isolated-history commit as a rename, so the edit shows on the
     // profile's history page with a clean attribution. pre/post shas make the
     // run's line-level diff viewable at /runs/<id>/diff/<slug>.
@@ -710,11 +1078,12 @@ function updateFields(slug, form) {
     };
     const preSha = rev();
     let postSha = null;
+    const names = [...fieldChanges.map((c) => c.field), ...secChanges.map((c) => c.section)];
     try {
       // -f: data/ is ignored by the MAIN repo's .gitignore, which this shared
       // work-tree applies — a bare `add` refuses the path.
       execFileSync('git', ['--git-dir', GITDIR, '--work-tree', ROOT, 'add', '-f', '--', relPath], { cwd: ROOT, timeout: 15_000 });
-      const subject = `manual edit ${slug}: ${changes.map((c) => c.field).join(', ')}`;
+      const subject = `manual edit ${slug}: ${names.join(', ')}`;
       execFileSync('git', ['--git-dir', GITDIR, '--work-tree', ROOT, 'commit', '-m',
         message ? `${subject}\n\n${message}` : subject], { cwd: ROOT, timeout: 15_000 });
       postSha = rev();
@@ -730,11 +1099,15 @@ function updateFields(slug, form) {
         message: message || undefined,
         preSha: preSha || undefined,
         postSha: postSha || undefined,
-        fields: changes,
-        steps: changes.map((c) => ({ name: `${c.field}: ${c.from} → ${c.to}`, ok: true, ms: 0 })),
+        fields: fieldChanges,
+        sections: secChanges,
+        steps: [
+          ...fieldChanges.map((c) => ({ name: `${c.field}: ${c.from} → ${c.to}`, ok: true, ms: 0 })),
+          ...secChanges.map((c) => ({ name: `## ${c.section}: +${c.added} −${c.removed} line(s)`, ok: true, ms: 0 })),
+        ],
       });
     } catch { /* edit already applied */ }
-    return { ok: true, changed: changes.length };
+    return { ok: true, changed: fieldChanges.length + secChanges.length };
   } finally {
     lock.release();
   }
@@ -1080,16 +1453,16 @@ function rowForRun(r) {
     };
   }
   if (r.kind === 'manual') {
-    const fields = (r.fields || []).map((f) => f.field);
+    const units = [...(r.fields || []).map((f) => f.field), ...(r.sections || []).map((s) => s.section)];
     return {
       t, kind: 'manual',
       pass: 'edit',
       scope: r.only || '',
       examined: '',
-      held: `${fields.length} field(s)`,
+      held: `${units.length} change(s)`,
       cost: 'free', actual: 'free', took, ok: true,
       // The "why" he typed is the most useful cell; fall back to what changed.
-      note: r.message || (fields.length ? fields.join(', ') : 'no changes'),
+      note: r.message || (units.length ? units.join(', ') : 'no changes'),
     };
   }
   // ingest (also the default for legacy records written before `kind` existed)
@@ -1728,12 +2101,12 @@ function jobPage() {
   return page(`${j.kind} — job ${j.id}`, render(V.job(j).body) + poll);
 }
 
-function readBody(req, cb) {
+function readBody(req, cb, limit = 64_000) {
   let buf = '';
   let over = false;
   req.on('data', (d) => {
     buf += d.toString();
-    if (buf.length > 64_000) { over = true; req.destroy(); }
+    if (buf.length > limit) { over = true; req.destroy(); }
   });
   req.on('end', () => { if (!over) cb(buf); });
 }
@@ -1914,34 +2287,26 @@ function start() {
         send(200, html);
         return;
       }
-      // Hand-edit the header fields. GET renders the form, POST applies + logs it.
-      const cf = url.pathname.match(/^\/c\/([^/]+)\/fields$/);
-      if (cf) {
+      // Save a set of manual edits from the profile page (sections + fields),
+      // as one JSON POST → one 'manual' run. The page's own JS is the client.
+      const cf = url.pathname.match(/^\/c\/([^/]+)\/edit$/);
+      if (cf && req.method === 'POST') {
         const slug = decodeURIComponent(cf[1]);
-        if (!isSafeSlug(slug)) { send(400, page('Bad request', '<p>Bad request.</p>')); return; }
-        if (req.method === 'POST') {
-          const sfs = req.headers['sec-fetch-site'];
-          if (sfs && sfs !== 'same-origin' && sfs !== 'none') { send(403, page('Forbidden', '<p>Cross-site request refused.</p>')); return; }
-          readBody(req, (raw2) => {
-            try {
-              const p = new URLSearchParams(raw2);
-              const r = updateFields(slug, { relationship: p.get('relationship'), birthday: p.get('birthday'), message: p.get('message') });
-              if (!r.ok) {
-                send(r.status, page(r.status === 409 ? 'Run in progress' : 'Not found',
-                  `<div class="back"><a href="/c/${encodeURIComponent(slug)}">&larr; ${esc(slug)}</a></div><p class="bad">${esc(r.error)}</p>`));
-                return;
-              }
-              res.writeHead(303, { Location: `/c/${encodeURIComponent(slug)}` });
-              res.end();
-            } catch (e) {
-              try { send(500, page('Error', `<p class="bad">${esc(String(e.message).slice(0, 200))}</p>`)); } catch { /* sent */ }
-            }
-          });
-          return;
-        }
-        const html = fieldsPage(slug);
-        if (!html) { send(404, page('Not found', '<div class="back"><a href="/">&larr; All contacts</a></div><p>No such contact.</p>')); return; }
-        send(200, html);
+        if (!isSafeSlug(slug)) { sendJson(400, { ok: false, error: 'bad request' }); return; }
+        const sfs = req.headers['sec-fetch-site'];
+        if (sfs && sfs !== 'same-origin' && sfs !== 'none') { sendJson(403, { ok: false, error: 'cross-site request refused' }); return; }
+        // 512 KB: a save can carry several whole sections (the Timeline included).
+        readBody(req, (raw2) => {
+          try {
+            let payload;
+            try { payload = JSON.parse(raw2); } catch { sendJson(400, { ok: false, error: 'bad JSON' }); return; }
+            const r = applyManualEdit(slug, payload || {});
+            if (!r.ok) { sendJson(r.status, { ok: false, error: r.error }); return; }
+            sendJson(200, { ok: true, changed: r.changed });
+          } catch (e) {
+            try { sendJson(500, { ok: false, error: String(e.message).slice(0, 200) }); } catch { /* sent */ }
+          }
+        }, 512_000);
         return;
       }
       // Rename a contact's display name. GET renders the form, POST applies it.
