@@ -537,26 +537,34 @@ select.fld{appearance:none;-webkit-appearance:none;padding-right:26px;cursor:poi
   background:var(--card2);border:1px solid var(--rule);padding:7px 11px;margin:-2px 0 13px}
 .modal-acts{display:flex;gap:10px;justify-content:flex-end}
 
-/* ---- per-section hand edit (profile page) --------------------------------- */
-/* Each ## section carries its own ✎; the button floats onto the heading line.
-   Edit mode swaps the rendered view for the section's raw-Markdown textarea. */
-.esec{position:relative}
-.esec-tools{float:right;display:flex;gap:8px;align-items:center;margin:38px 0 0 12px;position:relative;z-index:2}
-.esec-src{font-family:"Courier Prime",monospace;font-size:13px;line-height:1.45;width:100%;
-  min-height:120px;margin-top:12px;background:var(--paper);resize:vertical}
-.edmark{transform:rotate(-2deg)}
-.efield .efield-btn{margin-left:7px;padding:0 6px;font-size:10px;vertical-align:1px}
-.efield-input{display:inline-block;width:min(300px,60vw);padding:3px 8px;font-size:12.5px;margin-left:4px}
+/* ---- per-unit hand edit (profile page) ------------------------------------ */
+/* The pencil lives inside each unit's own heading and only exists on hover;
+   editing swaps the rendered view for a seamless editable area of the unit's
+   raw Markdown — no borders, no boxes, just a hairline in the margin. */
+.ebtn{background:none;border:0;padding:0 2px;margin-left:9px;cursor:pointer;
+  font-family:Newsreader,serif;font-size:14px;line-height:1;color:var(--faint);
+  opacity:0;transition:opacity .12s ease,color .12s ease;vertical-align:1px}
+.eunit:hover .ebtn,.efield:hover .ebtn,.ebtn:focus-visible{opacity:1}
+.ebtn:hover{color:var(--ox)}
+.eunit.dirty .ebtn,.efield.dirty .ebtn{opacity:1;color:var(--ox)}
+@media(hover:none){.ebtn{opacity:.35}}
+.esrc:not([hidden]){display:block}
+.esrc{width:100%;border:0;background:transparent;resize:none;overflow:hidden;
+  font-family:Newsreader,serif;font-size:15.5px;line-height:1.6;color:var(--ink);
+  border-left:2px solid var(--ox-soft);border-radius:0;padding:2px 0 2px 12px;margin:10px 0}
+.esrc:focus,.esrc:focus-visible{outline:none}
+.efield-input{font-family:"Courier Prime",monospace;font-size:12.5px;color:var(--ink);
+  background:transparent;border:0;border-bottom:1px dashed var(--ox-soft);border-radius:0;
+  padding:0 2px;width:24ch;max-width:60vw}
+.efield-input:focus,.efield-input:focus-visible{outline:none;border-bottom-style:solid}
 
-/* One shared edit state: the bottom bar appears when anything is dirty. */
-.editbar{position:fixed;left:50%;transform:translateX(-50%);bottom:14px;z-index:60;
-  display:flex;gap:9px;align-items:center;width:min(760px,94vw);
-  background:var(--card);border:1px solid var(--ink);box-shadow:4px 6px 0 #00000033;padding:10px 14px}
+/* One shared edit state: a quiet bottom bar appears when anything is dirty. */
+.editbar{position:fixed;left:50%;transform:translateX(-50%);bottom:16px;z-index:60;
+  display:flex;gap:8px;align-items:center;background:var(--card);border:1px solid var(--rule);
+  box-shadow:2px 3px 0 #00000022;padding:7px 12px;white-space:nowrap}
 .editbar[hidden]{display:none}
-.editbar .fld{flex:1;min-width:60px}
-.editbar-n{font-family:"Courier Prime",monospace;font-size:11px;letter-spacing:.08em;
-  text-transform:uppercase;color:var(--ox);white-space:nowrap}
-@media (max-width:600px){.editbar{flex-wrap:wrap}.editbar .fld{flex-basis:100%;order:9}}
+.editbar-n{font-family:"Courier Prime",monospace;font-size:10.5px;letter-spacing:.08em;
+  text-transform:uppercase;color:var(--soft);margin-right:4px}
 
 /* The Diff overlay: a PR-style line diff, inline (unified) or side by side. */
 .diffcard{width:min(1200px,96vw);max-height:92vh;display:flex;flex-direction:column;

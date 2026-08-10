@@ -578,32 +578,38 @@ function spanPage(start, end) {
   }
 }
 
-// ---- profile page, with per-section hand editing ----------------------------
+// ---- profile page, with per-unit hand editing --------------------------------
 // The profile is plain Markdown on disk, so "edit" means editing that Markdown
-// directly: every `##` section carries its own ✎ button that swaps the rendered
-// view for a textarea of the section's raw source, and the two hand-owned header
-// fields (Relationship, Birthday) swap to an inline input. All pending changes
-// share ONE state: a bottom bar appears with Cancel (discard everything), Diff
-// (PR-style line diff, inline or side-by-side), and Save (one manual run).
+// directly. The edit unit is the SUBSECTION: each `###` block (School, Money,
+// Family…) and each `##` section without `###` children (Talking points, Open
+// questions) carries a pencil that only appears on hover, and clicking it makes
+// that unit's text editable in place — the rendered view swaps for a seamless
+// editable area holding the unit's raw source, no chrome. The two hand-owned
+// header fields (Relationship, Birthday) edit the same way, inline. All pending
+// changes share ONE state: a quiet bottom bar appears with Cancel (discard
+// everything), Diff (PR-style line diff, inline or side-by-side), and Save
+// (one manual run).
 
-// Split a profile into its header (title + metadata, before the first `##`) and
-// its `##` sections. Spans are [from, to) line indexes into `lines`. The same
-// split runs client-side (assemble() in PROFILE_EDIT_JS) — keep them in step.
+// Split a profile into its header (title + metadata, before the first heading)
+// and its edit units at `##`/`###` boundaries. Spans are [from, to) line indexes
+// into `lines`. The same split feeds assemble() in PROFILE_EDIT_JS client-side —
+// keep them in step.
 function splitProfile(md) {
   const lines = md.split('\n');
-  const heads = [];
-  for (let i = 0; i < lines.length; i += 1) if (/^## /.test(lines[i])) heads.push(i);
-  const sections = heads.map((from, k) => ({
+  const marks = [];
+  for (let i = 0; i < lines.length; i += 1) if (/^###? /.test(lines[i])) marks.push(i);
+  const units = marks.map((from, k) => ({
     from,
-    to: k + 1 < heads.length ? heads[k + 1] : lines.length,
-    heading: lines[from].replace(/^##\s+/, '').trim(),
+    to: k + 1 < marks.length ? marks[k + 1] : lines.length,
+    heading: lines[from].replace(/^#+\s+/, '').trim(),
+    level: lines[from].startsWith('###') ? 3 : 2,
   }));
-  return { lines, headerTo: heads.length ? heads[0] : lines.length, sections };
+  return { lines, headerTo: marks.length ? marks[0] : lines.length, units };
 }
 
-// A section's canonical text: its lines with trailing blank lines stripped, so
-// what the textarea holds is exactly what a save writes back (assemble adds the
-// one blank line that separates sections).
+// A unit's canonical text: its lines with trailing blank lines stripped, so what
+// the editable area holds is exactly what a save writes back (assemble adds the
+// one blank line that separates blocks).
 function sectionText(lines, span) {
   const seg = lines.slice(span.from, span.to);
   while (seg.length && seg[seg.length - 1].trim() === '') seg.pop();
@@ -615,12 +621,14 @@ function profilePage(slug) {
   let md;
   try { md = fs.readFileSync(file, 'utf8'); } catch { return null; }
   const baseHash = crypto.createHash('sha256').update(md).digest('hex');
-  const { lines, headerTo, sections } = splitProfile(md);
+  const { lines, headerTo, units } = splitProfile(md);
   const titleLine = lines.find((l) => l.startsWith('# '));
   const name = titleLine ? titleLine.slice(2).trim() : slug;
 
-  // Header: title + metadata bullets. The two hand-owned fields render with an
-  // inline ✎; machine-owned lines (ids, counts, contact dates) stay read-only.
+  const pencil = (label) => `<button type="button" class="ebtn" title="edit ${esc(label)}" aria-label="edit ${esc(label)}">&#9998;</button>`;
+
+  // Header: title + metadata bullets. The two hand-owned fields render with a
+  // hover pencil; machine-owned lines (ids, counts, contact dates) stay read-only.
   const editable = new Map(EDITABLE_FIELDS.map(([key, label]) => [label, key]));
   const seen = new Set();
   const header = [];
@@ -628,8 +636,8 @@ function profilePage(slug) {
     const orig = cur == null || cur === '_TBD_' ? '' : cur;
     return `<div class="fields efield" data-key="${key}" data-label="${esc(label)}">`
       + `<span><b>${esc(label)}:</b> <span class="efield-val">${mdInline(cur == null ? '_TBD_' : cur)}</span></span>`
-      + `<button type="button" class="btn sm efield-btn" title="edit ${esc(label)}">&#9998;</button>`
-      + `<input class="fld tw efield-input" hidden maxlength="120" value="${esc(orig)}" aria-label="${esc(label)}">`
+      + `<input class="efield-input" hidden maxlength="120" value="${esc(orig)}" aria-label="${esc(label)}">`
+      + pencil(label)
       + `</div>`;
   };
   for (const line of lines.slice(0, headerTo)) {
@@ -649,22 +657,25 @@ function profilePage(slug) {
   // A hand-owned field the profile lacks is still offered; a save inserts it.
   for (const [key, label] of EDITABLE_FIELDS) if (!seen.has(label)) header.push(fieldRow(label, key, null));
 
-  const secHtml = sections.map((s, i) => {
-    const text = sectionText(lines, s);
-    return `<section class="esec" data-idx="${i}" data-heading="${esc(s.heading)}">`
-      + `<div class="esec-tools"><span class="mk amber edmark" hidden>edited</span>`
-      + `<button type="button" class="btn sm esec-btn">&#9998; edit</button></div>`
-      + `<div class="esec-view">${renderProfile(text)}</div>`
-      + `<textarea class="esec-src fld tw" hidden spellcheck="false" aria-label="edit ${esc(s.heading)}">${esc(text)}</textarea>`
+  // Units render in file order. A bare `##` heading line whose subsections carry
+  // the content (`## What I know`, `## Timeline`) is structure, not text — it
+  // renders plain, with no pencil. Everything else gets the pencil tucked into
+  // its own heading, visible only on hover.
+  const unitHtml = units.map((u, i) => {
+    const text = sectionText(lines, u);
+    if (u.level === 2 && text === lines[u.from].trimEnd()) return renderProfile(text);
+    const view = renderProfile(text).replace(/<\/h([23])>/, `${pencil(u.heading)}</h$1>`);
+    return `<section class="eunit" data-idx="${i}" data-heading="${esc(u.heading)}">`
+      + `<div class="eview">${view}</div>`
+      + `<textarea class="esrc" hidden spellcheck="false" aria-label="edit ${esc(u.heading)}">${esc(text)}</textarea>`
       + `</section>`;
   }).join('');
 
   const bar = `<div class="editbar" id="editbar" hidden>`
     + `<span class="editbar-n" id="editbarN"></span>`
-    + `<input class="fld tw" id="editWhy" placeholder="why — optional, kept in the ledger" maxlength="500">`
-    + `<button type="button" class="btn" id="btnDiff">Diff</button>`
-    + `<button type="button" class="btn" id="btnCancel">Cancel</button>`
-    + `<button type="button" class="btn pr" id="btnSave">Save</button></div>`;
+    + `<button type="button" class="btn sm" id="btnDiff">Diff</button>`
+    + `<button type="button" class="btn sm" id="btnCancel">Cancel</button>`
+    + `<button type="button" class="btn sm pr" id="btnSave">Save</button></div>`;
 
   const modal = `<div class="modal" id="diffModal" hidden><div class="diffcard">`
     + `<div class="diffhead"><h2>Unsaved changes — ${esc(name)}</h2>`
@@ -673,22 +684,22 @@ function profilePage(slug) {
     + `<button type="button" class="btn sm" id="dmClose">close</button></div>`
     + `<div class="diffbody" id="diffBody"></div></div></div>`;
 
-  const cfg = { slug, baseHash, orig: md, headerTo, sections: sections.map((s) => ({ from: s.from, to: s.to, heading: s.heading })) };
+  const cfg = { slug, baseHash, orig: md, headerTo, units: units.map((u) => ({ from: u.from, to: u.to, heading: u.heading })) };
   const cfgJs = `<script>window.__EDIT_CFG=${JSON.stringify(cfg).replace(/</g, '\\u003c')}</script>`;
 
   const body = `<div class="back"><a href="/">&larr; All people</a>`
     + ` &middot; <a href="/c/${encodeURIComponent(slug)}/history">History &rarr;</a></div>`
-    + `<div class="profile">${header.join('')}${secHtml}</div>${bar}${modal}`;
+    + `<div class="profile">${header.join('')}${unitHtml}</div>${bar}${modal}`;
   return page(name, body + cfgJs + PROFILE_EDIT_JS, '/');
 }
 
 // The whole edit state machine, in page. Mirrors the server exactly where it
 // must: assemble() re-derives the saved file from the pristine Markdown plus the
-// dirty sections/fields, the same splice applyManualEdit performs — so the Diff
+// dirty units/fields, the same splice applyManualEdit performs — so the Diff
 // overlay shows character-for-character what Save will commit.
 const PROFILE_EDIT_JS = `<script>(function(){
   var CFG=window.__EDIT_CFG;if(!CFG)return;
-  var secs=[].slice.call(document.querySelectorAll('.esec'));
+  var units=[].slice.call(document.querySelectorAll('.eunit'));
   var flds=[].slice.call(document.querySelectorAll('.efield'));
   var bar=document.getElementById('editbar'),barN=document.getElementById('editbarN');
   var modal=document.getElementById('diffModal'),diffBody=document.getElementById('diffBody');
@@ -696,66 +707,71 @@ const PROFILE_EDIT_JS = `<script>(function(){
 
   function normSec(v){return v.replace(/\\r/g,'').replace(/^\\n+/,'').replace(/\\n+$/,'');}
   function normFld(v){return v.replace(/[\\r\\n]+/g,' ').trim().slice(0,120);}
-  function dirtySecs(){return secs.filter(function(s){var ta=s.querySelector('.esec-src');return normSec(ta.value)!==ta.defaultValue;});}
+  function dirtyUnits(){return units.filter(function(u){var ta=u.querySelector('.esrc');return normSec(ta.value)!==ta.defaultValue;});}
   function dirtyFlds(){return flds.filter(function(f){var inp=f.querySelector('.efield-input');return normFld(inp.value)!==inp.defaultValue;});}
 
   function refresh(){
-    var ds=dirtySecs(),df=dirtyFlds(),n=ds.length+df.length;
-    secs.forEach(function(s){s.querySelector('.edmark').hidden=ds.indexOf(s)===-1;});
+    var du=dirtyUnits(),df=dirtyFlds(),n=du.length+df.length;
+    units.forEach(function(u){u.classList.toggle('dirty',du.indexOf(u)!==-1);});
+    flds.forEach(function(f){f.classList.toggle('dirty',df.indexOf(f)!==-1);});
     bar.hidden=n===0;
     if(n)barN.textContent=n+' unsaved change'+(n===1?'':'s');
   }
 
-  // ---- per-section + per-field edit toggles ----
-  secs.forEach(function(s){
-    var btn=s.querySelector('.esec-btn'),ta=s.querySelector('.esec-src'),view=s.querySelector('.esec-view');
-    function size(){ta.style.height='auto';ta.style.height=Math.min(ta.scrollHeight+4,window.innerHeight*0.7)+'px';}
-    btn.addEventListener('click',function(){
-      var editing=!ta.hidden;
-      ta.hidden=editing;view.style.display=editing?'':'none';
-      btn.innerHTML=editing?'&#9998; edit':'done';
-      if(!editing){size();ta.focus();}
-      refresh();
-    });
-    ta.addEventListener('input',function(){size();refresh();});
+  // ---- in-place editing: pencil opens, Escape closes (changes kept) ----
+  function size(ta){ta.style.height='auto';ta.style.height=(ta.scrollHeight+2)+'px';}
+  function openUnit(u){
+    var ta=u.querySelector('.esrc');
+    u.classList.add('editing');
+    u.querySelector('.eview').hidden=true;
+    ta.hidden=false;size(ta);ta.focus();
+  }
+  function closeUnit(u){
+    u.classList.remove('editing');
+    u.querySelector('.eview').hidden=false;
+    u.querySelector('.esrc').hidden=true;
+    refresh();
+  }
+  units.forEach(function(u){
+    var ta=u.querySelector('.esrc');
+    u.querySelector('.ebtn').addEventListener('click',function(){openUnit(u);});
+    ta.addEventListener('input',function(){size(ta);refresh();});
+    ta.addEventListener('keydown',function(e){if(e.key==='Escape'){e.stopPropagation();closeUnit(u);}});
   });
   flds.forEach(function(f){
-    var btn=f.querySelector('.efield-btn'),inp=f.querySelector('.efield-input'),val=f.querySelector('.efield-val');
-    btn.addEventListener('click',function(){
-      var editing=!inp.hidden;
-      inp.hidden=editing;val.style.display=editing?'':'none';
-      btn.innerHTML=editing?'&#9998;':'done';
-      if(!editing)inp.focus();
-      refresh();
+    var inp=f.querySelector('.efield-input'),val=f.querySelector('.efield-val');
+    f.querySelector('.ebtn').addEventListener('click',function(){
+      f.classList.add('editing');val.hidden=true;inp.hidden=false;inp.focus();
     });
     inp.addEventListener('input',refresh);
+    inp.addEventListener('keydown',function(e){
+      if(e.key==='Escape'||e.key==='Enter'){
+        e.stopPropagation();
+        f.classList.remove('editing');inp.hidden=true;val.hidden=false;refresh();
+      }
+    });
   });
 
-  // ---- Cancel: reset every section and field to what the page loaded with ----
+  // ---- Cancel: everything back to what the page loaded with ----
   document.getElementById('btnCancel').addEventListener('click',function(){
     if(!confirm('Discard all unsaved changes?'))return;
-    secs.forEach(function(s){
-      var ta=s.querySelector('.esec-src');ta.value=ta.defaultValue;
-      ta.hidden=true;s.querySelector('.esec-view').style.display='';
-      s.querySelector('.esec-btn').innerHTML='&#9998; edit';
-    });
+    units.forEach(function(u){var ta=u.querySelector('.esrc');ta.value=ta.defaultValue;closeUnit(u);});
     flds.forEach(function(f){
       var inp=f.querySelector('.efield-input');inp.value=inp.defaultValue;
-      inp.hidden=true;f.querySelector('.efield-val').style.display='';
-      f.querySelector('.efield-btn').innerHTML='&#9998;';
+      f.classList.remove('editing');inp.hidden=true;f.querySelector('.efield-val').hidden=false;
     });
     refresh();
   });
 
   // ---- assemble: pristine Markdown + dirty edits -> the file a save writes ----
-  // MIRRORS applyManualEdit in crm-web.js. Sections splice bottom-up (spans stay
-  // valid), each followed by the one separating blank line; an emptied textarea
-  // deletes its section. Fields rewrite (or insert into) the header block.
+  // MIRRORS applyManualEdit in crm-web.js. Units splice bottom-up (spans stay
+  // valid), each followed by the one separating blank line; an emptied editor
+  // deletes its unit. Fields rewrite (or insert into) the header block.
   function assemble(){
     var lines=CFG.orig.split('\\n');
-    dirtySecs().sort(function(a,b){return b.dataset.idx-a.dataset.idx;}).forEach(function(s){
-      var span=CFG.sections[Number(s.dataset.idx)];
-      var text=normSec(s.querySelector('.esec-src').value);
+    dirtyUnits().sort(function(a,b){return b.dataset.idx-a.dataset.idx;}).forEach(function(u){
+      var span=CFG.units[Number(u.dataset.idx)];
+      var text=normSec(u.querySelector('.esrc').value);
       var repl=text===''?[]:text.split('\\n').concat(['']);
       lines.splice.apply(lines,[span.from,span.to-span.from].concat(repl));
     });
@@ -787,9 +803,8 @@ const PROFILE_EDIT_JS = `<script>(function(){
     var dp=new Uint32Array((n+1)*(m+1)),W=m+1;
     for(var i=n-1;i>=0;i--)for(var j=m-1;j>=0;j--)
       dp[i*W+j]=ac[i]===bc[j]?dp[(i+1)*W+j+1]+1:Math.max(dp[(i+1)*W+j],dp[i*W+j+1]);
-    var ops=[],ai=0,bi=0,x=0,y=0;
-    for(ai=0;ai<s;ai++)ops.push({t:'=',a:ai,b:ai});
-    x=0;y=0;
+    var ops=[],x=0,y=0;
+    for(var p=0;p<s;p++)ops.push({t:'=',a:p,b:p});
     while(x<n&&y<m){
       if(ac[x]===bc[y]){ops.push({t:'=',a:s+x,b:s+y});x++;y++;}
       else if(dp[(x+1)*W+y]>=dp[x*W+y+1]){ops.push({t:'-',a:s+x});x++;}
@@ -890,14 +905,13 @@ const PROFILE_EDIT_JS = `<script>(function(){
   document.getElementById('dmSplit').addEventListener('click',function(){mode='split';showDiff();});
   document.getElementById('dmClose').addEventListener('click',function(){modal.hidden=true;});
   modal.addEventListener('click',function(e){if(e.target===modal)modal.hidden=true;});
-  document.addEventListener('keydown',function(e){if(e.key==='Escape')modal.hidden=true;});
+  document.addEventListener('keydown',function(e){if(e.key==='Escape'&&!modal.hidden)modal.hidden=true;});
 
   // ---- Save: one POST, one manual run; reload shows the saved render ----
   document.getElementById('btnSave').addEventListener('click',function(){
     var payload={
       baseHash:CFG.baseHash,
-      message:document.getElementById('editWhy').value.trim().slice(0,500),
-      sections:dirtySecs().map(function(s){return{idx:Number(s.dataset.idx),heading:s.dataset.heading,text:normSec(s.querySelector('.esec-src').value)};}),
+      sections:dirtyUnits().map(function(u){return{idx:Number(u.dataset.idx),heading:u.dataset.heading,text:normSec(u.querySelector('.esrc').value)};}),
       fields:dirtyFlds().map(function(f){return{key:f.dataset.key,value:normFld(f.querySelector('.efield-input').value)};})
     };
     if(!payload.sections.length&&!payload.fields.length)return;
@@ -1005,17 +1019,17 @@ function applyManualEdit(slug, payload) {
     if (payload.baseHash !== hash) {
       return { ok: false, status: 409, error: 'the profile changed since this page loaded — reload and re-apply your edits' };
     }
-    const { lines, sections } = splitProfile(md);
+    const { lines, units } = splitProfile(md);
 
-    // Sections splice bottom-up so earlier spans stay valid; each replacement is
-    // followed by the one blank line that separates sections. An empty text
-    // deletes the section outright. MIRRORS assemble() in PROFILE_EDIT_JS.
+    // Units splice bottom-up so earlier spans stay valid; each replacement is
+    // followed by the one blank line that separates blocks. An empty text
+    // deletes the unit outright. MIRRORS assemble() in PROFILE_EDIT_JS.
     const secChanges = [];
     const secEdits = (Array.isArray(payload.sections) ? payload.sections : [])
-      .filter((e) => Number.isInteger(e.idx) && sections[e.idx] && typeof e.text === 'string')
+      .filter((e) => Number.isInteger(e.idx) && units[e.idx] && typeof e.text === 'string')
       .sort((a, b) => b.idx - a.idx);
     for (const e of secEdits) {
-      const span = sections[e.idx];
+      const span = units[e.idx];
       if (String(e.heading || '') !== span.heading) {
         return { ok: false, status: 409, error: 'section layout changed — reload and re-apply your edits' };
       }
@@ -1024,7 +1038,7 @@ function applyManualEdit(slug, payload) {
       const oldText = sectionText(lines, span);
       if (text === oldText) continue;
       lines.splice(span.from, span.to - span.from, ...(text === '' ? [] : [...text.split('\n'), '']));
-      secChanges.push({ section: span.heading, ...lineDelta(oldText, text) });
+      secChanges.push({ section: span.heading, level: span.level, ...lineDelta(oldText, text) });
     }
     secChanges.reverse(); // back into file order for the run record
 
@@ -1103,7 +1117,7 @@ function applyManualEdit(slug, payload) {
         sections: secChanges,
         steps: [
           ...fieldChanges.map((c) => ({ name: `${c.field}: ${c.from} → ${c.to}`, ok: true, ms: 0 })),
-          ...secChanges.map((c) => ({ name: `## ${c.section}: +${c.added} −${c.removed} line(s)`, ok: true, ms: 0 })),
+          ...secChanges.map((c) => ({ name: `${'#'.repeat(c.level || 2)} ${c.section}: +${c.added} −${c.removed} line(s)`, ok: true, ms: 0 })),
         ],
       });
     } catch { /* edit already applied */ }
