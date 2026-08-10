@@ -34,7 +34,12 @@ const SCRATCH = process.env.CRM_EVAL_DIR
   || 'C:/Users/natha/AppData/Local/Temp/claude/C--Users-natha--openclaw/7de048dc-42ba-4c94-b38c-b7fc743ad280/scratchpad/crm-eval';
 
 const FREE_PREFIX = 'anthropic/';
-const DEFAULT_MODEL = 'anthropic/claude-opus-5';
+// EVAL MODEL POLICY (Nathan, 2026-08-09): variants run on SONNET, the judge runs
+// on Opus (evals/judge.js), and kimi is never used for evals — the production
+// model is measured by production itself, not by paid eval calls. Sonnet is the
+// deliberate choice of a mid-tier stand-in: a prompt that only works when Opus
+// papers over its ambiguities is a prompt kimi will fumble.
+const DEFAULT_MODEL = 'anthropic/claude-sonnet-5';
 
 // Variants point at VERSIONED prompt files, never at prompts/merge.md. merge.md
 // is production and moves when a prompt is promoted; if variant A tracked it,
@@ -182,19 +187,9 @@ const VARIANTS = {
     prompt: 'prompts/merge-v11.md',
     user: (c, today) => VARIANTS.b.user(c, today),
   },
-  // The same pair on the PRODUCTION model. The G→H→I→J lineage was promoted on
-  // Opus evidence alone, so J has never been measured where it actually ships;
-  // running incumbent and candidate together prices that in. Both PAID.
-  kj_high: {
-    label: 'K3+J think=high', prompt: 'prompts/merge-v10.md',
-    model: 'moonshotai/kimi-k3', thinking: 'high',
-    user: (c, today) => VARIANTS.b.user(c, today),
-  },
-  kl_high: {
-    label: 'K3+L think=high', prompt: 'prompts/merge-v11.md',
-    model: 'moonshotai/kimi-k3', thinking: 'high',
-    user: (c, today) => VARIANTS.b.user(c, today),
-  },
+  // The kimi variants below are HISTORY, kept so old run dirs stay readable.
+  // Do not add new ones: kimi is never used for evals (see the model policy at
+  // DEFAULT_MODEL), and --allow-paid should have no reason to be typed again.
   // K3 on F, to confirm the weaker model can carry the extra convention.
   kf_high: {
     label: 'K3+F think=high', prompt: 'prompts/merge-v6.md',
