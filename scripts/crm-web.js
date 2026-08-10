@@ -423,6 +423,8 @@ function tasksPage(editId = null) {
     ...t,
     name: t.contact_name || t.slug,
     msgId: t.source_msg_id,
+    rangeStart: t.range_start,
+    rangeEnd: t.range_end,
     probable: t.confidence === 'probable',
     descHtml: t.description ? mdInline(t.description) : '',
   });
@@ -649,54 +651,50 @@ function profilePage(slug) {
 
   const pencil = (label) => `<button type="button" class="ebtn" title="edit ${esc(label)}" aria-label="edit ${esc(label)}">&#9998;</button>`;
 
-  // Header: the name, then ONE glanceable catalog strip instead of a bullet
-  // wall. Cells speak the status page's voice (small caps key over its value);
-  // hand-owned fields (Relationship, Birthday) keep the hover pencil; the
-  // Signal uuid drops to a faint footer line — present, never in the way.
-  const editable = new Map(EDITABLE_FIELDS.map(([key, label]) => [label, key]));
-  const seen = new Set();
+  // Header: the name; the relationship as a human epigraph beneath it; then ONE
+  // quiet courier imprint line — birthday · since · last · messages — labels
+  // lowercase and soft, values in ink. Nothing shaped like a form. Phone and
+  // the Signal uuid whisper from a faint footer line. The two hand-owned fields
+  // (EDITABLE_FIELDS: Relationship, Birthday) keep the hover pencil and render
+  // even when the file lacks them — a save inserts the bullet.
   const header = [];
-  const cellMap = new Map(); // label -> cell html; emitted in ORDER, extras after
-  const foot = [];
-  const cell = (label, inner, editAttrs) =>
-    `<div class="cell${editAttrs ? ' efield' : ''}"${editAttrs || ''}>`
-    + `<span class="k">${esc(label)}</span><span class="v">${inner}</span></div>`;
-  const fieldCell = (label, key, cur) => {
-    const orig = cur == null || cur === '_TBD_' ? '' : cur;
-    return cell(label,
-      `<span class="efield-val">${mdInline(cur == null ? '_TBD_' : cur)}</span>`
-        + `<input class="efield-input" hidden maxlength="120" value="${esc(orig)}" aria-label="${esc(label)}">`
-        + pencil(label),
-      ` data-key="${key}" data-label="${esc(label)}"`);
-  };
-  const valueCell = (label, value) => {
-    // The message count reads as a stat: total up top, the split underneath.
-    const m = label === 'Messages' && value.match(/^(\d+) total \((\d+) from them, (\d+) from me\)$/);
-    if (m) return cell(label, `${m[1]}<span class="sub">${m[2]} them &middot; ${m[3]} me</span>`);
-    return cell(label, mdInline(value));
-  };
+  const meta = new Map(); // metadata bullets, label -> value
   for (const line of lines.slice(0, headerTo)) {
     const t = line.trim();
     if (t === '') continue;
     if (t.startsWith('# ')) { header.push(`<h1>${mdInline(t.slice(2))}</h1>`); continue; }
-    const meta = t.match(/^-\s+\*\*([^:*]+):\*\*\s*(.+)$/);
-    if (meta) {
-      const label = meta[1].trim();
-      const key = editable.get(label);
-      if (key) { seen.add(label); cellMap.set(label, fieldCell(label, key, meta[2].trim())); }
-      else if (label === 'Signal ID') foot.push(`<div class="uuidln">signal ${esc(meta[2].trim())}</div>`);
-      else cellMap.set(label, valueCell(label, meta[2].trim()));
-      continue;
-    }
+    const m = t.match(/^-\s+\*\*([^:*]+):\*\*\s*(.+)$/);
+    if (m) { meta.set(m[1].trim(), m[2].trim()); continue; }
     header.push(`<p>${mdInline(t)}</p>`);
   }
-  // A hand-owned field the profile lacks is still offered; a save inserts it.
-  for (const [key, label] of EDITABLE_FIELDS) if (!seen.has(label)) cellMap.set(label, fieldCell(label, key, null));
-  const ORDER = ['Relationship', 'Birthday', 'First contact', 'Last contact', 'Messages', 'Phone'];
-  header.push(`<div class="idcard">${
-    [...ORDER.filter((l) => cellMap.has(l)), ...[...cellMap.keys()].filter((l) => !ORDER.includes(l))]
-      .map((l) => cellMap.get(l)).join('')
-  }</div>`);
+  const fieldHtml = (label, key, cur) =>
+    `<span class="efield-val">${mdInline(cur == null ? '_TBD_' : cur)}</span>`
+    + `<input class="efield-input" hidden maxlength="120" value="${esc(cur == null || cur === '_TBD_' ? '' : cur)}" aria-label="${esc(label)}">`
+    + pencil(label);
+  header.push(`<div class="rel efield" data-key="relationship" data-label="Relationship">`
+    + fieldHtml('Relationship', 'relationship', meta.get('Relationship') ?? null) + '</div>');
+
+  const imprint = [`<span class="efield" data-key="birthday" data-label="Birthday">birthday `
+    + fieldHtml('Birthday', 'birthday', meta.get('Birthday') ?? null) + '</span>'];
+  if (meta.has('First contact')) imprint.push(`<span>since <b>${mdInline(meta.get('First contact'))}</b></span>`);
+  if (meta.has('Last contact')) imprint.push(`<span>last <b>${mdInline(meta.get('Last contact'))}</b></span>`);
+  if (meta.has('Messages')) {
+    const v = meta.get('Messages');
+    // The count reads at a glance; the them/me split waits on hover.
+    const m = v.match(/^(\d+) total \((\d+) from them, (\d+) from me\)$/);
+    imprint.push(m
+      ? `<span title="${m[2]} from them &middot; ${m[3]} from me"><b>${m[1]}</b> messages</span>`
+      : `<span>messages <b>${mdInline(v)}</b></span>`);
+  }
+  const PLACED = new Set(['Relationship', 'Birthday', 'First contact', 'Last contact', 'Messages', 'Phone', 'Signal ID']);
+  for (const [label, v] of meta) if (!PLACED.has(label)) imprint.push(`<span>${esc(label.toLowerCase())} <b>${mdInline(v)}</b></span>`);
+  header.push(`<div class="imprint">${imprint.join('')}</div>`);
+
+  const foot = [];
+  const fparts = [];
+  if (meta.has('Phone')) fparts.push(esc(meta.get('Phone')));
+  if (meta.has('Signal ID')) fparts.push(`signal ${esc(meta.get('Signal ID'))}`);
+  if (fparts.length) foot.push(`<div class="uuidln">${fparts.join(' &middot; ')}</div>`);
 
   // ⟨m… ts⟩ age stamps need message dates from the archive; the header carries
   // a quiet count of claims past the 6-month line.

@@ -147,6 +147,22 @@ function extractFor(slug, ledgerPath, opts = {}) {
       rejected.push(`owner "${t.owner}" — not Nathan's commitment: "${String(t.title).slice(0, 48)}"`);
       continue;
     }
+    // The semantic citation range (Nathan, 2026-08-10): the stretch a reader
+    // needs to understand the task on its own, model-picked, server-clamped.
+    // Both endpoints must be lines the model could actually SEE (this trigger's
+    // window) and the trigger must sit inside the range — anything else degrades
+    // loudly to citing the trigger alone, because a bad range must never mint
+    // provenance the way a bad msg_id would.
+    const w = windows.find((x) => x.msgId === mid);
+    const wIds = new Set(w ? w.ids : [mid]);
+    let rs = Number(t.range_start);
+    let re = Number(t.range_end);
+    if (!Number.isInteger(rs) || !Number.isInteger(re) || !wIds.has(rs) || !wIds.has(re) || rs > mid || re < mid) {
+      if (t.range_start != null || t.range_end != null) {
+        rejected.push(`range m${t.range_start}-m${t.range_end} not in ⟨m${mid}⟩'s window — citing the trigger alone: "${String(t.title).slice(0, 48)}"`);
+      }
+      rs = mid; re = mid;
+    }
     tasks.push({
       slug,
       contactName: contactName(slug),
@@ -159,6 +175,8 @@ function extractFor(slug, ledgerPath, opts = {}) {
       deadline: t.deadline || null,
       actionable: t.actionable === true,
       msgId: mid,
+      rangeStart: rs,
+      rangeEnd: re,
     });
   }
   for (const d of dropped) {
@@ -223,7 +241,9 @@ function main() {
       for (const t of res.tasks) {
         // No owner badge: everything that reaches here is Nathan's by construction.
         const imp = TASKS.deriveImportance(t);
-        console.log(`   [${imp}] ${t.title}${t.deadline ? `  (due ${t.deadline})` : ''}${t.actionable ? '' : '  [blocked]'}  ⟨m${t.msgId}⟩`);
+        const cite = t.rangeStart && t.rangeStart !== t.rangeEnd
+          ? `⟨m${t.rangeStart}-m${t.rangeEnd} @m${t.msgId}⟩` : `⟨m${t.msgId}⟩`;
+        console.log(`   [${imp}] ${t.title}${t.deadline ? `  (due ${t.deadline})` : ''}${t.actionable ? '' : '  [blocked]'}  ${cite}`);
         if (write) {
           if (TASKS.insertDraft(cdb, t) === 'inserted') totalNew += 1;
         }

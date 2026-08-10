@@ -326,14 +326,16 @@ tr.runrow.live .tw{border-left:3px solid var(--amber)}
 .profile .fields{font-family:"Courier Prime",monospace;font-size:12.5px;color:var(--soft);
   margin:12px 0 4px;display:flex;flex-wrap:wrap;gap:5px 22px}
 .profile .fields b{color:var(--ink);font-weight:400}
-/* The header strip: one glanceable catalog card between hairlines. Reuses the
-   status page's cell voice (small caps key over value) at reading scale, unboxed. */
-.profile .idcard{display:flex;flex-wrap:wrap;gap:13px 36px;margin:16px 0 4px;
-  padding:13px 0 15px;border-top:1px solid var(--rule);border-bottom:1px solid var(--rule)}
-.profile .idcard .cell{background:none;padding:0}
-.profile .idcard .k{display:block;color:var(--faint)}
-.profile .idcard .v{display:block;font-size:14px;font-weight:400;line-height:1.35;margin-top:2px}
-.profile .idcard .sub{display:block}
+/* The header: a human epigraph (the relationship, hand-owned) under the name,
+   then one quiet imprint line — labels lowercase and soft, values in ink —
+   nothing shaped like a form. Phone + uuid whisper from the footer line. */
+.profile .rel .efield-input{font-family:Newsreader,serif;font-style:italic;font-size:16px;
+  width:min(32ch,80vw)}
+.profile .imprint{font-family:"Courier Prime",monospace;font-size:12.5px;color:var(--soft);
+  margin:14px 0 2px;display:flex;flex-wrap:wrap;row-gap:4px;align-items:baseline}
+.profile .imprint>span+span::before{content:"·";margin:0 10px;color:var(--faint)}
+.profile .imprint b{color:var(--ink);font-weight:400}
+.profile .imprint .efield-val{color:var(--ink)}
 .profile .uuidln{font-family:"Courier Prime",monospace;font-size:10px;letter-spacing:.04em;
   color:var(--faint);margin-top:10px}
 .profile h2{font-size:22px;margin:34px 0 10px;padding-bottom:6px;border-bottom:2px solid var(--ink)}
