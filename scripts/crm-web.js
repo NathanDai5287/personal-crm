@@ -29,7 +29,7 @@ const TASKS = require('../lib/tasks');
 const { STYLE: BINDERY_CSS, FONTS, FONTS_DIR, THEME_INIT, THEME_JS } = require('../lib/view/shell');
 const { render, raw } = require('../lib/view/h');
 const V = require('../lib/view/pages');
-const { renderProfile, inline: mdInline, staleCount } = require('../lib/view/markdown');
+const { renderProfile, inline: mdInline, staleCount, sentLabel } = require('../lib/view/markdown');
 const { parseDeadline } = require('../lib/deadline');
 const ARCHIVE_STATE_FILE = path.posix.join(path.posix.dirname(TRACKED), 'crm-archive-state.json');
 
@@ -418,21 +418,34 @@ function tasksPage(editId = null) {
   }
   // Shape the DB rows into what lib/view's tasks page expects: a display name, the
   // source-message id, and description Markdown pre-rendered to Bindery HTML so its
-  // ⟨m…⟩ citations become slips.
-  const shape = (t) => ({
-    ...t,
-    name: t.contact_name || t.slug,
-    msgId: t.source_msg_id,
-    rangeStart: t.range_start,
-    rangeEnd: t.range_end,
-    probable: t.confidence === 'probable',
-    descHtml: t.description ? mdInline(t.description) : '',
-  });
-  const data = {
-    counts, editing, today: ptDateKey(Date.now()),
-    active: active.map(shape), done: done.map(shape), drafts: drafts.map(shape),
-  };
-  return page('To do — personal-crm', render(V.tasks(data).body) + TASKS_TOGGLE_JS + TASKS_DATE_JS);
+  // ⟨m…⟩ citations become slips. One date resolver serves the page: the slip's
+  // face is the trigger's send date ("agreed last week"), exact date on hover.
+  const dates = msgDates();
+  try {
+    const now = Date.now();
+    const mdOpts = { dateFor: dates.dateFor, now };
+    const shape = (t) => {
+      const ms = t.source_msg_id ? dates.dateFor(t.source_msg_id) : null;
+      return {
+        ...t,
+        name: t.contact_name || t.slug,
+        msgId: t.source_msg_id,
+        rangeStart: t.range_start,
+        rangeEnd: t.range_end,
+        sentD: ms ? sentLabel(ms, now) : null,
+        sentKey: ms ? ptDateKey(ms) : null,
+        probable: t.confidence === 'probable',
+        descHtml: t.description ? mdInline(t.description, mdOpts) : '',
+      };
+    };
+    const data = {
+      counts, editing, today: ptDateKey(now),
+      active: active.map(shape), done: done.map(shape), drafts: drafts.map(shape),
+    };
+    return page('To do — personal-crm', render(V.tasks(data).body) + TASKS_TOGGLE_JS + TASKS_DATE_JS);
+  } finally {
+    dates.close();
+  }
 }
 
 
