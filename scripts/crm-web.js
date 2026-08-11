@@ -666,7 +666,7 @@ const ICO_CAKE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" str
 const ICO_PHONE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>';
 
 // The activity band: this contact's archived messages bucketed by Pacific
-// month — always the last 14 months ending with the current one, zeros kept so
+// month — always the last 20 months ending with the current one, zeros kept so
 // the band's bar count never varies. Null when the archive isn't there.
 function activityMonths(slug, now) {
   let cdb;
@@ -674,7 +674,7 @@ function activityMonths(slug, now) {
   try {
     const keys = [];
     let [y, m] = ptDateKey(now).split('-').map(Number);
-    for (let i = 0; i < 14; i += 1) {
+    for (let i = 0; i < 20; i += 1) {
       keys.push(`${y}-${String(m).padStart(2, '0')}`);
       m -= 1;
       if (m === 0) { m = 12; y -= 1; }
@@ -684,7 +684,7 @@ function activityMonths(slug, now) {
     let rows;
     try {
       rows = cdb.prepare('SELECT sent_at FROM messages WHERE contact_slug = ? AND sent_at >= ?')
-        .all(slug, now - 440 * 86_400_000);
+        .all(slug, now - 640 * 86_400_000);
     } catch { return null; }
     for (const r of rows) {
       const k = ptDateKey(r.sent_at).slice(0, 7);
@@ -710,7 +710,7 @@ function profilePage(slug) {
   // Header: the dossier's face (Claude Design spec, 2026-08-11). The name with
   // the last-contact stamp holding the top-right corner; the relationship as a
   // hand-owned epigraph; birthday and phone as icon-led contact lines (the
-  // Signal uuid is meaningless to a human and lives only in the file); then 14
+  // Signal uuid is meaningless to a human and lives only in the file); then 20
   // months of activity as a bar band, a hairline, and the counts — the message
   // hero plus topics/openers/sources/stale — on one shared baseline. The two
   // hand-owned fields (EDITABLE_FIELDS: Relationship, Birthday) keep the hover
@@ -791,11 +791,11 @@ function profilePage(slug) {
       + '</div>');
     header.push(...strays);
 
-    // The band: 14 bars always; stamp-blue = busier than the median month.
+    // The band: 20 bars always; stamp-blue = busier than the median month.
     const months = activityMonths(slug, now);
     if (months && months.some((mo) => mo.n)) {
       const vals = months.map((mo) => mo.n).sort((a, b) => a - b);
-      const median = (vals[6] + vals[7]) / 2;
+      const median = (vals[9] + vals[10]) / 2;
       const max = Math.max(...months.map((mo) => mo.n));
       const bars = months.map((mo) => {
         const [y, m] = mo.key.split('-').map(Number);
@@ -805,7 +805,7 @@ function profilePage(slug) {
         return `<span class="bar${mo.n > median ? ' busy' : ''}" style="height:${hgt}%" data-tip="${tip}" aria-label="${tip}"></span>`;
       }).join('');
       header.push(`<div class="band"><div class="bars">${bars}</div>`
-        + '<div class="band-cap"><span>14 months of contact</span>'
+        + '<div class="band-cap"><span>20 months of contact</span>'
         + '<span class="leg"><i></i>busier than usual</span></div></div>');
     }
 
