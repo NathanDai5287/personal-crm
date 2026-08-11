@@ -653,6 +653,49 @@ function msgDates() {
   };
 }
 
+// ---- header helpers ---------------------------------------------------------
+const MON3 = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const fmtN = (n) => Number(n).toLocaleString('en-US');
+// "+18587538808" reads as a machine string; group it the way a person dials it.
+function fmtPhone(p) {
+  const m = String(p).match(/^\+1(\d{3})(\d{3})(\d{4})$/);
+  return m ? `+1 ${m[1]} ${m[2]} ${m[3]}` : String(p);
+}
+// Thin stroked line icons (currentColor) for the contact lines.
+const ICO_CAKE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 21v-8a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8"/><path d="M4 16s.5-1 2-1 2.5 2 4 2 2.5-2 4-2 2.5 2 4 2 2-1 2-1"/><path d="M2 21h20"/><path d="M7 8v3"/><path d="M12 8v3"/><path d="M17 8v3"/><path d="M7 4h.01"/><path d="M12 4h.01"/><path d="M17 4h.01"/></svg>';
+const ICO_PHONE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>';
+
+// The activity band: this contact's archived messages bucketed by Pacific
+// month — always the last 14 months ending with the current one, zeros kept so
+// the band's bar count never varies. Null when the archive isn't there.
+function activityMonths(slug, now) {
+  let cdb;
+  try { cdb = openCrmDb(); } catch { return null; }
+  try {
+    const keys = [];
+    let [y, m] = ptDateKey(now).split('-').map(Number);
+    for (let i = 0; i < 14; i += 1) {
+      keys.push(`${y}-${String(m).padStart(2, '0')}`);
+      m -= 1;
+      if (m === 0) { m = 12; y -= 1; }
+    }
+    keys.reverse();
+    const counts = new Map(keys.map((k) => [k, 0]));
+    let rows;
+    try {
+      rows = cdb.prepare('SELECT sent_at FROM messages WHERE contact_slug = ? AND sent_at >= ?')
+        .all(slug, now - 440 * 86_400_000);
+    } catch { return null; }
+    for (const r of rows) {
+      const k = ptDateKey(r.sent_at).slice(0, 7);
+      if (counts.has(k)) counts.set(k, counts.get(k) + 1);
+    }
+    return keys.map((k) => ({ key: k, n: counts.get(k) }));
+  } finally {
+    try { cdb.close(); } catch { /* closed */ }
+  }
+}
+
 function profilePage(slug) {
   const file = path.posix.join(CONTACTS_DIR, `${slug}.md`);
   let md;
@@ -664,59 +707,127 @@ function profilePage(slug) {
 
   const pencil = (label) => `<button type="button" class="ebtn" title="edit ${esc(label)}" aria-label="edit ${esc(label)}">&#9998;</button>`;
 
-  // Header: the name; the relationship as a human epigraph beneath it; then ONE
-  // quiet courier imprint line — birthday · since · last · messages — labels
-  // lowercase and soft, values in ink. Nothing shaped like a form. Phone and
-  // the Signal uuid whisper from a faint footer line. The two hand-owned fields
-  // (EDITABLE_FIELDS: Relationship, Birthday) keep the hover pencil and render
-  // even when the file lacks them — a save inserts the bullet.
-  const header = [];
+  // Header: the dossier's face (Claude Design spec, 2026-08-11). The name with
+  // the last-contact stamp holding the top-right corner; the relationship as a
+  // hand-owned epigraph; birthday and phone as icon-led contact lines (the
+  // Signal uuid is meaningless to a human and lives only in the file); then 14
+  // months of activity as a bar band, a hairline, and the counts — the message
+  // hero plus topics/openers/sources/stale — on one shared baseline. The two
+  // hand-owned fields (EDITABLE_FIELDS: Relationship, Birthday) keep the hover
+  // pencil and render even when the file lacks them — a save inserts the bullet.
   const meta = new Map(); // metadata bullets, label -> value
+  let h1 = `<h1>${esc(name)}</h1>`;
+  const strays = [];
   for (const line of lines.slice(0, headerTo)) {
     const t = line.trim();
     if (t === '') continue;
-    if (t.startsWith('# ')) { header.push(`<h1>${mdInline(t.slice(2))}</h1>`); continue; }
+    if (t.startsWith('# ')) { h1 = `<h1>${mdInline(t.slice(2))}</h1>`; continue; }
     const m = t.match(/^-\s+\*\*([^:*]+):\*\*\s*(.+)$/);
     if (m) { meta.set(m[1].trim(), m[2].trim()); continue; }
-    header.push(`<p>${mdInline(t)}</p>`);
+    strays.push(`<p>${mdInline(t)}</p>`);
   }
   const fieldHtml = (label, key, cur) =>
     `<span class="efield-val">${mdInline(cur == null ? '_TBD_' : cur)}</span>`
     + `<input class="efield-input" hidden maxlength="120" value="${esc(cur == null || cur === '_TBD_' ? '' : cur)}" aria-label="${esc(label)}">`
     + pencil(label);
-  header.push(`<div class="rel efield" data-key="relationship" data-label="Relationship">`
-    + fieldHtml('Relationship', 'relationship', meta.get('Relationship') ?? null) + '</div>');
 
-  const imprint = [`<span class="efield" data-key="birthday" data-label="Birthday">birthday `
-    + fieldHtml('Birthday', 'birthday', meta.get('Birthday') ?? null) + '</span>'];
-  if (meta.has('First contact')) imprint.push(`<span>since <b>${mdInline(meta.get('First contact'))}</b></span>`);
-  if (meta.has('Last contact')) imprint.push(`<span>last <b>${mdInline(meta.get('Last contact'))}</b></span>`);
-  if (meta.has('Messages')) {
-    const v = meta.get('Messages');
-    // The count reads at a glance; the them/me split waits on hover.
-    const m = v.match(/^(\d+) total \((\d+) from them, (\d+) from me\)$/);
-    imprint.push(m
-      ? `<span title="${m[2]} from them &middot; ${m[3]} from me"><b>${m[1]}</b> messages</span>`
-      : `<span>messages <b>${mdInline(v)}</b></span>`);
-  }
+  const now = Date.now();
+  const todayKey = ptDateKey(now);
+  const dkey = (v) => (/^\d{4}-\d{2}-\d{2}$/.test(v || '') ? v : null);
+
+  // Left column: epigraph + contact lines. Unplaced metadata joins the contact
+  // block as plain lines so a hand-added bullet never disappears.
+  const rel = `<div class="rel efield" data-key="relationship" data-label="Relationship">`
+    + fieldHtml('Relationship', 'relationship', meta.get('Relationship') ?? null) + '</div>';
+  const clines = [`<div class="cline">${ICO_CAKE}<span class="efield" data-key="birthday" data-label="Birthday">`
+    + fieldHtml('Birthday', 'birthday', meta.get('Birthday') ?? null) + '</span></div>'];
+  if (meta.has('Phone')) clines.push(`<div class="cline">${ICO_PHONE}<span>${esc(fmtPhone(meta.get('Phone')))}</span></div>`);
   const PLACED = new Set(['Relationship', 'Birthday', 'First contact', 'Last contact', 'Messages', 'Phone', 'Signal ID']);
-  for (const [label, v] of meta) if (!PLACED.has(label)) imprint.push(`<span>${esc(label.toLowerCase())} <b>${mdInline(v)}</b></span>`);
-  header.push(`<div class="imprint">${imprint.join('')}</div>`);
+  for (const [label, v] of meta) if (!PLACED.has(label)) {
+    clines.push(`<div class="cline"><span class="cico"></span><span>${esc(label.toLowerCase())} <b>${mdInline(v)}</b></span></div>`);
+  }
 
-  const foot = [];
-  const fparts = [];
-  if (meta.has('Phone')) fparts.push(esc(meta.get('Phone')));
-  if (meta.has('Signal ID')) fparts.push(`signal ${esc(meta.get('Signal ID'))}`);
-  if (fparts.length) foot.push(`<div class="uuidln">${fparts.join(' &middot; ')}</div>`);
+  // Right column: the last-contact stamp, "since <first month>" beneath it.
+  const stampCol = [];
+  const lastKey = dkey(meta.get('Last contact'));
+  if (lastKey) {
+    const [, mo, d] = lastKey.split('-').map(Number);
+    const ago = Math.round((Date.parse(todayKey) - Date.parse(lastKey)) / 86_400_000);
+    const agoTxt = ago <= 0 ? 'today' : ago === 1 ? 'yesterday' : `${ago} days ago`;
+    stampCol.push(`<div class="lstamp"><span class="ls-k">last contact</span>`
+      + `<span class="ls-d">${MON3[mo - 1]} ${d}</span><span class="ls-ago">${agoTxt}</span></div>`);
+  }
+  const firstKey = dkey(meta.get('First contact'));
+  if (firstKey) {
+    const [fy, fm] = firstKey.split('-').map(Number);
+    stampCol.push(`<div class="ls-since">since ${MON3[fm - 1]} ${fy}</div>`);
+  }
 
-  // ⟨m… ts⟩ age stamps need message dates from the archive; the header carries
-  // a quiet count of claims past the 6-month line.
+  // Counts for the stats row, from the file itself: What-I-know topics,
+  // Talking-points openers, distinct cited source messages.
+  let topics = 0;
+  let openers = 0;
+  let curSec = '';
+  for (const l of lines) {
+    const h2 = l.match(/^## (.+)$/);
+    if (h2) { curSec = h2[1].trim().toLowerCase(); continue; }
+    if (/^### /.test(l) && curSec === 'what i know') topics += 1;
+    else if (/^[-*] /.test(l.trim()) && curSec === 'talking points') openers += 1;
+  }
+  const CITES = /⟨\s*m(\d+)(?:-m(\d+))?(?:\s+@m(\d+))?(?:\s+ts)?\s*⟩/g;
+  const sources = new Set([...md.matchAll(CITES)].map((c) => c[2] || c[1])).size;
+
+  // ⟨m… ts⟩ slips need message dates from the archive; stale (ts claims past
+  // the 6-month line) is the caution cell at the end of the cluster.
   const dates = msgDates();
   try {
-    const mdOpts = { dateFor: dates.dateFor, now: Date.now() };
+    const mdOpts = { dateFor: dates.dateFor, now };
     const stale = staleCount(md, mdOpts);
-    if (stale) header.push(`<div class="stalen">${stale} fact${stale === 1 ? '' : 's'} may be stale</div>`);
-    header.push(...foot);
+
+    const header = [];
+    header.push(`<div class="phead-top"><div class="phead-id">${h1}${rel}`
+      + `<div class="contact">${clines.join('')}</div></div>`
+      + (stampCol.length ? `<div class="phead-stamp">${stampCol.join('')}</div>` : '')
+      + '</div>');
+    header.push(...strays);
+
+    // The band: 14 bars always; stamp-blue = busier than the median month.
+    const months = activityMonths(slug, now);
+    if (months && months.some((mo) => mo.n)) {
+      const vals = months.map((mo) => mo.n).sort((a, b) => a - b);
+      const median = (vals[6] + vals[7]) / 2;
+      const max = Math.max(...months.map((mo) => mo.n));
+      const bars = months.map((mo) => {
+        const [y, m] = mo.key.split('-').map(Number);
+        const title = `${MON3[m - 1]} ${y} — ${fmtN(mo.n)} message${mo.n === 1 ? '' : 's'}`;
+        const hgt = mo.n ? Math.max(Math.round((mo.n / max) * 100), 6) : 0;
+        return `<span class="bar${mo.n > median ? ' busy' : ''}" style="height:${hgt}%" title="${title}"></span>`;
+      }).join('');
+      header.push(`<div class="band"><div class="bars">${bars}</div>`
+        + '<div class="band-cap"><span>14 months of contact</span>'
+        + '<span class="leg"><i></i>busier than usual</span></div></div>');
+    }
+
+    // Stats row: the message hero (them/me split waits on hover, in reserved
+    // space so nothing shifts), then the tight four-count cluster.
+    let hero = '';
+    const mv = meta.get('Messages') || '';
+    const mm = mv.match(/^(\d+) total \((\d+) from them, (\d+) from me\)$/);
+    if (mm) {
+      const first = esc(name.split(/\s+/)[0]);
+      hero = `<div class="hero"><span class="n">${fmtN(mm[1])}</span><div class="sub">`
+        + '<span class="statlab lab">messages</span>'
+        + `<span class="msplit"><b>${fmtN(mm[2])}</b><i>from ${first}</i><b>${fmtN(mm[3])}</b><i>from me</i></span>`
+        + '</div></div>';
+    } else if (mv) {
+      hero = `<div class="hero"><span class="n">${mdInline(mv)}</span><div class="sub"><span class="statlab">messages</span></div></div>`;
+    }
+    const cell = (n, lab, warn) =>
+      `<div class="cell${warn ? ' warn' : ''}"><span class="n">${fmtN(n)}</span><span class="statlab">${esc(lab)}</span></div>`;
+    const cluster = `<div class="cluster">${cell(topics, 'topics')}${cell(openers, 'openers')}`
+      + `${cell(sources, 'sources')}${cell(stale, 'stale', stale > 0)}</div>`;
+    header.push('<hr class="phead-rule">');
+    header.push(`<div class="statrow">${hero}${cluster}</div>`);
 
     // Units render in file order. A bare `##` heading line whose subsections
     // carry the content (`## What I know`, `## Timeline`) is structure, not
@@ -837,10 +948,11 @@ const PROFILE_EDIT_JS = `<script>(function(){
   }
   flds.forEach(function(f){
     var inp=f.querySelector('.efield-input'),val=f.querySelector('.efield-val');
-    f.querySelector('.ebtn').addEventListener('click',function(){
-      f.classList.add('editing');val.hidden=true;inp.hidden=false;inp.focus();
-    });
+    var open=function(){f.classList.add('editing');val.hidden=true;inp.hidden=false;inp.focus();};
+    f.querySelector('.ebtn').addEventListener('click',open);
+    val.addEventListener('click',open);
     inp.addEventListener('input',refresh);
+    inp.addEventListener('blur',function(){closeFld(f);});
     inp.addEventListener('keydown',function(e){
       if(e.key==='Escape'||e.key==='Enter'){e.stopPropagation();closeFld(f);}
     });

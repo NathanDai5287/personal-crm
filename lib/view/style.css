@@ -171,7 +171,6 @@ button{font:inherit;cursor:pointer}
 .slip.fresh:hover{background:color-mix(in srgb,var(--ink) 16%,var(--moss));border-color:color-mix(in srgb,var(--ink) 16%,var(--moss))}
 .slip.aging:hover{background:color-mix(in srgb,var(--ink) 16%,var(--amber));border-color:color-mix(in srgb,var(--ink) 16%,var(--amber))}
 .slip.old:hover{background:color-mix(in srgb,var(--ink) 16%,var(--ox));border-color:color-mix(in srgb,var(--ink) 16%,var(--ox))}
-.stalen{font-family:"Courier Prime",monospace;font-size:11px;letter-spacing:.06em;color:var(--amber);opacity:.85;margin-top:2px}
 .stamp{position:absolute;right:12px;top:13px;border:2px solid var(--ox);color:var(--ox);
   font-family:"Courier Prime",monospace;font-weight:700;font-size:10px;letter-spacing:.13em;
   text-transform:uppercase;padding:2px 6px;transform:rotate(-7deg);opacity:.74}
@@ -333,23 +332,69 @@ tr.runrow.live .tw{border-left:3px solid var(--amber)}
   color:var(--soft);padding:22px 0 0}
 .profile{background:var(--card);border:1px solid var(--rule);box-shadow:var(--shadow);
   padding:6px 30px 30px;margin-top:8px}
-.profile h1{font-size:31px;margin:20px 0 2px}
-.profile .rel{font-style:italic;color:var(--soft);font-size:17px}
 .profile .fields{font-family:"Courier Prime",monospace;font-size:12.5px;color:var(--soft);
   margin:12px 0 4px;display:flex;flex-wrap:wrap;gap:5px 22px}
 .profile .fields b{color:var(--ink);font-weight:400}
-/* The header: a human epigraph (the relationship, hand-owned) under the name,
-   then one quiet imprint line — labels lowercase and soft, values in ink —
-   nothing shaped like a form. Phone + uuid whisper from the footer line. */
-.profile .rel .efield-input{font-family:Newsreader,serif;font-style:italic;font-size:16px;
-  width:min(32ch,80vw)}
-.profile .imprint{font-family:"Courier Prime",monospace;font-size:12.5px;color:var(--soft);
-  margin:14px 0 2px;display:flex;flex-wrap:wrap;row-gap:4px;align-items:baseline}
-.profile .imprint>span+span::before{content:"·";margin:0 10px;color:var(--faint)}
-.profile .imprint b{color:var(--ink);font-weight:400}
-.profile .imprint .efield-val{color:var(--ink)}
-.profile .uuidln{font-family:"Courier Prime",monospace;font-size:10px;letter-spacing:.04em;
-  color:var(--faint);margin-top:10px}
+/* The header (Claude Design spec, 2026-08-11): name with the last-contact
+   stamp holding the top-right corner; the relationship as a hand-owned italic
+   epigraph; icon-led contact lines; 14 months of activity as a bar band; then
+   the counts on one shared baseline. The uuid never prints — it means nothing
+   to a person. */
+.phead-top{display:flex;justify-content:space-between;align-items:flex-start;gap:14px 28px;flex-wrap:wrap}
+.phead-id{min-width:0}
+.profile h1{font-size:clamp(30px,5.5vw,42px);font-weight:500;line-height:1.08;margin:24px 0 0}
+.profile .rel{font-family:Newsreader,serif;font-style:italic;font-size:22px;color:var(--soft);margin-top:7px}
+.profile .rel .efield-input{font-family:Newsreader,serif;font-style:italic;font-size:22px;
+  color:var(--soft);width:min(28ch,76vw)}
+.contact{margin:22px 0 2px;display:flex;flex-direction:column;gap:8px}
+.cline{display:flex;align-items:center;gap:11px;font-family:"Courier Prime",monospace;
+  font-size:13px;color:var(--soft)}
+.cline svg,.cline .cico{width:15px;height:15px;color:var(--faint);flex:none}
+.cline b{color:var(--ink);font-weight:400}
+.profile .efield-val{cursor:pointer}
+.phead-stamp{margin-top:28px;text-align:center;flex:none}
+.lstamp{display:inline-flex;flex-direction:column;gap:3px;border:1.5px solid var(--ox);
+  padding:10px 18px 9px;font-family:"Courier Prime",monospace}
+.ls-k{font-size:10px;letter-spacing:.22em;text-transform:uppercase;color:var(--ox)}
+.ls-d{font-size:24px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink);line-height:1.15}
+.ls-ago{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--ox)}
+.ls-since{margin-top:9px;font-family:"Courier Prime",monospace;font-size:11px;
+  letter-spacing:.18em;text-transform:uppercase;color:var(--soft)}
+/* 14 bars, always: volume is height, stamp-blue = busier than the median
+   month. The native title carries each bar's month and count. */
+.band{margin-top:30px}
+.bars{display:flex;align-items:flex-end;gap:5px;height:44px}
+.bars .bar{flex:1 1 0;min-height:2px;background:var(--faint);opacity:.55}
+.bars .bar.busy{background:var(--stamp);opacity:.88}
+.bars .bar:hover{opacity:1}
+.band-cap{display:flex;justify-content:space-between;gap:10px;margin-top:8px;
+  font-family:"Courier Prime",monospace;font-size:10px;letter-spacing:.16em;
+  text-transform:uppercase;color:var(--faint)}
+.band-cap .leg{display:inline-flex;align-items:center;gap:7px}
+.band-cap .leg i{width:10px;height:10px;background:var(--stamp);opacity:.88}
+.phead-rule{border:0;border-top:1px solid var(--rule);margin:20px 0 0}
+/* Shared baseline: the row bottom-aligns, every number floats above its own
+   label. The hero's them/me split is absolutely positioned into the row's
+   bottom padding, so revealing it shifts nothing. */
+.statrow{display:flex;align-items:flex-end;justify-content:space-between;gap:14px 26px;
+  flex-wrap:wrap;margin-top:20px;padding-bottom:24px}
+.statlab{font-family:"Courier Prime",monospace;font-size:9.5px;letter-spacing:.22em;
+  text-transform:uppercase;color:var(--faint)}
+.hero .n{font-family:Newsreader,serif;font-size:46px;line-height:.95;color:var(--ink)}
+.hero .sub{position:relative;margin-top:8px;height:13px}
+.hero .msplit{position:absolute;left:0;top:0;visibility:hidden;white-space:nowrap;
+  display:grid;grid-template-columns:auto auto;column-gap:7px;line-height:1.35;
+  font-family:"Courier Prime",monospace;font-size:11.5px;color:var(--stamp)}
+.hero .msplit b{text-align:right;font-weight:400}
+.hero:hover .msplit{visibility:visible}
+.hero:hover .sub .lab{visibility:hidden}
+.cluster{display:flex;align-items:flex-end}
+.cluster .cell{text-align:center;padding:0 22px;border-left:1px solid var(--rule)}
+.cluster .cell:first-child{border-left:0;padding-left:0}
+.cluster .cell:last-child{padding-right:0}
+.cluster .cell .n{display:block;font-family:Newsreader,serif;font-size:26px;line-height:1;
+  color:var(--ink);margin-bottom:7px}
+.cluster .cell.warn .n,.cluster .cell.warn .statlab{color:var(--amber)}
 .profile h2{font-size:22px;margin:34px 0 10px;padding-bottom:6px;border-bottom:2px solid var(--ink)}
 /* Subject-heading rows (### in the markdown): typed catalog labels for the
    What-I-know topics and the Timeline tiers. Uppercase Courier over a hairline
