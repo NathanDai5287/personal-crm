@@ -799,9 +799,10 @@ function profilePage(slug) {
       const max = Math.max(...months.map((mo) => mo.n));
       const bars = months.map((mo) => {
         const [y, m] = mo.key.split('-').map(Number);
-        const title = `${MON3[m - 1]} ${y} — ${fmtN(mo.n)} message${mo.n === 1 ? '' : 's'}`;
+        const lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate();
+        const tip = `${MON3[m - 1]} 1–${lastDay}, ${y} · ${fmtN(mo.n)} message${mo.n === 1 ? '' : 's'}`;
         const hgt = mo.n ? Math.max(Math.round((mo.n / max) * 100), 6) : 0;
-        return `<span class="bar${mo.n > median ? ' busy' : ''}" style="height:${hgt}%" title="${title}"></span>`;
+        return `<span class="bar${mo.n > median ? ' busy' : ''}" style="height:${hgt}%" data-tip="${tip}" aria-label="${tip}"></span>`;
       }).join('');
       header.push(`<div class="band"><div class="bars">${bars}</div>`
         + '<div class="band-cap"><span>14 months of contact</span>'

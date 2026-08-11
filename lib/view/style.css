@@ -349,7 +349,10 @@ tr.runrow.live .tw{border-left:3px solid var(--amber)}
 .contact{margin:22px 0 2px;display:flex;flex-direction:column;gap:8px}
 .cline{display:flex;align-items:center;gap:11px;font-family:"Courier Prime",monospace;
   font-size:13px;color:var(--soft)}
-.cline svg,.cline .cico{width:15px;height:15px;color:var(--faint);flex:none}
+/* Icons ride 2px above flex-center: courier leaves its descender space below
+   the baseline, so true center reads low next to the glyph bodies. */
+.cline svg,.cline .cico{width:15px;height:15px;color:var(--faint);flex:none;
+  position:relative;top:-2px}
 .cline b{color:var(--ink);font-weight:400}
 .profile .efield-val{cursor:pointer}
 .phead-stamp{margin-top:28px;text-align:center;flex:none}
@@ -364,9 +367,18 @@ tr.runrow.live .tw{border-left:3px solid var(--amber)}
    month. The native title carries each bar's month and count. */
 .band{margin-top:30px}
 .bars{display:flex;align-items:flex-end;gap:5px;height:44px}
-.bars .bar{flex:1 1 0;min-height:2px;background:var(--faint);opacity:.55}
+.bars .bar{flex:1 1 0;min-height:2px;background:var(--faint);opacity:.55;position:relative}
 .bars .bar.busy{background:var(--stamp);opacity:.88}
 .bars .bar:hover{opacity:1}
+/* Hover chip above the bar: the month's date range and count, ink on card.
+   Edge bars pin the chip to their own edge so it never spills off the card. */
+.bars .bar::after{content:attr(data-tip);position:absolute;bottom:calc(100% + 7px);
+  left:50%;transform:translateX(-50%);display:none;white-space:nowrap;z-index:5;
+  font-family:"Courier Prime",monospace;font-size:10.5px;letter-spacing:.04em;
+  background:var(--ink);color:var(--card);padding:3px 8px}
+.bars .bar:hover::after{display:block}
+.bars .bar:nth-child(-n+3)::after{left:0;transform:none}
+.bars .bar:nth-child(n+12)::after{left:auto;right:0;transform:none}
 .band-cap{display:flex;justify-content:space-between;gap:10px;margin-top:8px;
   font-family:"Courier Prime",monospace;font-size:10px;letter-spacing:.16em;
   text-transform:uppercase;color:var(--faint)}
