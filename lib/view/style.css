@@ -147,17 +147,18 @@ button{font:inherit;cursor:pointer}
 .cd .meta{display:flex;justify-content:space-between;align-items:flex-end;margin-top:11px;
   font-family:"Courier Prime",monospace;font-size:10.5px;letter-spacing:.03em;color:var(--soft)}
 
-/* ---- the signature: source slip (a dagger) & corner stamp ---------------- */
-/* A citation is a dagger, not a call number — the id/range would be clutter in
-   prose, so it lives in the hover title and the link, which opens in a new tab. */
-.slip{display:inline-block;color:var(--stamp);font-family:"Courier Prime",monospace;
-  font-size:11.5px;line-height:1;padding:0 2px;position:relative;top:-3px;
-  opacity:.8;white-space:nowrap}
+/* ---- the signature: stamped source slip & corner stamp ------------------ */
+/* The slip is the little tilted stamp it always was, but it carries a dagger,
+   not a call number — the id/range would be clutter in prose, so it lives in
+   the hover title and the link, which opens in a new tab. */
+.slip{position:relative;z-index:1;display:inline-block;border:1.5px solid var(--stamp);color:var(--stamp);
+  font-family:"Courier Prime",monospace;font-size:10px;letter-spacing:.05em;
+  padding:0 5px;transform:rotate(-1.4deg);opacity:.88;white-space:nowrap;vertical-align:1px}
 .slip:hover{opacity:1;text-decoration:none;background:#2E4A6B12}
-.slip.ox{color:var(--ox)}
-/* ⟨m… ts⟩ age stamp rides the dagger: gray = as-of (6–12 months), amber = said
-   (12+) — the caution ink: aging, not yet wrong. Title has the exact date. */
-.slip .age{margin-left:3px;font-size:10px;color:var(--soft);letter-spacing:.02em}
+.slip.ox{border-color:var(--ox);color:var(--ox);transform:rotate(1.1deg)}
+/* ⟨m… ts⟩ age stamp: a second field on the slip. Gray = as-of (6–12 months),
+   amber = said (12+) — the caution ink: aging, not yet wrong. Title has the date. */
+.slip .age{margin-left:5px;padding-left:6px;border-left:1px solid var(--rule);color:var(--soft);letter-spacing:.02em}
 .slip .age.old{color:var(--amber)}
 .stalen{font-family:"Courier Prime",monospace;font-size:11px;letter-spacing:.06em;color:var(--amber);opacity:.85;margin-top:2px}
 .stamp{position:absolute;right:12px;top:13px;border:2px solid var(--ox);color:var(--ox);
@@ -584,6 +585,18 @@ select.fld{appearance:none;-webkit-appearance:none;padding-right:26px;cursor:poi
 .editbar[hidden]{display:none}
 .editbar-n{font-family:"Courier Prime",monospace;font-size:10.5px;letter-spacing:.08em;
   text-transform:uppercase;color:var(--soft);margin-right:4px}
+/* Save's second beat: the ledger asks why. Same seamless dashed-underline
+   input vocabulary as the header fields; amber when it refuses an empty line. */
+.editbar.why #btnDiff,.editbar.why #btnCancel{display:none}
+.whyrow{display:inline-flex;gap:8px;align-items:baseline}
+.whyk{font-family:"Courier Prime",monospace;font-size:10.5px;letter-spacing:.08em;
+  text-transform:uppercase;color:var(--ox);white-space:nowrap}
+.whyin{font-family:"Courier Prime",monospace;font-size:12.5px;color:var(--ink);
+  background:transparent;border:0;border-bottom:1px dashed var(--ox-soft);border-radius:0;
+  padding:0 2px;width:min(38ch,44vw)}
+.whyin:focus,.whyin:focus-visible{outline:none;border-bottom-style:solid}
+.whyin.need{border-bottom:1px solid var(--amber)}
+.whyin.need::placeholder{color:var(--amber)}
 
 /* The Diff overlay: a PR-style line diff, inline (unified) or side by side. */
 .diffcard{width:min(1200px,96vw);max-height:92vh;display:flex;flex-direction:column;

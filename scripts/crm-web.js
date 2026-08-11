@@ -723,6 +723,8 @@ function profilePage(slug) {
       + `<span class="editbar-n" id="editbarN"></span>`
       + `<button type="button" class="btn sm" id="btnDiff">Diff</button>`
       + `<button type="button" class="btn sm" id="btnCancel">Cancel</button>`
+      + `<span class="whyrow" id="whyRow" hidden><label class="whyk" for="whyIn">for the record</label>`
+      + `<input class="whyin" id="whyIn" maxlength="500" placeholder="why this change" autocomplete="off"></span>`
       + `<button type="button" class="btn sm pr" id="btnSave">Save</button></div>`;
 
     const modal = `<div class="modal" id="diffModal" hidden><div class="diffcard">`
@@ -767,6 +769,7 @@ const PROFILE_EDIT_JS = `<script>(function(){
     flds.forEach(function(f){f.classList.toggle('dirty',df.indexOf(f)!==-1);});
     bar.hidden=n===0;
     if(n)barN.textContent=n+' unsaved change'+(n===1?'':'s');
+    else disarmWhy();
   }
 
   // ---- in-place editing: pencil opens, Escape closes (changes kept) ----
@@ -982,16 +985,24 @@ const PROFILE_EDIT_JS = `<script>(function(){
   modal.addEventListener('click',function(e){if(e.target===modal)modal.hidden=true;});
   document.addEventListener('keydown',function(e){if(e.key==='Escape'&&!modal.hidden)modal.hidden=true;});
 
-  // ---- Save: one POST, one manual run; reload shows the saved render ----
-  document.getElementById('btnSave').addEventListener('click',function(){
+  // ---- Save: two beats, one POST, one manual run ----
+  // First Save arms the "for the record" line — every manual edit carries a
+  // why, typed at the moment of saving. Enter (or Save again) commits; Escape
+  // steps back to the buttons; an empty line refuses quietly, never alerts.
+  var whyRow=document.getElementById('whyRow'),whyIn=document.getElementById('whyIn');
+  function armWhy(){bar.classList.add('why');whyRow.hidden=false;whyIn.focus();}
+  function disarmWhy(){bar.classList.remove('why');whyRow.hidden=true;whyIn.classList.remove('need');}
+  function doSave(msg){
     var payload={
       baseHash:CFG.baseHash,
+      message:msg,
       sections:dirtyUnits().map(function(u){return{idx:Number(u.dataset.idx),heading:u.dataset.heading,text:normSec(u.querySelector('.esrc').value)};}),
       fields:dirtyFlds().map(function(f){return{key:f.dataset.key,value:normFld(f.querySelector('.efield-input').value)};})
     };
     if(!payload.sections.length&&!payload.fields.length)return;
     var btns=[].slice.call(bar.querySelectorAll('.btn'));
     btns.forEach(function(b){b.disabled=true;});
+    whyIn.disabled=true;
     fetch('/c/'+encodeURIComponent(CFG.slug)+'/edit',{
       method:'POST',
       headers:{'Content-Type':'application/json','X-Requested-With':'fetch'},
@@ -999,8 +1010,23 @@ const PROFILE_EDIT_JS = `<script>(function(){
     }).then(function(r){return r.json().catch(function(){return{ok:false,error:'HTTP '+r.status};});})
       .then(function(d){
         if(d.ok)location.reload();
-        else{alert(d.error||'save failed');btns.forEach(function(b){b.disabled=false;});}
-      }).catch(function(){alert('save failed — network error');btns.forEach(function(b){b.disabled=false;});});
+        else{alert(d.error||'save failed');btns.forEach(function(b){b.disabled=false;});whyIn.disabled=false;}
+      }).catch(function(){alert('save failed — network error');btns.forEach(function(b){b.disabled=false;});whyIn.disabled=false;});
+  }
+  function trySave(){
+    var msg=whyIn.value.replace(/\\s+/g,' ').trim();
+    if(!msg){whyIn.classList.add('need');whyIn.focus();return;}
+    doSave(msg);
+  }
+  document.getElementById('btnSave').addEventListener('click',function(){
+    if(!dirtyUnits().length&&!dirtyFlds().length)return;
+    if(bar.classList.contains('why'))trySave();
+    else armWhy();
+  });
+  whyIn.addEventListener('input',function(){whyIn.classList.remove('need');});
+  whyIn.addEventListener('keydown',function(e){
+    if(e.key==='Enter'){e.preventDefault();trySave();}
+    else if(e.key==='Escape'){e.stopPropagation();disarmWhy();}
   });
 
   // Typing anywhere with pending edits should not be lost to a stray navigation.
