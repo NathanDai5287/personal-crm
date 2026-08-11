@@ -159,9 +159,18 @@ button{font:inherit;cursor:pointer}
   padding:0 5px;transform:rotate(-1.4deg);opacity:.88;white-space:nowrap;vertical-align:1px}
 .slip:hover{opacity:1;text-decoration:none;background:color-mix(in srgb,currentColor 9%,transparent)}
 .slip.ox{border-color:var(--ox);color:var(--ox);transform:rotate(1.1deg)}
-.slip.fresh{border-color:var(--moss);color:var(--moss)}
-.slip.aging{border-color:var(--amber);color:var(--amber)}
-.slip.old{border-color:var(--ox);color:var(--ox)}
+/* Time-sensitive slips print SOLID — inked stamps against the outlined rest,
+   so ts reads at a glance before any hover. Hovering one lifts it instead of
+   tinting it: the stamp straightens and casts a shadow. */
+.slip.fresh,.slip.aging,.slip.old{color:var(--card);font-weight:700;opacity:.92}
+.slip.fresh{background:var(--moss);border-color:var(--moss)}
+.slip.aging{background:var(--amber);border-color:var(--amber)}
+.slip.old{background:var(--ox);border-color:var(--ox)}
+.slip.fresh:hover,.slip.aging:hover,.slip.old:hover{opacity:1;transform:rotate(0);
+  box-shadow:2px 2px 0 #00000030;color:var(--card)}
+@media (prefers-reduced-motion:reduce){
+  .slip.fresh:hover,.slip.aging:hover,.slip.old:hover{transform:rotate(-1.4deg)}
+}
 .stalen{font-family:"Courier Prime",monospace;font-size:11px;letter-spacing:.06em;color:var(--amber);opacity:.85;margin-top:2px}
 .stamp{position:absolute;right:12px;top:13px;border:2px solid var(--ox);color:var(--ox);
   font-family:"Courier Prime",monospace;font-weight:700;font-size:10px;letter-spacing:.13em;
