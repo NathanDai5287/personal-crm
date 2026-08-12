@@ -660,6 +660,8 @@ button.impmark.norm{opacity:0;transition:opacity .12s ease}
 .ebtn:hover{color:var(--ox)}
 .eunit.dirty .ebtn,.efield.dirty .ebtn{opacity:1;color:var(--ox)}
 @media(hover:none){.ebtn{opacity:.35}}
+/* while the editor is open the value IS being edited — no pencil */
+.eunit.editing .ebtn,.efield.editing .ebtn{opacity:0;pointer-events:none}
 .esrc:not([hidden]){display:block}
 .esrc{width:100%;border:0;background:transparent;resize:none;overflow:hidden;
   font-family:Newsreader,serif;font-size:15.5px;line-height:1.6;color:var(--ink);
