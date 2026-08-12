@@ -355,8 +355,9 @@ tr.runrow.live .tw{border-left:3px solid var(--amber)}
    sections keep the ox pencil. */
 .phead-id .ebtn{color:var(--stamp)}
 .phead-id .efield-input{border-bottom:1.5px solid var(--stamp)}
-/* The right column: runway above the stamp, stacked to one width. */
-.phead-right{flex:0 1 400px;width:400px;max-width:100%;display:flex;flex-direction:column;
+/* The right column: runway above the stamp, stacked to one width — just a
+   shade wider than the old stamp card ran. */
+.phead-right{flex:0 1 232px;width:232px;max-width:100%;display:flex;flex-direction:column;
   gap:16px;margin-top:30px}
 .lstamp{display:block;text-align:center;border:1.5px solid var(--ox);border-radius:4px;
   padding:12px 16px 11px;font-family:"Courier Prime",monospace}
@@ -367,13 +368,14 @@ tr.runrow.live .tw{border-left:3px solid var(--amber)}
 /* The runway: one bar per calendar month, whole history, volume as height;
    stamp-blue = busier than the median month. Native title carries "Mon YYYY —
    N messages"; hover only brightens. */
-.runway .bars{display:flex;align-items:flex-end;gap:5px;height:64px}
+.runway .bars{display:flex;align-items:flex-end;gap:4px;height:64px}
 .runway .bar{flex:1 1 0;min-height:4px;background:var(--faint);opacity:.6}
 .runway .bar.busy{background:var(--stamp);opacity:.95}
 .runway .bar:hover{filter:brightness(1.18)}
-.rw-cap{display:flex;align-items:center;gap:10px;margin-top:8px;
-  font-family:"Courier Prime",monospace;font-size:11px;letter-spacing:.16em;
+.rw-cap{display:flex;align-items:center;gap:8px;margin-top:8px;white-space:nowrap;
+  font-family:"Courier Prime",monospace;font-size:10px;letter-spacing:.14em;
   text-transform:uppercase;color:var(--soft)}
+.rw-cap .rw-line{min-width:12px}
 .rw-cap .rw-line{flex:1;border-top:1px solid var(--rule)}
 .rw-cap .rw-now{color:var(--ox)}
 /* Below ~640px the right column drops under the identity block, full width. */
