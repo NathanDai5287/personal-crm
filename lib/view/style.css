@@ -367,7 +367,7 @@ tr.runrow.live .tw{border-left:3px solid var(--amber)}
    volume is height, stamp-blue = busier than the median slice. The hover
    chip carries each bar's date range and count. */
 .band{margin-top:30px}
-.bars{display:flex;align-items:flex-end;gap:5px;height:44px}
+.bars{display:flex;align-items:flex-end;gap:5px;height:72px}
 .bars .bar{flex:1 1 0;min-height:2px;background:var(--faint);opacity:.55;position:relative}
 .bars .bar.busy{background:var(--stamp);opacity:.88}
 .bars .bar:hover{opacity:1}
