@@ -757,58 +757,43 @@ function fmtPhone(p) {
   const m = String(p).match(/^\+1(\d{3})(\d{3})(\d{4})$/);
   return m ? `+1 ${m[1]} ${m[2]} ${m[3]}` : String(p);
 }
-// Thin stroked line icons (currentColor) for the contact lines.
-const ICO_CAKE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 21v-8a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8"/><path d="M4 16s.5-1 2-1 2.5 2 4 2 2.5-2 4-2 2.5 2 4 2 2-1 2-1"/><path d="M2 21h20"/><path d="M7 8v3"/><path d="M12 8v3"/><path d="M17 8v3"/><path d="M7 4h.01"/><path d="M12 4h.01"/><path d="M17 4h.01"/></svg>';
-const ICO_PHONE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>';
-
-// The activity band: BAND_BARS equal slices of this contact's whole history —
-// the span always runs from their earliest archived message to right now, so
-// the bar count is constant and each bar's width in TIME varies per contact
-// (a years-long friendship gets months per bar, a new contact gets days).
-// Returns { bars: [{ a, b, n }], spanDays } with a/b as epoch-ms slice edges,
-// or null when the archive (or the contact's history) isn't there.
-const BAND_BARS = 20;
-function activityBand(slug, now) {
+// The runway: one bar per Pacific calendar month, from the first archived
+// message's month through the current month — the span always covers the whole
+// history, and the bar COUNT grows with it (Claude Design spec, 2026-08-11;
+// replaces the fixed 20-slice band). Buckets are computed in JS via ptDateKey
+// because a month boundary is a Pacific-midnight fact no fixed UTC offset gets
+// right in both halves of the year. Returns [{ key: 'YYYY-MM', n }] or null.
+function activityMonths(slug, now) {
   let cdb;
   try { cdb = openCrmDb(); } catch { return null; }
   try {
     let rows;
-    let min;
     try {
-      const r = cdb.prepare('SELECT MIN(sent_at) m FROM messages WHERE contact_slug = ?').get(slug);
-      min = r ? r.m : null;
-      if (!min || min >= now) return null;
-      rows = cdb.prepare(
-        `SELECT MIN(CAST((sent_at - ?) * ${BAND_BARS}.0 / ? AS INT), ${BAND_BARS - 1}) b, COUNT(*) n
-         FROM messages WHERE contact_slug = ? GROUP BY b`,
-      ).all(min, now - min, slug);
+      rows = cdb.prepare('SELECT sent_at FROM messages WHERE contact_slug = ?').all(slug);
     } catch { return null; }
-    const counts = new Map(rows.map((r) => [r.b, r.n]));
-    const span = now - min;
-    const bars = [];
-    for (let i = 0; i < BAND_BARS; i += 1) {
-      bars.push({
-        a: min + Math.round((span * i) / BAND_BARS),
-        b: min + Math.round((span * (i + 1)) / BAND_BARS),
-        n: counts.get(i) || 0,
-      });
+    if (!rows.length) return null;
+    const counts = new Map(); // 'YYYY-MM' -> n
+    let minKey = null;
+    for (const r of rows) {
+      const k = ptDateKey(r.sent_at).slice(0, 7);
+      counts.set(k, (counts.get(k) || 0) + 1);
+      if (!minKey || k < minKey) minKey = k;
     }
-    return { bars, spanDays: Math.max(1, Math.round(span / 86_400_000)) };
+    const nowKey = ptDateKey(now).slice(0, 7);
+    if (minKey > nowKey) return null;
+    const months = [];
+    let [y, m] = minKey.split('-').map(Number);
+    const [ny, nm] = nowKey.split('-').map(Number);
+    while (y < ny || (y === ny && m <= nm)) {
+      const k = `${y}-${String(m).padStart(2, '0')}`;
+      months.push({ key: k, n: counts.get(k) || 0 });
+      m += 1;
+      if (m === 13) { m = 1; y += 1; }
+    }
+    return months;
   } finally {
     try { cdb.close(); } catch { /* closed */ }
   }
-}
-
-// A slice's human date range, day-granular: "Aug 21 – Sep 8, 2025", crossing a
-// year "Dec 28, 2025 – Jan 14, 2026", a single day "Aug 21, 2025".
-function fmtSlice(a, bExcl) {
-  const d1 = ptDateKey(a);
-  const d2 = ptDateKey(Math.max(a, bExcl - 1));
-  const [y1, m1, day1] = d1.split('-').map(Number);
-  const [y2, m2, day2] = d2.split('-').map(Number);
-  if (d1 === d2) return `${MON3[m1 - 1]} ${day1}, ${y1}`;
-  if (y1 === y2) return `${MON3[m1 - 1]} ${day1} – ${MON3[m2 - 1]} ${day2}, ${y1}`;
-  return `${MON3[m1 - 1]} ${day1}, ${y1} – ${MON3[m2 - 1]} ${day2}, ${y2}`;
 }
 
 function profilePage(slug) {
@@ -822,14 +807,16 @@ function profilePage(slug) {
 
   const pencil = (label) => `<button type="button" class="ebtn" title="edit ${esc(label)}" aria-label="edit ${esc(label)}">&#9998;</button>`;
 
-  // Header: the dossier's face (Claude Design spec, 2026-08-11). The name with
-  // the last-contact stamp holding the top-right corner; the relationship as a
-  // hand-owned epigraph; birthday and phone as icon-led contact lines (the
-  // Signal uuid is meaningless to a human and lives only in the file); then the
-  // whole history as a 20-bar activity band, a hairline, and the counts — the
-  // hero plus topics/openers/sources/stale — on one shared baseline. The two
-  // hand-owned fields (EDITABLE_FIELDS: Relationship, Birthday) keep the hover
-  // pencil and render even when the file lacks them — a save inserts the bullet.
+  // Header: the dossier's face (Claude Design spec, second pass 2026-08-11).
+  // Left, the identity block: name, relationship epigraph, then birthday and
+  // phone as bare mono lines — no icons, no field labels (the Signal uuid is
+  // meaningless to a human and lives only in the file). Right, a ~400px column:
+  // the monthly runway (one bar per calendar month of contact, "N MO OF
+  // CONTACT ——— NOW" beneath) over the boxed last-contact stamp. Then the
+  // hairline and the stats row — hero plus topics/openers/sources/stale. The
+  // three hand-owned fields (EDITABLE_FIELDS: Relationship, Birthday, Phone)
+  // keep the hover pencil and render even when the file lacks them — a save
+  // inserts the bullet.
   const meta = new Map(); // metadata bullets, label -> value
   let h1 = `<h1>${esc(name)}</h1>`;
   const strays = [];
@@ -841,8 +828,10 @@ function profilePage(slug) {
     if (m) { meta.set(m[1].trim(), m[2].trim()); continue; }
     strays.push(`<p>${mdInline(t)}</p>`);
   }
-  const fieldHtml = (label, key, cur) =>
-    `<span class="efield-val">${mdInline(cur == null ? '_TBD_' : cur)}</span>`
+  // `show` overrides the display form only — the input always edits the raw
+  // stored value (the phone renders grouped but is stored as one token).
+  const fieldHtml = (label, key, cur, show) =>
+    `<span class="efield-val">${show ?? mdInline(cur == null ? '_TBD_' : cur)}</span>`
     + `<input class="efield-input" hidden maxlength="120" value="${esc(cur == null || cur === '_TBD_' ? '' : cur)}" aria-label="${esc(label)}">`
     + pencil(label);
 
@@ -854,28 +843,28 @@ function profilePage(slug) {
   // block as plain lines so a hand-added bullet never disappears.
   const rel = `<div class="rel efield" data-key="relationship" data-label="Relationship">`
     + fieldHtml('Relationship', 'relationship', meta.get('Relationship') ?? null) + '</div>';
-  const clines = [`<div class="cline">${ICO_CAKE}<span class="efield" data-key="birthday" data-label="Birthday">`
-    + fieldHtml('Birthday', 'birthday', meta.get('Birthday') ?? null) + '</span></div>'];
-  if (meta.has('Phone')) clines.push(`<div class="cline">${ICO_PHONE}<span>${esc(fmtPhone(meta.get('Phone')))}</span></div>`);
+  const phoneRaw = meta.get('Phone') ?? null;
+  const clines = [
+    `<div class="cline"><span class="efield" data-key="birthday" data-label="Birthday">`
+      + fieldHtml('Birthday', 'birthday', meta.get('Birthday') ?? null) + '</span></div>',
+    `<div class="cline"><span class="efield" data-key="phone" data-label="Phone">`
+      + fieldHtml('Phone', 'phone', phoneRaw, phoneRaw == null ? null : esc(fmtPhone(phoneRaw))) + '</span></div>',
+  ];
   const PLACED = new Set(['Relationship', 'Birthday', 'First contact', 'Last contact', 'Messages', 'Phone', 'Signal ID']);
   for (const [label, v] of meta) if (!PLACED.has(label)) {
-    clines.push(`<div class="cline"><span class="cico"></span><span>${esc(label.toLowerCase())} <b>${mdInline(v)}</b></span></div>`);
+    clines.push(`<div class="cline"><span>${esc(label.toLowerCase())} <b>${mdInline(v)}</b></span></div>`);
   }
 
-  // Right column: the last-contact stamp, "since <first month>" beneath it.
-  const stampCol = [];
+  // Right column: the boxed last-contact stamp (the runway joins it below,
+  // once the archive has been consulted).
+  let stamp = '';
   const lastKey = dkey(meta.get('Last contact'));
   if (lastKey) {
     const [, mo, d] = lastKey.split('-').map(Number);
     const ago = Math.round((Date.parse(todayKey) - Date.parse(lastKey)) / 86_400_000);
     const agoTxt = ago <= 0 ? 'today' : ago === 1 ? 'yesterday' : `${ago} days ago`;
-    stampCol.push(`<div class="lstamp"><span class="ls-k">last contact</span>`
-      + `<span class="ls-d">${MON3[mo - 1]} ${d}</span><span class="ls-ago">${agoTxt}</span></div>`);
-  }
-  const firstKey = dkey(meta.get('First contact'));
-  if (firstKey) {
-    const [fy, fm] = firstKey.split('-').map(Number);
-    stampCol.push(`<div class="ls-since">since ${MON3[fm - 1]} ${fy}</div>`);
+    stamp = `<div class="lstamp"><span class="ls-k">last contact</span>`
+      + `<span class="ls-d">${MON3[mo - 1]} ${d}</span><span class="ls-ago">${agoTxt}</span></div>`;
   }
 
   // Counts for the stats row, from the file itself: What-I-know topics,
@@ -899,34 +888,34 @@ function profilePage(slug) {
     const mdOpts = { dateFor: dates.dateFor, now };
     const stale = staleCount(md, mdOpts);
 
+    // The runway: one bar per calendar month of the whole history, stamp-blue
+    // when the month beat the median. Native title = "Mon YYYY — N messages";
+    // the caption names the month count, with NOW pinned at the hairline's end.
+    let runway = '';
+    const months = activityMonths(slug, now);
+    if (months && months.some((b) => b.n)) {
+      const vals = months.map((b) => b.n).sort((a, b) => a - b);
+      const mid = vals.length % 2
+        ? vals[(vals.length - 1) / 2]
+        : (vals[vals.length / 2 - 1] + vals[vals.length / 2]) / 2;
+      const max = Math.max(...vals);
+      const bars = months.map((b) => {
+        const [y, mo] = b.key.split('-').map(Number);
+        const tip = `${MON3[mo - 1]} ${y} — ${fmtN(b.n)} message${b.n === 1 ? '' : 's'}`;
+        const hgt = b.n ? Math.max(Math.round((b.n / max) * 100), 8) : 0;
+        return `<span class="bar${b.n > mid ? ' busy' : ''}" style="height:${hgt}%" title="${tip}" aria-label="${tip}"></span>`;
+      }).join('');
+      runway = `<div class="runway"><div class="bars">${bars}</div>`
+        + `<div class="rw-cap"><span>${months.length} mo of contact</span>`
+        + '<i class="rw-line"></i><span class="rw-now">now</span></div></div>';
+    }
+
     const header = [];
     header.push(`<div class="phead-top"><div class="phead-id">${h1}${rel}`
       + `<div class="contact">${clines.join('')}</div></div>`
-      + (stampCol.length ? `<div class="phead-stamp">${stampCol.join('')}</div>` : '')
+      + (runway || stamp ? `<div class="phead-right">${runway}${stamp}</div>` : '')
       + '</div>');
     header.push(...strays);
-
-    // The band: 20 bars always, slicing first-message → today into equal
-    // stretches; stamp-blue = busier than the median slice. The caption names
-    // the true span, since each contact's bars cover a different width of time.
-    const band = activityBand(slug, now);
-    if (band && band.bars.some((bb) => bb.n)) {
-      const vals = band.bars.map((bb) => bb.n).sort((a, b) => a - b);
-      const median = (vals[BAND_BARS / 2 - 1] + vals[BAND_BARS / 2]) / 2;
-      const max = Math.max(...band.bars.map((bb) => bb.n));
-      const bars = band.bars.map((bb) => {
-        const tip = `${fmtSlice(bb.a, bb.b)} · ${fmtN(bb.n)} message${bb.n === 1 ? '' : 's'}`;
-        const hgt = bb.n ? Math.max(Math.round((bb.n / max) * 100), 6) : 0;
-        return `<span class="bar${bb.n > median ? ' busy' : ''}" style="height:${hgt}%" data-tip="${tip}" aria-label="${tip}"></span>`;
-      }).join('');
-      const d = band.spanDays;
-      const spanTxt = d >= 730 ? `${Math.round(d / 365.25)} years`
-        : d >= 60 ? `${Math.round(d / 30.44)} months`
-          : `${d} day${d === 1 ? '' : 's'}`;
-      header.push(`<div class="band"><div class="bars">${bars}</div>`
-        + `<div class="band-cap"><span>${spanTxt} of contact</span>`
-        + '<span class="leg"><i></i>busier than usual</span></div></div>');
-    }
 
     // Stats row: the message hero (them/me split waits on hover, in reserved
     // space so nothing shifts), then the tight four-count cluster.
@@ -1331,6 +1320,7 @@ function renameContact(slug, newName) {
 const EDITABLE_FIELDS = [
   ['relationship', 'Relationship'],
   ['birthday', 'Birthday'],
+  ['phone', 'Phone'],
 ];
 
 // Added/removed line counts for a section edit's step label. A multiset diff,
