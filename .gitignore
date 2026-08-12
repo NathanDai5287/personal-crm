@@ -13,3 +13,6 @@ logs/
 node_modules/
 *.bak
 *.tmp-*
+
+# Local machine paths (names local install locations). .env.example is committed.
+.env
