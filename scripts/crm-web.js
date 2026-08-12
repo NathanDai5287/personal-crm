@@ -396,14 +396,109 @@ const TASKS_DATE_JS = `<script>(function(){
   });
 })();</script>`;
 
-function tasksPage(editId = null) {
+// The profile page's inline editing, ported to task cards: clicking a value (or
+// its hover pencil) swaps in a seamless editor; Enter/Escape/blur closes it with
+// the change kept, staged locally; the shared bottom bar saves every dirty card
+// (one POST /tasks/edit each) and reloads so the server re-sorts and re-renders
+// citation slips. The importance stamp cycles minor → norm → high on click and
+// stages the same way. Unlike the profile there is no "for the record" line —
+// task rows carry no provenance log for a message to land in.
+const TASKS_EDIT_JS = `<script>(function(){
+  var bar=document.getElementById('editbar'),barN=document.getElementById('editbarN');
+  if(!bar)return;
+  var flds=[].slice.call(document.querySelectorAll('.taskcard .efield'));
+  var imps=[].slice.call(document.querySelectorAll('.taskcard .impbtn'));
+  var IMPW={1:'minor',2:'norm',3:'high'},IMPNEXT={1:2,2:3,3:1};
+  function inp(f){return f.querySelector('.efield-input');}
+  function norm(v){return v.replace(/\\r/g,'').trim();}
+  function fldDirty(f){return norm(inp(f).value)!==norm(inp(f).defaultValue);}
+  function impDirty(m){return m.dataset.val!==m.dataset.orig;}
+  function refresh(){
+    var n=0;
+    flds.forEach(function(f){var d=fldDirty(f);f.classList.toggle('dirty',d);if(d)n++;});
+    imps.forEach(function(m){var d=impDirty(m);m.classList.toggle('dirty',d);if(d)n++;});
+    bar.hidden=n===0;
+    if(n)barN.textContent=n+' unsaved change'+(n===1?'':'s');
+  }
+  function size(ta){if(ta.tagName==='TEXTAREA'){ta.style.height='auto';ta.style.height=(ta.scrollHeight+2)+'px';}}
+  function display(f){
+    var i=inp(f),val=f.querySelector('.efield-val'),v=norm(i.value);
+    if(v===norm(i.defaultValue))val.innerHTML=f.dataset.orig;
+    else if(v)val.textContent=v;
+    else val.innerHTML=f.dataset.empty;
+  }
+  function close(f){
+    var i=inp(f);
+    if(f.dataset.f==='title'&&!norm(i.value))i.value=i.defaultValue; // a task keeps its title
+    f.classList.remove('editing');i.hidden=true;f.querySelector('.efield-val').hidden=false;
+    // typed due words become the date the server will store ("monday" -> 2026-08-17)
+    if(f.dataset.f==='deadline'){
+      var v=norm(i.value);
+      if(v&&!/^\\d{4}-\\d{2}-\\d{2}$/.test(v)){
+        fetch('/tasks/parse-date?q='+encodeURIComponent(v)).then(function(r){return r.json();}).then(function(d){
+          if(d&&d.date){i.value=d.date;display(f);refresh();}
+        }).catch(function(){});
+      }
+    }
+    display(f);refresh();
+  }
+  flds.forEach(function(f){
+    var i=inp(f),val=f.querySelector('.efield-val');
+    f.dataset.orig=val.innerHTML;
+    f.dataset.empty=f.dataset.f==='deadline'?'<em class="tnone">\\u2014</em>':'<em class="tnone">add a note</em>';
+    var open=function(){f.classList.add('editing');val.hidden=true;i.hidden=false;size(i);i.focus();};
+    f.querySelector('.ebtn').addEventListener('click',open);
+    val.addEventListener('click',function(e){if(e.target.closest('a'))return;open();});
+    i.addEventListener('input',function(){size(i);refresh();});
+    i.addEventListener('blur',function(){close(f);});
+    i.addEventListener('keydown',function(e){
+      if(e.key==='Escape'||(e.key==='Enter'&&i.tagName!=='TEXTAREA')){e.stopPropagation();close(f);}
+    });
+  });
+  imps.forEach(function(m){
+    m.dataset.orig=m.dataset.val;
+    m.addEventListener('click',function(){
+      var v=IMPNEXT[Number(m.dataset.val)]||2;
+      m.dataset.val=v;m.textContent=IMPW[v];
+      m.className='impmark impbtn '+IMPW[v];
+      refresh();
+    });
+  });
+  document.getElementById('btnCancel').addEventListener('click',function(){
+    if(!confirm('Discard all unsaved changes?'))return;
+    flds.forEach(function(f){inp(f).value=inp(f).defaultValue;close(f);});
+    imps.forEach(function(m){var v=Number(m.dataset.orig);m.dataset.val=v;m.textContent=IMPW[v];m.className='impmark impbtn '+IMPW[v];});
+    refresh();
+  });
+  document.getElementById('btnSave').addEventListener('click',function(){
+    var cards=[].slice.call(document.querySelectorAll('.taskcard')).filter(function(c){
+      return c.querySelector('.efield.dirty,.impbtn.dirty');
+    });
+    if(!cards.length)return;
+    var btn=this;btn.disabled=true;
+    Promise.all(cards.map(function(c){
+      var g=function(k){var f=c.querySelector('.efield[data-f='+k+'] .efield-input');return f?norm(f.value):'';};
+      var im=c.querySelector('.impbtn');
+      var body='id='+encodeURIComponent(c.dataset.id)
+        +'&title='+encodeURIComponent(g('title'))
+        +'&description='+encodeURIComponent(g('description'))
+        +'&deadline='+encodeURIComponent(g('deadline'))
+        +'&importance='+encodeURIComponent(im?im.dataset.val:2);
+      return fetch('/tasks/edit',{method:'POST',
+        headers:{'X-Requested-With':'fetch','Content-Type':'application/x-www-form-urlencoded'},
+        body:body}).then(function(r){if(!r.ok)throw new Error(r.status);});
+    })).then(function(){location.reload();})
+      .catch(function(){btn.disabled=false;barN.textContent='save failed \\u2014 changes still unsaved';});
+  });
+})();</script>`;
+
+function tasksPage() {
   let cdb;
   try { cdb = openCrmDb(); } catch { return page('To do — personal-crm', '<p class="bad">archive unavailable</p>', '/tasks'); }
   let drafts = [];
   let active = [];
   let done = [];
   let counts = { draft: 0, active: 0, done: 0, dismissed: 0 };
-  let editing = null;
   try {
     // Drafts are ROWS, written by scripts/crm-tasks.js during an ingest run — not
     // derived from the profile. Deriving them from `## Talking points` is what
@@ -412,7 +507,6 @@ function tasksPage(editId = null) {
     active = TASKS.listByStatus(cdb, 'active');
     done = TASKS.listByStatus(cdb, 'done');
     counts = TASKS.counts(cdb);
-    if (editId) editing = TASKS.getTask(cdb, editId);
   } finally {
     try { cdb.close(); } catch { /* closed */ }
   }
@@ -439,10 +533,10 @@ function tasksPage(editId = null) {
       };
     };
     const data = {
-      counts, editing, today: ptDateKey(now),
+      counts, today: ptDateKey(now),
       active: active.map(shape), done: done.map(shape), drafts: drafts.map(shape),
     };
-    return page('To do — personal-crm', render(V.tasks(data).body) + TASKS_TOGGLE_JS + TASKS_DATE_JS);
+    return page('To do — personal-crm', render(V.tasks(data).body) + TASKS_TOGGLE_JS + TASKS_DATE_JS + TASKS_EDIT_JS);
   } finally {
     dates.close();
   }
@@ -2410,11 +2504,7 @@ function start() {
 
       if (url.pathname === '/') { send(200, indexPage()); return; }
 
-      if (url.pathname === '/tasks') {
-        const ed = url.searchParams.get('edit');
-        send(200, tasksPage(ed && /^\d+$/.test(ed) ? Number(ed) : null));
-        return;
-      }
+      if (url.pathname === '/tasks') { send(200, tasksPage()); return; }
       // Live due-date translation for the To do form: "monday" -> "2026-08-10".
       if (url.pathname === '/tasks/parse-date') {
         sendJson(200, { date: parseDeadline(url.searchParams.get('q'), new Date()) });
@@ -2441,8 +2531,10 @@ function start() {
               const id = p.get('id');
               if (!/^\d+$/.test(String(id))) { send(400, page('Bad request', '<p>Bad request.</p>')); return; }
               if (action === 'edit') {
+                const title = (p.get('title') || '').trim();
+                if (!title) { send(400, page('Bad request', '<p>A title is required.</p>')); return; }
                 TASKS.updateTask(cdb, id, {
-                  title: p.get('title'), description: p.get('description'),
+                  title, description: p.get('description'),
                   deadline: parseDeadline(p.get('deadline'), new Date()),
                   importance: p.get('importance'),
                 });

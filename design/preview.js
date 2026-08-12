@@ -98,7 +98,6 @@ const ROUTES = {
   '/tasks': () => V.tasks({
     counts: { active: 2, done: 1, draft: 3, dismissed: 0 },
     today: '2026-08-06',
-    editing: null,
     active: [
       { id: 1, status: 'active', title: 'Back up crm.db', importance: 2, deadline: '2026-08-10', slug: null, name: null, msgId: null, descHtml: '' },
       { id: 2, status: 'active', title: 'Send Katia the apartment listings', importance: 3, deadline: '2026-08-08', slug: 'katia-jacoby', name: 'Katia Jacoby', msgId: 90032, descHtml: 'She asked twice — do it before the weekend.' },
