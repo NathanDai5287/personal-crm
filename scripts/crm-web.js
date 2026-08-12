@@ -757,55 +757,43 @@ function fmtPhone(p) {
   const m = String(p).match(/^\+1(\d{3})(\d{3})(\d{4})$/);
   return m ? `+1 ${m[1]} ${m[2]} ${m[3]}` : String(p);
 }
-// The runway: RUNWAY_BARS equal slices spanning the whole history — earliest
-// archived message to the latest (Nathan, 2026-08-11: constant bar count, the
-// bar count only decides how much time each bar covers). Returns
-// { bars: [{ a, b, n }], spanDays } with a/b as epoch-ms slice edges, or null.
-const RUNWAY_BARS = 14;
-function activitySlices(slug) {
+// The runway: one bar per Pacific calendar month, from the first archived
+// message's month through the current month (Nathan settled on monthly bars,
+// 2026-08-11 — the count grows with the history). Buckets are computed in JS
+// via ptDateKey because a month boundary is a Pacific-midnight fact no fixed
+// UTC offset gets right in both halves of the year. Returns
+// [{ key: 'YYYY-MM', n }] or null.
+function activityMonths(slug, now) {
   let cdb;
   try { cdb = openCrmDb(); } catch { return null; }
   try {
     let rows;
-    let min;
-    let max;
     try {
-      const r = cdb.prepare('SELECT MIN(sent_at) a, MAX(sent_at) b FROM messages WHERE contact_slug = ?').get(slug);
-      min = r ? r.a : null;
-      max = r ? r.b : null;
-      if (!min || !max) return null;
-      const span = Math.max(1, max - min); // one lone message still buckets sanely
-      rows = cdb.prepare(
-        `SELECT MIN(CAST((sent_at - ?) * ${RUNWAY_BARS}.0 / ? AS INT), ${RUNWAY_BARS - 1}) b, COUNT(*) n
-         FROM messages WHERE contact_slug = ? GROUP BY b`,
-      ).all(min, span, slug);
+      rows = cdb.prepare('SELECT sent_at FROM messages WHERE contact_slug = ?').all(slug);
     } catch { return null; }
-    const counts = new Map(rows.map((r) => [r.b, r.n]));
-    const span = Math.max(1, max - min);
-    const bars = [];
-    for (let i = 0; i < RUNWAY_BARS; i += 1) {
-      bars.push({
-        a: min + Math.round((span * i) / RUNWAY_BARS),
-        b: min + Math.round((span * (i + 1)) / RUNWAY_BARS),
-        n: counts.get(i) || 0,
-      });
+    if (!rows.length) return null;
+    const counts = new Map(); // 'YYYY-MM' -> n
+    let minKey = null;
+    for (const r of rows) {
+      const k = ptDateKey(r.sent_at).slice(0, 7);
+      counts.set(k, (counts.get(k) || 0) + 1);
+      if (!minKey || k < minKey) minKey = k;
     }
-    return { bars, spanDays: Math.max(1, Math.round(span / 86_400_000)) };
+    const nowKey = ptDateKey(now).slice(0, 7);
+    if (minKey > nowKey) return null;
+    const months = [];
+    let [y, m] = minKey.split('-').map(Number);
+    const [ny, nm] = nowKey.split('-').map(Number);
+    while (y < ny || (y === ny && m <= nm)) {
+      const k = `${y}-${String(m).padStart(2, '0')}`;
+      months.push({ key: k, n: counts.get(k) || 0 });
+      m += 1;
+      if (m === 13) { m = 1; y += 1; }
+    }
+    return months;
   } finally {
     try { cdb.close(); } catch { /* closed */ }
   }
-}
-
-// A slice's human date range, day-granular: "Aug 21 – Sep 8, 2025", crossing a
-// year "Dec 28, 2025 – Jan 14, 2026", a single day "Aug 21, 2025".
-function fmtSlice(a, bExcl) {
-  const d1 = ptDateKey(a);
-  const d2 = ptDateKey(Math.max(a, bExcl - 1));
-  const [y1, m1, day1] = d1.split('-').map(Number);
-  const [y2, m2, day2] = d2.split('-').map(Number);
-  if (d1 === d2) return `${MON3[m1 - 1]} ${day1}, ${y1}`;
-  if (y1 === y2) return `${MON3[m1 - 1]} ${day1} – ${MON3[m2 - 1]} ${day2}, ${y1}`;
-  return `${MON3[m1 - 1]} ${day1}, ${y1} – ${MON3[m2 - 1]} ${day2}, ${y2}`;
 }
 
 function profilePage(slug) {
@@ -900,24 +888,25 @@ function profilePage(slug) {
     const mdOpts = { dateFor: dates.dateFor, now };
     const stale = staleCount(md, mdOpts);
 
-    // The runway: 14 equal slices of the whole history — earliest message to
-    // the latest — stamp-blue when a slice beat the median. Native title =
-    // "Aug 21 – Sep 7, 2025 — 462 messages"; the caption names the span in
-    // months, with NOW pinned at the hairline's end.
+    // The runway: one bar per calendar month of the whole history, stamp-blue
+    // when the month beat the median. Native title = "Aug 2025 — 462 messages";
+    // the caption names the month count, with NOW pinned at the hairline's end.
     let runway = '';
-    const band = activitySlices(slug);
-    if (band && band.bars.some((bb) => bb.n)) {
-      const vals = band.bars.map((bb) => bb.n).sort((a, b) => a - b);
-      const mid = (vals[RUNWAY_BARS / 2 - 1] + vals[RUNWAY_BARS / 2]) / 2;
+    const months = activityMonths(slug, now);
+    if (months && months.some((b) => b.n)) {
+      const vals = months.map((b) => b.n).sort((a, b) => a - b);
+      const mid = vals.length % 2
+        ? vals[(vals.length - 1) / 2]
+        : (vals[vals.length / 2 - 1] + vals[vals.length / 2]) / 2;
       const max = Math.max(...vals);
-      const bars = band.bars.map((bb) => {
-        const tip = `${fmtSlice(bb.a, bb.b)} — ${fmtN(bb.n)} message${bb.n === 1 ? '' : 's'}`;
-        const hgt = bb.n ? Math.max(Math.round((bb.n / max) * 100), 8) : 0;
-        return `<span class="bar${bb.n > mid ? ' busy' : ''}" style="height:${hgt}%" title="${tip}" aria-label="${tip}"></span>`;
+      const bars = months.map((b) => {
+        const [y, mo] = b.key.split('-').map(Number);
+        const tip = `${MON3[mo - 1]} ${y} — ${fmtN(b.n)} message${b.n === 1 ? '' : 's'}`;
+        const hgt = b.n ? Math.max(Math.round((b.n / max) * 100), 8) : 0;
+        return `<span class="bar${b.n > mid ? ' busy' : ''}" style="height:${hgt}%" title="${tip}" aria-label="${tip}"></span>`;
       }).join('');
-      const mo = Math.max(1, Math.round(band.spanDays / 30.44));
       runway = `<div class="runway"><div class="bars">${bars}</div>`
-        + `<div class="rw-cap"><span>${mo} mo of contact</span>`
+        + `<div class="rw-cap"><span>${months.length} mo of contact</span>`
         + '<i class="rw-line"></i><span class="rw-now">now</span></div></div>';
     }
 
