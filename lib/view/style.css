@@ -507,8 +507,11 @@ textarea.fld{resize:vertical;line-height:1.4}
 select.fld{appearance:none;-webkit-appearance:none;padding-right:26px;cursor:pointer}
 
 /* ---- to do: charge cards + the in-tray ----------------------------------- */
-.todo{display:grid;grid-template-columns:1fr;gap:26px;margin-top:18px;align-items:start}
-@media(min-width:920px){.todo{grid-template-columns:1fr 340px}}
+/* "tododesk", not "todo": bare .todo also matched the pipeline dial's kind
+   class (.dial.todo) and re-laid it out as this grid. Kind names stay short;
+   the layout class carries the suffix. */
+.tododesk{display:grid;grid-template-columns:1fr;gap:26px;margin-top:18px;align-items:start}
+@media(min-width:920px){.tododesk{grid-template-columns:1fr 340px}}
 .slipform{display:grid;grid-template-columns:1fr 150px auto auto;gap:9px;align-items:center;
   background:var(--card2);border:1px solid var(--rule);border-left:3px solid var(--stamp);
   padding:11px 13px;margin-bottom:18px}
@@ -571,7 +574,10 @@ select.fld{appearance:none;-webkit-appearance:none;padding-right:26px;cursor:poi
 .draft-d{font-size:13.5px;color:var(--soft);margin-top:4px}
 .draft-m{font-family:"Courier Prime",monospace;font-size:11px;color:var(--soft);margin-top:6px}
 .draft-a{display:flex;gap:8px;margin-top:10px}
-.inl{margin:0}
+/* inline-flex, not block: a block form is as tall as its line box (the body
+   font's strut), so its button rides the baseline and sits lower than a bare
+   .btn anchor beside it. Flex shrinks the form to exactly the button's box. */
+.inl{margin:0;display:inline-flex}
 
 /* ---- nomenclature key ---------------------------------------------------- */
 .legend{background:var(--card);border:1px solid var(--rule);box-shadow:var(--shadow);
