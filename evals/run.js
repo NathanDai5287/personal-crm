@@ -48,13 +48,13 @@ const DEFAULT_MODEL = 'anthropic/claude-sonnet-5';
 const VARIANTS = {
   a: {
     label: 'A (original)',
-    prompt: 'prompts/merge-v1.md',
+    prompt: 'prompts/past/merge-v1.md',
     // Verbatim production user turn — a faithful control.
     user: () => 'Merge the new messages into this profile per your instructions.',
   },
   b: {
     label: 'B (rewrite)',
-    prompt: 'prompts/merge-v2.md',
+    prompt: 'prompts/past/merge-v2.md',
     // The rewrite's position is that run-specific context belongs in the user
     // turn; withholding it was itself a high-severity finding. Supplying it is
     // part of variant B, not a thumb on the scale.
@@ -75,7 +75,7 @@ const VARIANTS = {
   // as noise. Same user turn as B, so the prompt file is the only variable.
   c: {
     label: 'C (B + capture)',
-    prompt: 'prompts/merge-v3.md',
+    prompt: 'prompts/past/merge-v3.md',
     user: (c, today) => VARIANTS.b.user(c, today),
   },
   // K = the SAME prompt as C on a different model. The only variable is the
@@ -84,14 +84,14 @@ const VARIANTS = {
   // PAID: this variant bills per token, so --allow-paid is required to run it.
   k: {
     label: 'K3 (prompt C)',
-    prompt: 'prompts/merge-v3.md',
+    prompt: 'prompts/past/merge-v3.md',
     model: 'moonshotai/kimi-k3',
     user: (c, today) => VARIANTS.b.user(c, today),
   },
   // D = the K3-tuned rewrite, on Opus. Must not regress Opus, since D replaces C.
   d: {
     label: 'D (K3-tuned)',
-    prompt: 'prompts/merge-v4.md',
+    prompt: 'prompts/past/merge-v4.md',
     user: (c, today) => VARIANTS.b.user(c, today),
   },
   // REASONING SWEEP. Same prompt, same model, only the thinking level differs.
@@ -99,17 +99,17 @@ const VARIANTS = {
   // default, so it ran at 'high' without that being a deliberate choice; these
   // make the level explicit and comparable. All PAID.
   kd_low: {
-    label: 'K3+D think=low', prompt: 'prompts/merge-v4.md',
+    label: 'K3+D think=low', prompt: 'prompts/past/merge-v4.md',
     model: 'moonshotai/kimi-k3', thinking: 'low',
     user: (c, today) => VARIANTS.b.user(c, today),
   },
   kd_high: {
-    label: 'K3+D think=high', prompt: 'prompts/merge-v4.md',
+    label: 'K3+D think=high', prompt: 'prompts/past/merge-v4.md',
     model: 'moonshotai/kimi-k3', thinking: 'high',
     user: (c, today) => VARIANTS.b.user(c, today),
   },
   kd_max: {
-    label: 'K3+D think=max', prompt: 'prompts/merge-v4.md',
+    label: 'K3+D think=max', prompt: 'prompts/past/merge-v4.md',
     model: 'moonshotai/kimi-k3', thinking: 'max',
     user: (c, today) => VARIANTS.b.user(c, today),
   },
@@ -124,7 +124,7 @@ const VARIANTS = {
   // subtotal is the number that means anything.
   e: {
     label: 'E (C + few-shot)',
-    prompt: 'prompts/merge-v5.md',
+    prompt: 'prompts/past/merge-v5.md',
     user: (c, today) => VARIANTS.b.user(c, today),
   },
   // F = E plus provenance in `## What I know`. Nathan's call: it is the section he
@@ -133,7 +133,7 @@ const VARIANTS = {
   // claims are left alone rather than given borrowed ids.
   f: {
     label: 'F (E + cited WIK)',
-    prompt: 'prompts/merge-v6.md',
+    prompt: 'prompts/past/merge-v6.md',
     user: (c, today) => VARIANTS.b.user(c, today),
   },
   // G = the provenance-ranges prompt, promoted to production merge.md
@@ -143,7 +143,7 @@ const VARIANTS = {
   // its first pair.
   g: {
     label: 'G (ranges)',
-    prompt: 'prompts/merge-v7.md',
+    prompt: 'prompts/past/merge-v7.md',
     user: (c, today) => VARIANTS.b.user(c, today),
   },
   // H = G plus two prompt-only rules (Nathan, 2026-08-07): a citation's range
@@ -153,7 +153,7 @@ const VARIANTS = {
   // variable.
   h: {
     label: 'H (G + granular)',
-    prompt: 'prompts/merge-v8.md',
+    prompt: 'prompts/past/merge-v8.md',
     user: (c, today) => VARIANTS.b.user(c, today),
   },
   // I = H plus the 2026-08-07 prompt-audit repairs: restores v4's "Write claims
@@ -163,7 +163,7 @@ const VARIANTS = {
   // and separate-moments citation rules. H is the control.
   i: {
     label: 'I (H + audit)',
-    prompt: 'prompts/merge-v9.md',
+    prompt: 'prompts/past/merge-v9.md',
     user: (c, today) => VARIANTS.b.user(c, today),
   },
   // J = I plus the What-I-know two-tier rule (Nathan's 2026-08-08 selections):
@@ -174,7 +174,7 @@ const VARIANTS = {
   // rather than drops. I is the control.
   j: {
     label: 'J (I + tiers)',
-    prompt: 'prompts/merge-v10.md',
+    prompt: 'prompts/past/merge-v10.md',
     user: (c, today) => VARIANTS.b.user(c, today),
   },
   // L = J plus the 2026-08-09 What-I-know restructure (Nathan's redesign): ###
@@ -184,7 +184,7 @@ const VARIANTS = {
   // only from _TBD_. J is the control.
   l: {
     label: 'L (J + sections)',
-    prompt: 'prompts/merge-v11.md',
+    prompt: 'prompts/past/merge-v11.md',
     user: (c, today) => VARIANTS.b.user(c, today),
   },
   // The kimi variants below are HISTORY, kept so old run dirs stay readable.
@@ -192,7 +192,7 @@ const VARIANTS = {
   // DEFAULT_MODEL), and --allow-paid should have no reason to be typed again.
   // K3 on F, to confirm the weaker model can carry the extra convention.
   kf_high: {
-    label: 'K3+F think=high', prompt: 'prompts/merge-v6.md',
+    label: 'K3+F think=high', prompt: 'prompts/past/merge-v6.md',
     model: 'moonshotai/kimi-k3', thinking: 'high',
     user: (c, today) => VARIANTS.b.user(c, today),
   },
@@ -200,12 +200,12 @@ const VARIANTS = {
   // promoted and the few-shot prompt is the live candidate. Same prompt, same
   // model, thinking level is the only variable. Both PAID.
   ke_high: {
-    label: 'K3+E think=high', prompt: 'prompts/merge-v5.md',
+    label: 'K3+E think=high', prompt: 'prompts/past/merge-v5.md',
     model: 'moonshotai/kimi-k3', thinking: 'high',
     user: (c, today) => VARIANTS.b.user(c, today),
   },
   ke_max: {
-    label: 'K3+E think=max', prompt: 'prompts/merge-v5.md',
+    label: 'K3+E think=max', prompt: 'prompts/past/merge-v5.md',
     model: 'moonshotai/kimi-k3', thinking: 'max',
     user: (c, today) => VARIANTS.b.user(c, today),
   },

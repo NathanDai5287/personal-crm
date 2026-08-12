@@ -41,7 +41,7 @@ ledgers → an LLM merge writes per-person markdown in `data/contacts/<slug>.md`
   messages. Never commit it to the main repo.
 - **Compaction is recoverable.** It rewrites a profile's `## Timeline` to lower
   resolution; it never touches the archive. Backups in `data/_compact-backup/`.
-- **Eval fixture contamination is real and tagged.** `prompts/merge-v5.md` embeds
+- **Eval fixture contamination is real and tagged.** `prompts/past/merge-v5.md` embeds
   examples built from `arshia-nayebnazar` and `charles-wu` messages, which are also
   fixtures. `evals/cases.js` marks those `heldOut: false`. Read the held-out subtotal.
 - **Deterministic merge checks are saturated** (312/312 for two different prompts).

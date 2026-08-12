@@ -54,9 +54,9 @@ const STYLE_V3 = {
 };
 
 const VARIANTS = {
-  v1: { label: 'v1 (old prod)', prompt: 'prompts/compact-v1.md', style: STYLE_V1 },
-  v2: { label: 'v2 (rewrite)', prompt: 'prompts/compact-v2.md', style: STYLE_V2 },
-  v3: { label: 'v3 (current)', prompt: 'prompts/compact-v3.md', style: STYLE_V3 },
+  v1: { label: 'v1 (old prod)', prompt: 'prompts/past/compact-v1.md', style: STYLE_V1 },
+  v2: { label: 'v2 (rewrite)', prompt: 'prompts/past/compact-v2.md', style: STYLE_V2 },
+  v3: { label: 'v3 (current)', prompt: 'prompts/past/compact-v3.md', style: STYLE_V3 },
 };
 
 function buildPrompt(c, variantKey) {
