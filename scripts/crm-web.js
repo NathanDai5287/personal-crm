@@ -2138,7 +2138,7 @@ function ledgerPage(slug, sha) {
     if (!m) return l.trim() ? `<div class="lmeta">${esc(l)}</div>` : '';
     const mine = /^nathan$/i.test(m[4]);
     return `<div class="lrow ${mine ? 'me' : 'them'}">`
-      + `<a class="lid" href="/m/${m[2]}">m${m[2]}</a>`
+      + `<a class="lid" href="/m/${m[2]}" target="_blank" rel="noopener">m${m[2]}</a>`
       + `<span class="lts">${esc(m[1])}</span>`
       + `<span class="lwho">${esc(m[4])}</span>`
       + `<span class="lbody">${inline(m[5])}</span></div>`;
@@ -2215,7 +2215,7 @@ function historyPage(slug) {
     const spot = `<a href="/c/${encodeURIComponent(slug)}/ledger/${h.sha}">spot check &rarr;</a>`;
     const src = h.chunk
       ? `<span class="hsub">${h.chunk.msgs} messages · ${esc(h.chunk.label)} · `
-        + `<a href="/m/${h.chunk.from}">m${h.chunk.from}</a>…<a href="/m/${h.chunk.to}">m${h.chunk.to}</a>`
+        + `<a href="/m/${h.chunk.from}" target="_blank" rel="noopener">m${h.chunk.from}</a>…<a href="/m/${h.chunk.to}" target="_blank" rel="noopener">m${h.chunk.to}</a>`
         + ` · ${spot}</span>`
       : `<span class="hsub">${esc(h.subject)} · ${spot}</span>`;
     const empty = !h.patch || !h.patch.trim();

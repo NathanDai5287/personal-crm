@@ -187,6 +187,16 @@ const VARIANTS = {
     prompt: 'prompts/past/merge-v11.md',
     user: (c, today) => VARIANTS.b.user(c, today),
   },
+  // M = L plus the 2026-08-11 Fable-review fixes (applied on Nathan's sign-off):
+  // the Birthday/Relationship gate accepts _unknown_, unchanged Timeline text may
+  // anchor an insertion, talking-point dates unbolded (checks.js accepts both
+  // forms), the durable qualifier, _Not yet enriched._ deletion, and the read
+  // fence. L is the control.
+  m: {
+    label: 'M (L + review)',
+    prompt: 'prompts/past/merge-v12.md',
+    user: (c, today) => VARIANTS.b.user(c, today),
+  },
   // The kimi variants below are HISTORY, kept so old run dirs stay readable.
   // Do not add new ones: kimi is never used for evals (see the model policy at
   // DEFAULT_MODEL), and --allow-paid should have no reason to be typed again.

@@ -56,7 +56,15 @@ const STYLE_V3 = {
 const VARIANTS = {
   v1: { label: 'v1 (old prod)', prompt: 'prompts/past/compact-v1.md', style: STYLE_V1 },
   v2: { label: 'v2 (rewrite)', prompt: 'prompts/past/compact-v2.md', style: STYLE_V2 },
-  v3: { label: 'v3 (current)', prompt: 'prompts/past/compact-v3.md', style: STYLE_V3 },
+  v3: { label: 'v3 (2026-08-04)', prompt: 'prompts/past/compact-v3.md', style: STYLE_V3 },
+  // v4/v5 change only the shared template text, never the style strings, so both
+  // ride STYLE_V3. v4 = v3 + single-id grammar + nothing-durable rule (2026-08-07,
+  // production until 2026-08-11). v5 = v4 + the Fable-review fixes: a mode-neutral
+  // system sentence (era calls compress weekly summaries, not "one line" of raw
+  // messages) and the splice context (output lands after "- <date>: "). NOTE: the
+  // fixture set has no era-style case, so v5's era fix is not exercised here.
+  v4: { label: 'v4 (pre-review)', prompt: 'prompts/past/compact-v4.md', style: STYLE_V3 },
+  v5: { label: 'v5 (review)', prompt: 'prompts/past/compact-v5.md', style: STYLE_V3 },
 };
 
 function buildPrompt(c, variantKey) {
