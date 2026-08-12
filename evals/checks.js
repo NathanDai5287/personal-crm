@@ -428,7 +428,8 @@ function checkTalkingPointFormat(ctx) {
   // `YYYY-MM` is a legitimate precision, not a missing date: "sometime in August"
   // has no knowable day, and stamping a false one loses the ordering signal that
   // makes the bullet useful. Only a bullet with NO date at all is undated.
-  const dated = /^\s*[-*]\s+\*\*\d{4}-\d{2}(?:-\d{2})?\*\*\s+\S/;
+  // Bold is optional: prompts through v11 required `**date**`, v12+ a plain date.
+  const dated = /^\s*[-*]\s+(?:\*\*)?\d{4}-\d{2}(?:-\d{2})?(?:\*\*)?\s+\S/;
   // A bullet may end in a RUN of citations — separate moments get separate
   // citations now that id lists are gone, so `… ⟨m85943⟩ ⟨m86109-m86132⟩` is the
   // normal shape for a bullet resting on two exchanges.

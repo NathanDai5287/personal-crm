@@ -137,10 +137,12 @@ function parseMeta(md) {
 }
 
 // Pull the `## Talking points` bullets: [{date|null, text}].
-// MONTH PRECISION IS LEGAL. prompts/merge.md permits `**YYYY-MM**` when only the
+// MONTH PRECISION IS LEGAL. prompts/merge.md permits `YYYY-MM` when only the
 // month is known ("sometime in August") rather than stamping a false precise day —
-// and real profiles use it (nigesh carries `**2027-02**`). Requiring YYYY-MM-DD
+// and real profiles use it (nigesh carries `2027-02`). Requiring YYYY-MM-DD
 // here silently demoted those to undated and left the `**…**` markup in the text.
+// The bold is optional: bullets written before 2026-08-11 carry `**date**`, newer
+// ones a plain date (prompt v12 keeps bold for structure labels only).
 //
 // `line` is the 1-based file line, needed to blame the bullet back to the merge
 // that wrote it.
@@ -153,7 +155,7 @@ function parseTalkingPoints(md) {
     if (/^##\s+Talking points/i.test(t)) { inSection = true; continue; }
     if (inSection && /^#/.test(t)) break; // next heading ends the section
     if (!inSection) continue;
-    const m = t.match(/^[-*]\s+(?:\*\*(\d{4}-\d{2}(?:-\d{2})?)\*\*\s*)?(.+)$/);
+    const m = t.match(/^[-*]\s+(?:(?:\*\*)?(\d{4}-\d{2}(?:-\d{2})?)(?:\*\*)?\s+)?(.+)$/);
     if (m && m[2]) {
       items.push({
         date: m[1] || null,
