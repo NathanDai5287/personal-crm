@@ -66,9 +66,9 @@ architecture and design decisions are in
 - **Signal Desktop**, installed and synced on this machine.
 - **[`pi`](https://www.npmjs.com/package/@earendil-works/pi-coding-agent)** — the
   coding-agent CLI that actually runs the model, installed globally and
-  authenticated (a Claude subscription via `pi`'s `/login`, or API keys in the
-  environment). Only needed for the model steps; sweeps and the dashboard don't
-  use it.
+  authenticated with your model provider (via `pi`'s `/login` or provider API
+  keys in the environment). Only needed for the model steps; sweeps and the
+  dashboard don't use it.
 
 ---
 
@@ -122,20 +122,17 @@ every flag, every job, the dashboard's pipeline buttons — is in
 
 ---
 
-## Models & cost
+## Models
 
-The merge, compact, and todo steps each pick a model independently:
-
-- **`anthropic/*`** (e.g. `anthropic/claude-opus-5`) runs on a Claude
-  subscription — **$0 per token.**
-- **`moonshotai/*`** (the default, `kimi-k3`) **bills per token** and needs
-  `MOONSHOT_API_KEY` in the environment.
-
-Override per run without editing code:
+The merge, compact, and todo steps each pick a model independently. Any provider
+`pi` supports works — e.g. `anthropic/claude-opus-5` or `moonshotai/kimi-k3`
+(the default) — so point each step at whatever you have access to. Override per
+run without editing code:
 ```
 CRM_MERGE_MODEL=anthropic/claude-opus-5 node scripts/crm-daily.js --only <slug>
 ```
-The eval harness refuses a paid model unless you pass `--allow-paid`.
+Provider API keys (e.g. `ANTHROPIC_API_KEY`, `MOONSHOT_API_KEY`) go in the
+environment; any billing is between you and the provider.
 
 ---
 
