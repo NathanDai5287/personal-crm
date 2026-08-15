@@ -14,6 +14,14 @@
 // history is therefore just N sequential ordinary merges; there is no separate
 // backfill code path and no ledger big enough to overflow a context window.
 //
+// GATED CADENCE (config INGEST_N / _FLOOR_DAYS / _CEILING_DAYS): a contact is NOT
+// merged every active week. planContact accumulates the backlog and releases a
+// merge only when it crosses N messages (after the floor has elapsed) or the
+// ceiling forces one; each released bucket is then week-batched as above. The
+// decision is a pure function of (backlog, last-merge time, effective date), so a
+// one-shot backfill emits the SAME buckets as day-by-day live runs — the cron
+// only has to fire, it makes no decisions. See gateBuckets().
+//
 // PER-CONTACT ROWID CURSOR: the cursor is a crm.db archive rowid watermark, NOT
 // a timestamp. Signal's `sent_at` is set by the (possibly clock-skewed) sender
 // and linked-device sync can insert older rows late, so a timestamp watermark
@@ -44,6 +52,7 @@ const { fmtLocal, planChunks, lastCompleteWeekStart } = require('../lib/weeks');
 const { redact } = require('../lib/redact');
 const {
   TRACKED, NICKNAMES, REFRESH_STATE, REFRESH_DIR,
+  INGEST_N, INGEST_FLOOR_DAYS, INGEST_CEILING_DAYS,
 } = require('../lib/config');
 
 const DAY = 86_400_000;
@@ -79,9 +88,51 @@ function loadNicknames() {
 
 // ---- planning ------------------------------------------------------------------
 
+// GATED BUCKETING — the ingest decision, living in the planner (not the cron).
+// Walk the backlog on a per-day effective-date grid; accumulate; emit a merge
+// bucket only when the pile crosses N (after the floor has elapsed) or the ceiling
+// forces it. FIRE-BEFORE-ADD: a bucket only ever contains messages from STRICTLY
+// earlier days, so nothing merges the day it lands and the floor truly bounds
+// cadence — which is precisely what makes a one-shot backfill emit the same
+// buckets as day-by-day live runs (it's a pure function of backlog + last-merge +
+// end date). Returns only the FIRED buckets (arrays of messages); the trailing
+// un-triggered tail is omitted, so the orchestrator never merges it and the
+// per-chunk cursor never advances past it — it's simply retried next run.
+//   lastMergeMs: sent_at of the cursor message (when we last merged), or null for
+//     a fresh contact, in which case the age clock starts at the first message.
+//   endMs: the effective "now" the walk runs up to (last complete week), so the
+//     ceiling can fire on an aged backlog even in weeks with no new messages.
+function gateBuckets(msgs, { N, floorDays, ceilingDays, lastMergeMs, endMs }) {
+  if (!msgs.length) return [];
+  const dayIdx = (ms) => Math.floor(ms / DAY);
+  const byDay = new Map();
+  for (const m of msgs) {
+    const d = dayIdx(m.sent_at);
+    let arr = byDay.get(d);
+    if (!arr) { arr = []; byDay.set(d, arr); }
+    arr.push(m);
+  }
+  const firstDay = Math.min(...byDay.keys());
+  const endDay = Math.max(dayIdx(endMs), firstDay);
+  let last = lastMergeMs != null ? dayIdx(lastMergeMs) : firstDay;
+  const buckets = [];
+  let bl = [];
+  for (let i = firstDay; i <= endDay; i += 1) {
+    if (bl.length) {
+      const age = i - last;
+      const fire = age >= ceilingDays || (age >= floorDays && bl.length >= N);
+      if (fire) { buckets.push(bl); last = i; bl = []; }
+    }
+    const day = byDay.get(i);
+    if (day) bl = bl.concat(day);
+  }
+  return buckets;
+}
+
 // Plan one contact: resolve their sources, pull everything past their cursor out
-// of the ARCHIVE (never Signal — see crm-archive.js), and cut it into chunks.
-// Returns null if the contact has no sources or nothing pending.
+// of the ARCHIVE (never Signal — see crm-archive.js), and gate it into merge
+// buckets (see gateBuckets). Returns null if the contact has no sources, nothing
+// pending, or nothing the gate has released yet.
 function planContact(cdb, sdb, slug, opts) {
   const { cursors, nicks, now, includePartialWeek, backfillDays } = opts;
   const rel = `data/contacts/${slug}.md`;
@@ -112,10 +163,35 @@ function planContact(cdb, sdb, slug, opts) {
   if (msgs.length === 0) return null;
 
   const display = (nicks[row.signal_id] && nicks[row.signal_id].name) || row.name;
-  // ONE CHUNK PER ACTIVE WEEK (maxWeeks:1): a backfill is then exactly the sequence
-  // of weekly merges you'd get playing forward, and weeks with no messages are
-  // simply absent (skipped), never an empty merge.
-  const chunks = planChunks(msgs, { maxWeeks: 1 });
+
+  // Gate the backlog into merge buckets. On-demand single-contact runs
+  // (includePartialWeek) bypass the gate and fold everything pending now — you
+  // pressed that button because you want this person up to date today — but still
+  // token-batched. Scheduled runs apply the N/floor/ceiling policy, evaluated up
+  // to the last complete week so no merge ever sees a partial one.
+  let bucketMsgs;
+  if (includePartialWeek) {
+    bucketMsgs = [msgs];
+  } else {
+    let lastMergeMs = null;
+    if (cursorBefore) {
+      const r = cdb.prepare('SELECT sent_at FROM messages WHERE id = ?').get(cursorBefore);
+      if (r) lastMergeMs = r.sent_at;
+    }
+    bucketMsgs = gateBuckets(msgs, {
+      N: INGEST_N, floorDays: INGEST_FLOOR_DAYS, ceilingDays: INGEST_CEILING_DAYS,
+      lastMergeMs, endMs: cutoff,
+    });
+  }
+  if (bucketMsgs.length === 0) return null; // gate hasn't opened — retry next run
+
+  // Each released bucket is token-batched into chunks (whole weeks up to 40k tok /
+  // 6 weeks — lib/weeks.js defaults). A small bucket is one chunk = one merge; a
+  // large one splits so no single merge digests an unreviewable pile.
+  const chunks = [];
+  for (const bm of bucketMsgs) for (const ch of planChunks(bm)) chunks.push(ch);
+  if (chunks.length === 0) return null;
+
   return {
     slug,
     name: display,
@@ -123,7 +199,7 @@ function planContact(cdb, sdb, slug, opts) {
     sources,
     hasCursor,
     cursorBefore,
-    total: msgs.length,
+    total: chunks.reduce((n, c) => n + c.count, 0),
     chunks,
   };
 }
@@ -257,4 +333,4 @@ function main() {
 }
 
 if (require.main === module) main();
-module.exports = { planAll, planContact, writeChunkLedger, chunkSummary, MERGE_BACKFILL_DAYS };
+module.exports = { planAll, planContact, gateBuckets, writeChunkLedger, chunkSummary, MERGE_BACKFILL_DAYS };
