@@ -151,17 +151,18 @@ function callItems(sdb, convIds, bound, nameFor) {
     try { callId = JSON.parse(r.j || '{}').callId; } catch { /* no id */ }
     let c = null;
     if (callId) { try { c = detail.get([callId]); } catch { /* no callsHistory table */ } }
-    const kind = c && c.type === 'Video' ? 'video' : c && c.type === 'Group' ? 'group' : 'voice';
-    const status = c ? String(c.status).replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase() : 'call';
-    const durMin = c && c.status === 'Accepted' && c.endedTimestamp && c.timestamp
+    const kind = c && c.type === 'Video' ? 'video' : (c && c.type === 'Group' ? 'group' : 'voice');
+    const st = c ? c.status : null;
+    const durMin = c && st === 'Accepted' && c.endedTimestamp && c.timestamp
       ? Math.max(1, Math.round((c.endedTimestamp - c.timestamp) / 60000)) : null;
+    // Match the ledger's plain "[…]" marker style (see lib/attachments): no emoji.
+    let body;
+    if (st === 'Missed' || st === 'Declined') body = `[${st.toLowerCase()} ${kind} call]`; // [missed video call]
+    else if (durMin != null) body = `[${kind} call, ${durMin}m]`;                          // [video call, 12m]
+    else body = `[${kind} call]`;                                                          // [group call] / [voice call]
     const ringer = c ? c.ringerId : r.src;
     const who = (ringer && nameFor(ringer)) || (c && c.direction === 'Outgoing' ? 'Nathan' : 'Someone');
-    items.push({
-      id: r.rid, convId: r.cid, sentAt: r.sentAt, sender: who,
-      body: `[📞 ${kind} call · ${status}${durMin != null ? ` · ${durMin}m` : ''}]`,
-      src: ringer || null, type: 'call',
-    });
+    items.push({ id: r.rid, convId: r.cid, sentAt: r.sentAt, sender: who, body, src: ringer || null, type: 'call' });
   }
   return items;
 }
