@@ -125,6 +125,46 @@ function sweepBound(cursors, key, now, ranAt, deep) {
 
 // Sweep one contact's sources. Returns { seen, inserted, collisions }.
 const NOTHING = { seen: 0, inserted: 0, collisions: [] };
+
+// Voice/video call EVENTS. Signal records them as type='call-history' messages
+// (carrying the conversationId + sent_at + a callId) with the details in a separate
+// `callsHistory` table. We surface them as archive rows so the merge can see WHY a
+// thread went quiet — e.g. the two of you moved to a call. Body renders the kind /
+// direction-derived caller / outcome / duration; no message content is involved.
+// Returns mirrorMessages items (caller fills in conversation + slug).
+function callItems(sdb, convIds, bound, nameFor) {
+  if (!convIds.length) return [];
+  const ph = convIds.map(() => '?').join(',');
+  let rows;
+  try {
+    rows = sdb.prepare(`
+      SELECT rowid AS rid, conversationId AS cid, sent_at AS sentAt, sourceServiceId AS src, json AS j
+      FROM messages
+      WHERE type = 'call-history' AND conversationId IN (${ph}) AND ${bound.clause}
+      ORDER BY rowid ASC`).all([...convIds, ...bound.params]);
+  } catch { return []; } // Signal build without call-history rows
+  if (!rows.length) return [];
+  const detail = sdb.prepare('SELECT type, direction, status, timestamp, endedTimestamp, ringerId FROM callsHistory WHERE callId = ?');
+  const items = [];
+  for (const r of rows) {
+    let callId = null;
+    try { callId = JSON.parse(r.j || '{}').callId; } catch { /* no id */ }
+    let c = null;
+    if (callId) { try { c = detail.get([callId]); } catch { /* no callsHistory table */ } }
+    const kind = c && c.type === 'Video' ? 'video' : c && c.type === 'Group' ? 'group' : 'voice';
+    const status = c ? String(c.status).replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase() : 'call';
+    const durMin = c && c.status === 'Accepted' && c.endedTimestamp && c.timestamp
+      ? Math.max(1, Math.round((c.endedTimestamp - c.timestamp) / 60000)) : null;
+    const ringer = c ? c.ringerId : r.src;
+    const who = (ringer && nameFor(ringer)) || (c && c.direction === 'Outgoing' ? 'Nathan' : 'Someone');
+    items.push({
+      id: r.rid, convId: r.cid, sentAt: r.sentAt, sender: who,
+      body: `[📞 ${kind} call · ${status}${durMin != null ? ` · ${durMin}m` : ''}]`,
+      src: ringer || null, type: 'call',
+    });
+  }
+  return items;
+}
 function sweepContact(cdb, sdb, slug, cursors, now, ranAt, nicks, deep) {
   const rel = `data/contacts/${slug}.md`;
   const row = cdb.prepare('SELECT signal_id, name FROM contacts WHERE file_path = ?').get(rel);
@@ -142,6 +182,7 @@ function sweepContact(cdb, sdb, slug, cursors, now, ranAt, nicks, deep) {
   const first = display.split(' ')[0];
   const speaker = (m) => {
     if (m.src === MY_SERVICE_ID) return 'Nathan';
+    if (m.src === BOT_SERVICE_ID) return 'Janet';
     if (m.src === row.signal_id) return first;
     return m.type === 'outgoing' ? 'Nathan' : first;
   };
@@ -152,8 +193,8 @@ function sweepContact(cdb, sdb, slug, cursors, now, ranAt, nicks, deep) {
   const att = loadAttachments(sdb, msgs.filter((m) => m.hasAttachments).map((m) => m.mid));
   const prev = loadPreviews(sdb, mids);
   const quo = loadQuotes(sdb, mids);
-  const nameFor = (sid) => (sid === MY_SERVICE_ID ? 'Nathan' : (sid === row.signal_id ? first : null));
-  const stats = mirrorMessages(cdb, msgs.map((m) => ({
+  const nameFor = (sid) => (sid === MY_SERVICE_ID ? 'Nathan' : (sid === BOT_SERVICE_ID ? 'Janet' : (sid === row.signal_id ? first : null)));
+  const items = msgs.map((m) => ({
     id: m.rid,
     convId: m.cid,
     conversation: sources.labels[m.cid] || `DM with ${display}`,
@@ -170,8 +211,17 @@ function sweepContact(cdb, sdb, slug, cursors, now, ranAt, nicks, deep) {
     type: m.type,
     // Lets the archive upgrade a row stored before these enrichments existed.
     enriched: Boolean(m.hasAttachments) || prev.has(m.mid) || quo.has(m.mid),
-  })));
-  cursors[key] = msgs.reduce((mx, m) => Math.max(mx, m.rid), cursors[key] || 0);
+  }));
+  // Call events across all this contact's conversations (DM + groups).
+  const convIds = [...sources.dmConvIds, ...sources.biGroupConvIds, ...sources.multiGroupConvIds];
+  const calls = callItems(sdb, convIds, bound, nameFor).map((it) => ({
+    ...it, slug, conversation: sources.labels[it.convId] || `DM with ${display}`,
+  }));
+  const stats = mirrorMessages(cdb, items.concat(calls));
+  let mx = cursors[key] || 0;
+  for (const m of msgs) if (m.rid > mx) mx = m.rid;
+  for (const c of calls) if (c.id > mx) mx = c.id;
+  cursors[key] = mx;
   return stats;
 }
 
@@ -201,7 +251,7 @@ function sweepGroup(cdb, sdb, group, cursors, now, ranAt, nameMap, deep) {
   const quo = loadQuotes(sdb, mids);
   // In a group the quoted author can be anyone, so resolve against the full map.
   const nameFor = (sid) => (sid === MY_SERVICE_ID ? 'Nathan' : nameMap.get(sid) || null);
-  const stats = mirrorMessages(cdb, msgs.map((m) => ({
+  const items = msgs.map((m) => ({
     id: m.rid,
     convId: conv.id,
     conversation: group.name,
@@ -217,8 +267,13 @@ function sweepGroup(cdb, sdb, group, cursors, now, ranAt, nameMap, deep) {
     src: m.src,
     type: m.type,
     enriched: Boolean(m.hasAttachments) || prev.has(m.mid) || quo.has(m.mid),
-  })));
-  cursors[key] = msgs.reduce((mx, m) => Math.max(mx, m.rid), cursors[key] || 0);
+  }));
+  const calls = callItems(sdb, [conv.id], bound, nameFor).map((it) => ({ ...it, slug: null, conversation: group.name }));
+  const stats = mirrorMessages(cdb, items.concat(calls));
+  let mx = cursors[key] || 0;
+  for (const m of msgs) if (m.rid > mx) mx = m.rid;
+  for (const c of calls) if (c.id > mx) mx = c.id;
+  cursors[key] = mx;
   return stats;
 }
 

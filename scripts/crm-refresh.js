@@ -51,7 +51,7 @@ const { resolveSources, buildArchiveQuery } = require('../lib/sources');
 const { fmtLocal, planChunks, lastCompleteWeekStart, gateBuckets } = require('../lib/weeks');
 const { redact } = require('../lib/redact');
 const {
-  TRACKED, NICKNAMES, REFRESH_DIR,
+  TRACKED, NICKNAMES, REFRESH_DIR, BOT_SERVICE_ID,
   INGEST_N, INGEST_FLOOR_DAYS, INGEST_CEILING_DAYS,
 } = require('../lib/config');
 
@@ -196,7 +196,9 @@ function writeChunkLedger(plan, chunk, chunkIndex, chunkTotal, dir = REFRESH_DIR
   const lines = chunk.msgs.map((m) => {
     const label = plan.sources.labels[m.cid]; // set only for group conversations
     const ctx = label ? `(${label}) ` : '';
-    return `[${fmtLocal(m.sent_at)}] ⟨m${m.rid}⟩ ${ctx}${m.sender}: ${redact(m.body)}`;
+    // Tag the old bot so the merge reads its lines as automated, not a person.
+    const sender = m.src === BOT_SERVICE_ID ? `${m.sender} (bot)` : m.sender;
+    return `[${fmtLocal(m.sent_at)}] ⟨m${m.rid}⟩ ${ctx}${sender}: ${redact(m.body)}`;
   });
 
   const srcBits = [];
