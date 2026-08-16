@@ -75,13 +75,18 @@ node scripts/crm-daily.js --only <slug> # one contact: merge + Timeline; skips a
 node scripts/crm-daily.js --dry-run     # plan only; never calls the model or writes
 ```
 
-### `crm-refresh.js` — chunk planner / ledger writer (no model)
-Turns "messages past a contact's cursor" into **one chunk per active week** and
-writes one chunk's ledger at a time. A library first (`crm-daily` drives it
-in-process); running it directly just prints the plan. Ingest == backfill: a
-contact with no cursor starts from message 0 (their whole history), so a backfill
-is byte-identical to playing forward. Empty weeks are skipped. (The eval harness
-can still pass an explicit `backfillDays` window; `CRM_BACKFILL_DAYS` forces one.)
+### `crm-refresh.js` — gated chunk planner / ledger writer (no model)
+Turns "messages past a contact's cursor" into **gated merge buckets** and writes one
+chunk's ledger at a time. The gate (`lib/weeks.js` `gateBuckets`) releases a merge
+only once a contact's backlog crosses `INGEST_N` messages after `INGEST_FLOOR_DAYS`,
+or `INGEST_CEILING_DAYS` forces it — so quiet contacts are not merged every active
+week; each released bucket is then week/token-batched by `planChunks`. A library
+first (`crm-daily` drives it in-process); running it directly just prints the plan.
+**Ingest == backfill** (see `AGENTS.md`): the gate is a pure function of
+`(archive, cursor)`, so a from-scratch backfill emits the byte-identical bucket
+sequence as playing forward day by day. A contact with no cursor starts from message
+0 (their whole history). (The eval harness can still pass an explicit `backfillDays`
+window; `CRM_BACKFILL_DAYS` forces one.)
 ```
 node scripts/crm-refresh.js                 # print the chunk plan for everyone
 node scripts/crm-refresh.js --only <slug>   # ...for one contact

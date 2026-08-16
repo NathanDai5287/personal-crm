@@ -48,7 +48,7 @@ const path = require('path');
 const { openSignalDb, openCrmDb } = require('../lib/signal-db');
 const { runSweep } = require('./crm-archive');
 const { resolveSources, buildArchiveQuery } = require('../lib/sources');
-const { fmtLocal, planChunks, lastCompleteWeekStart } = require('../lib/weeks');
+const { fmtLocal, planChunks, lastCompleteWeekStart, gateBuckets } = require('../lib/weeks');
 const { redact } = require('../lib/redact');
 const {
   TRACKED, NICKNAMES, REFRESH_STATE, REFRESH_DIR,
@@ -88,46 +88,10 @@ function loadNicknames() {
 
 // ---- planning ------------------------------------------------------------------
 
-// GATED BUCKETING — the ingest decision, living in the planner (not the cron).
-// Walk the backlog on a per-day effective-date grid; accumulate; emit a merge
-// bucket only when the pile crosses N (after the floor has elapsed) or the ceiling
-// forces it. FIRE-BEFORE-ADD: a bucket only ever contains messages from STRICTLY
-// earlier days, so nothing merges the day it lands and the floor truly bounds
-// cadence — which is precisely what makes a one-shot backfill emit the same
-// buckets as day-by-day live runs (it's a pure function of backlog + last-merge +
-// end date). Returns only the FIRED buckets (arrays of messages); the trailing
-// un-triggered tail is omitted, so the orchestrator never merges it and the
-// per-chunk cursor never advances past it — it's simply retried next run.
-//   lastMergeMs: sent_at of the cursor message (when we last merged), or null for
-//     a fresh contact, in which case the age clock starts at the first message.
-//   endMs: the effective "now" the walk runs up to (last complete week), so the
-//     ceiling can fire on an aged backlog even in weeks with no new messages.
-function gateBuckets(msgs, { N, floorDays, ceilingDays, lastMergeMs, endMs }) {
-  if (!msgs.length) return [];
-  const dayIdx = (ms) => Math.floor(ms / DAY);
-  const byDay = new Map();
-  for (const m of msgs) {
-    const d = dayIdx(m.sent_at);
-    let arr = byDay.get(d);
-    if (!arr) { arr = []; byDay.set(d, arr); }
-    arr.push(m);
-  }
-  const firstDay = Math.min(...byDay.keys());
-  const endDay = Math.max(dayIdx(endMs), firstDay);
-  let last = lastMergeMs != null ? dayIdx(lastMergeMs) : firstDay;
-  const buckets = [];
-  let bl = [];
-  for (let i = firstDay; i <= endDay; i += 1) {
-    if (bl.length) {
-      const age = i - last;
-      const fire = age >= ceilingDays || (age >= floorDays && bl.length >= N);
-      if (fire) { buckets.push(bl); last = i; bl = []; }
-    }
-    const day = byDay.get(i);
-    if (day) bl = bl.concat(day);
-  }
-  return buckets;
-}
+// gateBuckets — the ingest decision (BACKFILL == PLAY-IT-FORWARD; see AGENTS.md) —
+// lives in lib/weeks.js alongside planChunks and dayNumber, so the cost estimator
+// (lib/cost.js) can replay the identical gate instead of guessing. Imported above
+// and re-exported below for callers that reach it through the planner.
 
 // Plan one contact: resolve their sources, pull everything past their cursor out
 // of the ARCHIVE (never Signal — see crm-archive.js), and gate it into merge
@@ -153,9 +117,11 @@ function planContact(cdb, sdb, slug, opts) {
   const lowClause = useWindow ? 'sent_at >= ?' : 'id > ?';
   const lowParam = useWindow ? now - backfillDays * DAY : cursorBefore;
   const cutoff = lastCompleteWeekStart(now);
-  const bound = includePartialWeek
-    ? { clause: lowClause, params: [lowParam] }
-    : { clause: `${lowClause} AND sent_at < ?`, params: [lowParam, cutoff] };
+  // No upper sent_at clamp here: gateBuckets defers the current incomplete week
+  // itself (via endMs=cutoff). Clamping the query instead would punch a rowid hole
+  // below the cursor for any late-synced row, which the backfill==play-forward
+  // invariant forbids — a fired bucket must stay a rowid-contiguous prefix.
+  const bound = { clause: lowClause, params: [lowParam] };
 
   const q = buildArchiveQuery(sources, row.signal_id, bound);
   if (!q) return null;
@@ -175,8 +141,13 @@ function planContact(cdb, sdb, slug, opts) {
   } else {
     let lastMergeMs = null;
     if (cursorBefore) {
-      const r = cdb.prepare('SELECT sent_at FROM messages WHERE id = ?').get(cursorBefore);
-      if (r) lastMergeMs = r.sent_at;
+      // Max sent_at over everything already merged (id <= cursor) — NOT the cursor
+      // row's own sent_at, which a late-synced sibling can predate. This is exactly
+      // the clock gateBuckets left as `last`, so a resumed run reproduces the
+      // one-shot backfill (see the BACKFILL == PLAY-IT-FORWARD note above).
+      const mq = buildArchiveQuery(sources, row.signal_id, { clause: 'id <= ?', param: cursorBefore }, { select: 'MAX(sent_at) AS mx' });
+      const r = mq && cdb.prepare(mq.sql).get(...mq.params);
+      if (r && r.mx != null) lastMergeMs = r.mx;
     }
     bucketMsgs = gateBuckets(msgs, {
       N: INGEST_N, floorDays: INGEST_FLOOR_DAYS, ceilingDays: INGEST_CEILING_DAYS,

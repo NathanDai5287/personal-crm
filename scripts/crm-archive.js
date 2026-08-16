@@ -39,6 +39,7 @@ const {
 } = require('../lib/attachments');
 const {
   TRACKED, TRACKED_GROUPS, NICKNAMES, ARCHIVE_STATE, MY_SERVICE_ID, BOT_SERVICE_ID,
+  ARCHIVE_ID_OFFSET,
 } = require('../lib/config');
 
 const DAY = 86_400_000;
@@ -227,12 +228,20 @@ function sweepGroup(cdb, sdb, group, cursors, now, ranAt, nameMap, deep) {
 function backfillMeta(cdb, sdb) {
   const nulls = cdb.prepare('SELECT id FROM messages WHERE type IS NULL').all();
   if (nulls.length === 0) return 0;
-  const look = sdb.prepare('SELECT type, sourceServiceId AS src FROM messages WHERE rowid = ?');
-  const set = cdb.prepare('UPDATE messages SET src = ?, type = ? WHERE id = ?');
   let n = 0;
-  for (const { id } of nulls) {
-    const r = look.get([id]); // vendored sqlcipher driver: params must be an array
-    if (r) { set.run(r.src, r.type, id); n++; }
+  // On a SECONDARY device (offset set) the archive id is NOT this machine's Signal
+  // rowid — copied rows keep the origin device's rowid, self-swept rows are
+  // rowid+offset — so a `WHERE rowid = id` lookup here would read an unrelated
+  // local message and stamp its src/type onto the wrong archive row. Skip the
+  // Signal lookup entirely there and rely on the device-independent sender-based
+  // inference below (a primary device, offset 0, keeps the exact lookup).
+  if (!ARCHIVE_ID_OFFSET) {
+    const look = sdb.prepare('SELECT type, sourceServiceId AS src FROM messages WHERE rowid = ?');
+    const set = cdb.prepare('UPDATE messages SET src = ?, type = ? WHERE id = ?');
+    for (const { id } of nulls) {
+      const r = look.get([id]); // vendored sqlcipher driver: params must be an array
+      if (r) { set.run(r.src, r.type, id); n++; }
+    }
   }
   // Rows whose Signal original is ALREADY GONE (deleted / disappeared) can't
   // be looked up — infer direction from the stored sender label so source-rule

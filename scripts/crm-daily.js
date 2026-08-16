@@ -49,7 +49,7 @@ const {
 const { mergeContact } = require('./crm-merge');
 const { planAll, writeChunkLedger, chunkSummary } = require('./crm-refresh');
 const { validateCitations } = require('../lib/archive');
-const { mergeCallUsd } = require('../lib/cost');
+const { mergeCallUsd, recordCostSample, fitCostModel } = require('../lib/cost');
 const { openCrmDb, openSignalDb } = require('../lib/signal-db');
 
 // REJECT UNKNOWN FLAGS BEFORE ANYTHING ELSE. Both flags here fail dangerously when
@@ -425,7 +425,12 @@ function main() {
             detail.cursorAfter = chunk.ridEnd;
             const cc = mergeCallUsd(MERGE_MODEL, { ledgerTokens: chunk.tokens });
             if (cc == null) mergeCostKnown = false; else mergeCostUsd += cc;
-            if (result.costUsd != null) { actualCostUsd += result.costUsd; actualCostSeen = true; }
+            if (result.costUsd != null) {
+              actualCostUsd += result.costUsd; actualCostSeen = true;
+              // Feed the real (input base, billed USD) pair to the self-calibrating
+              // cost model so future estimates track this model's actual behaviour.
+              recordCostSample(MERGE_MODEL, { ledgerTokens: chunk.tokens, usd: result.costUsd });
+            }
             logLines.push(`[4] merge ${p.slug} ${i + 1}/${total} (${chunk.label}, ${chunk.count} msgs): ok, cursor -> ${chunk.ridEnd}`);
 
             // PROVENANCE CHECK (non-fatal): every ⟨m…⟩ id the model cited must
@@ -472,6 +477,13 @@ function main() {
     }
   } else if (!fatal) {
     logLines.push('[4] merge: nothing to merge (no unmerged messages)');
+  }
+
+  // Refit the self-calibrating cost model from the (input base, real USD) samples
+  // this run just recorded, so the next estimate reflects this model's actual cost.
+  if (!fatal && !DRY_RUN && actualCostSeen) {
+    try { fitCostModel(); logLines.push('[4b] cost model refit from real merge samples'); }
+    catch (e) { warnings.push(`cost refit failed (non-fatal): ${e.message}`); }
   }
 
   // ---- 5. timeline (compact) -----------------------------------------------------

@@ -22,6 +22,34 @@ ledgers → an LLM merge writes per-person markdown in `data/contacts/<slug>.md`
 - `scripts/crm-compact.js` → `prompts/compact.md` (no tools, stdin)
 - `scripts/crm-tasks.js` → `prompts/tasks.md` (no tools, stdin, JSON out → `tasks` table)
 
+## BACKFILL == PLAY-IT-FORWARD (governing design principle)
+
+**Ingest is a pure function of `(archive contents, per-contact cursor)` — never of
+when, or how often, the cron runs.** One from-scratch pass over the whole history
+must emit the *byte-identical* sequence of merges that running the job day-by-day
+from the start would have. There is no separate "backfill mode": a backfill is the
+same code with an old/absent cursor, and the cron is dumb — it only fires; every
+cadence decision lives in the planner (`lib/weeks.js` `gateBuckets`,
+`scripts/crm-refresh.js` `planContact`). This is what makes the pipeline
+reproducible, lets a wiped profile rebuild exactly, and makes a backfill cost the
+same as having run it live. If you reach for `Date.now()`, "is this the first run?",
+or wall-clock cadence to decide *what* to merge — stop, that breaks it.
+
+Three properties uphold it; preserve all three if you touch the gate:
+- **Fold the backlog in rowid order, not by calendar day** — a released bucket is a
+  rowid-*contiguous* prefix, the only thing the single rowid cursor can represent
+  losslessly. Day-grouping strands late-synced rows (old `sent_at`, high rowid;
+  ~2% of traffic) below the cursor and loses them.
+- **Derive the age clock from the cursor** (`MAX(sent_at) WHERE id <= cursor`), never
+  from the fire day or the cursor row's own `sent_at`.
+- **Fire-before-add** — release the pile *without* the row that trips the gate, so a
+  bucket always ends on a whole day before its trigger.
+
+If you change `gateBuckets`, re-prove it: replay real `(rowid, sent_at)` series as
+one pass vs. a weekly loop and assert identical buckets + no row stranded below the
+final cursor. All day math goes through `lib/weeks.js` `dayNumber` (04:00-Pacific,
+DST-safe, absolute), never raw UTC.
+
 ## Things that will surprise you
 
 - **`node --check <file>` to validate syntax — never `require`.** Scripts here have
