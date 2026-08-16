@@ -18,13 +18,13 @@ const crypto = require('crypto');
 const { spawn, execFileSync } = require('child_process');
 const {
   ROOT, CONTACTS_DIR, WEB_PORT, WEB_USER, WEB_PASSWORD_FILE,
-  TRACKED, REFRESH_STATE, LOGS_DIR, GITDIR, MERGE_MODEL, COMPACT_MODEL,
+  TRACKED, LOGS_DIR, GITDIR, MERGE_MODEL, COMPACT_MODEL,
 } = require('../lib/config');
 const { openCrmDb, openSignalDb } = require('../lib/signal-db');
 const { estIngestFromRows, isFree, fmtUsd } = require('../lib/cost');
 const { dateKey: ptDateKey, fmtLocal: ptLocal, weekStart, nextWeekStart, nextPacificDaily } = require('../lib/weeks');
 const { resolveSources, buildMessageQuery, buildArchiveQuery } = require('../lib/sources');
-const { validateCitations } = require('../lib/archive');
+const { validateCitations, ensureMessagesTable } = require('../lib/archive');
 const TASKS = require('../lib/tasks');
 const { STYLE: BINDERY_CSS, FONTS, FONTS_DIR, THEME_INIT, THEME_JS } = require('../lib/view/shell');
 const { render, raw } = require('../lib/view/h');
@@ -547,26 +547,24 @@ function tasksPage() {
 
 // Real contacts mapped to the shape lib/view's people/admin pages expect. Facts
 // are the top talking points, rendered to HTML so their ⟨m…⟩ slips survive.
-// `waiting` is archived-but-not-yet-ingested (id past the merge cursor); a
-// contact with no cursor has their whole history waiting (a backfill).
+// `waiting` is archived-but-not-yet-merged: the contact's own messages not in the
+// `merged` ledger. (Board approximation — counts their contact_slug rows, not the
+// full-group context the merge also reads; exact reachability lives in the planner.)
 function contactList() {
   const cdb = openCrmDb();
   try {
-    const cursors = loadCursors();
+    ensureMessagesTable(cdb); // make sure the `merged` ledger table exists to join
     const held = new Map();
     for (const r of cdb.prepare("SELECT contact_slug slug, COUNT(*) n FROM messages WHERE contact_slug IS NOT NULL GROUP BY contact_slug").all()) {
       held.set(r.slug, r.n);
     }
-    const past = cdb.prepare('SELECT COUNT(*) n FROM messages WHERE contact_slug = ? AND id > ?');
+    const pending = cdb.prepare('SELECT COUNT(*) n FROM messages WHERE contact_slug = ? AND id NOT IN (SELECT message_id FROM merged WHERE slug = ?)');
     return listContacts().map((c) => {
-      const hasCursor = Object.prototype.hasOwnProperty.call(cursors, c.slug);
-      const cursor = hasCursor ? (cursors[c.slug] || 0) : null;
-      // No cursor = the whole history is waiting, which `held` already counted.
-      const waiting = hasCursor ? past.get(c.slug, cursor).n : (held.get(c.slug) || 0);
+      const waiting = pending.get(c.slug, c.slug).n;
       const facts = c.talkingPoints.slice(0, 3).map((tp) => mdInline((tp.date ? `**${tp.date}** ` : '') + tp.text));
       return {
         slug: c.slug, name: c.name, rel: c.relationship, last: c.last,
-        held: held.get(c.slug) || 0, waiting, cursor, facts,
+        held: held.get(c.slug) || 0, waiting, facts,
         stamp: waiting > 0 ? `${waiting} waiting` : null, stampBlue: true,
       };
     });
@@ -1469,13 +1467,6 @@ function applyManualEdit(slug, payload) {
 function loadTrackedSlugs() {
   try { return JSON.parse(fs.readFileSync(TRACKED, 'utf8')).slugs || []; } catch { return []; }
 }
-function loadCursors() {
-  try {
-    const raw = JSON.parse(fs.readFileSync(REFRESH_STATE, 'utf8'));
-    if (raw && raw.cursors && typeof raw.cursors === 'object') return raw.cursors;
-  } catch { /* no state yet */ }
-  return {};
-}
 function loadRuns() {
   let files = [];
   try { files = fs.readdirSync(RUNS_DIR).filter((f) => f.endsWith('.json')); } catch { return []; }
@@ -1581,23 +1572,22 @@ function dial(label, cadence, sinceMs, intervalMs, job, sched) {
 // each roster row; estCostUsd is null when the model has no known price.
 //
 // Cached per contact: recomputing pulled every waiting row on every /admin
-// load — seconds once a few backfills are pending. The estimate only moves
-// when a sweep or ingest lands, i.e. when (cursor, waiting) moves, so that
-// pair is the cache key.
-const pendingCostCache = new Map(); // slug -> { cursor, waiting, est }
+// load — seconds once a few backfills are pending. The estimate only moves when a
+// sweep or merge lands, i.e. when `waiting` moves, so that is the cache key.
+const pendingCostCache = new Map(); // slug -> { waiting, est }
 function attachPendingCosts(roster) {
   const waiting = roster.filter((x) => x.waiting > 0);
   const stale = waiting.filter((x) => {
     const c = pendingCostCache.get(x.slug);
-    return !c || c.cursor !== x.cursor || c.waiting !== x.waiting;
+    return !c || c.waiting !== x.waiting;
   });
   if (stale.length) {
     const cdb = openCrmDb();
     try {
-      const q = cdb.prepare('SELECT sent_at, length(body) AS blen FROM messages WHERE contact_slug = ? AND id > ? ORDER BY id');
+      const q = cdb.prepare('SELECT sent_at, length(body) AS blen FROM messages WHERE contact_slug = ? AND id NOT IN (SELECT message_id FROM merged WHERE slug = ?) ORDER BY sent_at');
       for (const x of stale) {
-        const rows = q.all(x.slug, x.cursor || 0);
-        pendingCostCache.set(x.slug, { cursor: x.cursor, waiting: x.waiting, est: estIngestFromRows(MERGE_MODEL, COMPACT_MODEL, rows) });
+        const rows = q.all(x.slug, x.slug);
+        pendingCostCache.set(x.slug, { waiting: x.waiting, est: estIngestFromRows(MERGE_MODEL, COMPACT_MODEL, rows) });
       }
     } finally {
       cdb.close();

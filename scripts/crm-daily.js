@@ -48,7 +48,7 @@ const {
 } = require('../lib/config');
 const { mergeContact } = require('./crm-merge');
 const { planAll, writeChunkLedger, chunkSummary } = require('./crm-refresh');
-const { validateCitations } = require('../lib/archive');
+const { validateCitations, markMerged } = require('../lib/archive');
 const { mergeCallUsd, recordCostSample, fitCostModel } = require('../lib/cost');
 const { openCrmDb, openSignalDb } = require('../lib/signal-db');
 
@@ -316,8 +316,7 @@ function main() {
       totalChunks = plans.reduce((n, p) => n + p.chunks.length, 0);
       const note = plans.length === 0
         ? 'no unmerged messages for any tracked contact'
-        : plans.map((p) => `${p.slug}: ${p.total} msgs / ${p.chunks.length} chunk(s)` +
-            `${p.hasCursor ? '' : ' [backfill]'}`).join('\n');
+        : plans.map((p) => `${p.slug}: ${p.total} unmerged msg(s) / ${p.chunks.length} chunk(s)`).join('\n');
       steps.push({ name: 'refresh (plan)', ok: true, ms: Date.now() - t0, note });
       logLines.push(`[3] refresh: ok — ${plans.length} contact(s), ${totalChunks} chunk(s)`);
       logLines.push(note);
@@ -362,14 +361,12 @@ function main() {
   if (!fatal && plans.length > 0) {
     if (DRY_RUN) {
       logLines.push('[4] merge PLANNING (--dry-run, pi not invoked):');
-      const state = loadRefreshState();
       for (const p of plans) {
-        logLines.push(`  ${p.slug} (${p.name}): ${p.total} msgs, ${p.chunks.length} chunk(s), ` +
-          `cursor ${state.cursors[p.slug] ?? '(none — backfill)'}`);
+        logLines.push(`  ${p.slug} (${p.name}): ${p.total} unmerged msg(s), ${p.chunks.length} chunk(s)`);
         p.chunks.forEach((c, i) => {
           logLines.push(`    ${i + 1}/${p.chunks.length}  ${c.label}  ${c.count} msgs  ` +
             `~${Math.round(c.tokens / 1000)}k tok  m${c.ridStart}–m${c.ridEnd}` +
-            `${c.partial ? '  [day-split]' : ''}  -> cursor ${c.ridEnd}`);
+            `${c.partial ? '  [day-split]' : ''}`);
         });
         // Validate argv construction without dumping the whole system prompt.
         const plan = mergeContact(p.slug, { dryRun: true, quiet: true });
@@ -381,6 +378,7 @@ function main() {
       }
     } else {
       const state = loadRefreshState();
+      const mergeDb = openCrmDb(); // for recording merges in the `merged` ledger
       for (const p of plans) {
         const total = p.chunks.length;
         let contactFailed = false;
@@ -415,10 +413,11 @@ function main() {
           detail.ms = Date.now() - t0;
 
           if (result.ok) {
-            // Cursor advances to this chunk's last message id — NOT the
-            // contact's overall max — so an interrupted backfill resumes at the
-            // right week instead of skipping the chunks it never merged.
-            state.cursors[p.slug] = chunk.ridEnd;
+            // Record THIS chunk's messages in the `merged` ledger only now that its
+            // merge succeeded — the crash-safe frontier (an interrupted run re-merges
+            // this chunk rather than losing it, and never skips the chunks it never
+            // reached). Replaces the old rowid cursor; see crm-refresh header.
+            markMerged(mergeDb, p.slug, chunk.msgs.map((m) => m.rid), Date.now());
             state.ranAt = Date.now();
             atomicWriteJson(REFRESH_STATE, state);
             detail.ok = true;
@@ -474,6 +473,7 @@ function main() {
         }
         if (!contactFailed) merged.push(p.slug);
       }
+      mergeDb.close();
     }
   } else if (!fatal) {
     logLines.push('[4] merge: nothing to merge (no unmerged messages)');

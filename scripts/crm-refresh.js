@@ -22,21 +22,21 @@
 // one-shot backfill emits the SAME buckets as day-by-day live runs — the cron
 // only has to fire, it makes no decisions. See gateBuckets().
 //
-// PER-CONTACT ROWID CURSOR: the cursor is a crm.db archive rowid watermark, NOT
-// a timestamp. Signal's `sent_at` is set by the (possibly clock-skewed) sender
-// and linked-device sync can insert older rows late, so a timestamp watermark
-// can silently skip messages. rowid only moves forward as rows are inserted
-// locally, so a per-contact "highest rowid merged" cursor can never skip a row
-// that lands after we last looked. One cursor per contact covers every source
-// (their DM plus any groups) at once.
+// PER-CONTACT MERGE LEDGER: the merge frontier is the `merged` table in crm.db
+// (lib/archive.js) — the explicit set of (contact, message) pairs already merged —
+// NOT a rowid cursor. That lets ingest read the backlog OLDEST-FIRST (profiles build
+// chronologically) while staying lossless: a message that linked-device sync inserts
+// late with an OLD sent_at is simply "not in the merged set", so it is picked up in
+// its date place instead of being skipped by an advancing watermark. One ledger per
+// contact covers every source (their DM plus any groups) at once.
 //
 // DM + GROUP CHATS: "messages with a person" is not just their 1:1 DM — see
 // lib/sources.js, which owns those rules and is shared with compaction and the
 // web status board so all three agree.
 //
-// CRASH SAFETY: this file never writes REFRESH_STATE. The orchestrator advances
-// a contact's cursor only AFTER that chunk's merge has actually succeeded, so a
-// crash mid-run re-merges the same chunk rather than losing it.
+// CRASH SAFETY: crm-daily records a chunk's messages in the `merged` table only
+// AFTER that chunk's merge has actually succeeded, so a crash mid-run re-merges the
+// same chunk rather than losing it.
 //
 // Usage:
 //   node scripts/crm-refresh.js                 # print the chunk plan for everyone
@@ -51,32 +51,21 @@ const { resolveSources, buildArchiveQuery } = require('../lib/sources');
 const { fmtLocal, planChunks, lastCompleteWeekStart, gateBuckets } = require('../lib/weeks');
 const { redact } = require('../lib/redact');
 const {
-  TRACKED, NICKNAMES, REFRESH_STATE, REFRESH_DIR,
+  TRACKED, NICKNAMES, REFRESH_DIR,
   INGEST_N, INGEST_FLOOR_DAYS, INGEST_CEILING_DAYS,
 } = require('../lib/config');
 
 const DAY = 86_400_000;
-// INGEST == BACKFILL. Ingest processes everything past a contact's cursor, week
-// by week; a "backfill" is just that with an old (or absent) cursor. A contact
-// with NO cursor therefore starts from the very beginning (message id > 0), which
-// makes a fresh backfill byte-identical to having played the history forward.
+// INGEST == BACKFILL. Ingest processes everything NOT YET MERGED for a contact,
+// oldest-first; a "backfill" is just that on a contact with an empty merge ledger,
+// so a fresh backfill is byte-identical to having played the history forward. The
+// frontier is the `merged` table (lib/archive.js), not a cursor — see planContact.
 //
 // The one exception is the eval harness, which passes an explicit backfillDays
-// window (evals/cases.js) to hold out a slice of history: when a finite
-// backfillDays is supplied, a no-cursor contact starts `sent_at >= now - N days`;
-// when it is null (the production default) a no-cursor contact starts from 0.
-// CRM_BACKFILL_DAYS still forces a window by hand if one is ever wanted.
+// window (evals/cases.js) to hold out a slice of history: a finite backfillDays
+// restricts the unmerged set to `sent_at >= now - N days`. CRM_BACKFILL_DAYS forces
+// a window by hand if one is ever wanted.
 const MERGE_BACKFILL_DAYS = process.env.CRM_BACKFILL_DAYS ? Number(process.env.CRM_BACKFILL_DAYS) : null;
-
-function loadCursors() {
-  let raw = null;
-  try { raw = JSON.parse(fs.readFileSync(REFRESH_STATE, 'utf8')); } catch { /* no state file yet */ }
-  if (!raw || typeof raw !== 'object') return {};
-  if (raw.cursors && typeof raw.cursors === 'object') return raw.cursors;
-  // Old shape ({ lastRefresh, ranAt }): treat as "no per-contact cursors yet"
-  // so every tracked contact backfills exactly once.
-  return {};
-}
 
 function loadNicknames() {
   try {
@@ -93,62 +82,53 @@ function loadNicknames() {
 // (lib/cost.js) can replay the identical gate instead of guessing. Imported above
 // and re-exported below for callers that reach it through the planner.
 
-// Plan one contact: resolve their sources, pull everything past their cursor out
-// of the ARCHIVE (never Signal — see crm-archive.js), and gate it into merge
-// buckets (see gateBuckets). Returns null if the contact has no sources, nothing
-// pending, or nothing the gate has released yet.
+// Plan one contact: resolve their sources, pull everything NOT YET MERGED for them
+// out of the ARCHIVE (never Signal — see crm-archive.js) OLDEST-FIRST, and gate it
+// into merge buckets (see lib/weeks gateBuckets). Returns null if the contact has no
+// sources, nothing unmerged, or nothing the gate has released yet.
+//
+// CHRONOLOGICAL + LOSSLESS: the merge frontier is the explicit `merged` table, not a
+// rowid watermark, so the backlog is read in sent_at order (profiles build up in the
+// order the relationship actually happened) and a late-synced OLD message is picked
+// up in its date place instead of being stranded below an advancing cursor. See
+// AGENTS.md (BACKFILL == PLAY-IT-FORWARD).
 function planContact(cdb, sdb, slug, opts) {
-  const { cursors, nicks, now, includePartialWeek, backfillDays } = opts;
+  const { nicks, now, includePartialWeek, backfillDays } = opts;
   const rel = `data/contacts/${slug}.md`;
   const row = cdb.prepare('SELECT signal_id, name FROM contacts WHERE file_path = ?').get(rel);
   if (!row || !row.signal_id) return null;
 
   const sources = resolveSources(sdb, row.signal_id);
-  const hasCursor = Object.prototype.hasOwnProperty.call(cursors, slug);
-  // No cursor => start from 0 (the whole archive), UNLESS an explicit backfillDays
-  // window is passed (the eval harness). This is what makes ingest == backfill.
-  const cursorBefore = hasCursor ? (cursors[slug] || 0) : 0;
-  const useWindow = !hasCursor && backfillDays != null;
 
-  // Lower bound: past the cursor (from 0 for a fresh contact), or an explicit
-  // window only when the eval harness asks. Upper bound: scheduled runs clamp to
-  // the last COMPLETE week so no merge sees a partial one; an on-demand
-  // single-contact run passes includePartialWeek to include today's week too.
-  const lowClause = useWindow ? 'sent_at >= ?' : 'id > ?';
-  const lowParam = useWindow ? now - backfillDays * DAY : cursorBefore;
-  const cutoff = lastCompleteWeekStart(now);
-  // No upper sent_at clamp here: gateBuckets defers the current incomplete week
-  // itself (via endMs=cutoff). Clamping the query instead would punch a rowid hole
-  // below the cursor for any late-synced row, which the backfill==play-forward
-  // invariant forbids — a fired bucket must stay a rowid-contiguous prefix.
-  const bound = { clause: lowClause, params: [lowParam] };
-
-  const q = buildArchiveQuery(sources, row.signal_id, bound);
+  // Pending = this contact's source messages not yet in the `merged` ledger, read
+  // oldest-first. The eval harness may hold out a recent window via backfillDays.
+  const notMerged = 'id NOT IN (SELECT message_id FROM merged WHERE slug = ?)';
+  const bound = backfillDays != null
+    ? { clause: `${notMerged} AND sent_at >= ?`, params: [slug, now - backfillDays * DAY] }
+    : { clause: notMerged, params: [slug] };
+  const q = buildArchiveQuery(sources, row.signal_id, bound, { orderBy: 'sent_at ASC, id ASC' });
   if (!q) return null;
   const msgs = cdb.prepare(q.sql).all(...q.params);
   if (msgs.length === 0) return null;
 
   const display = (nicks[row.signal_id] && nicks[row.signal_id].name) || row.name;
+  const cutoff = lastCompleteWeekStart(now);
 
-  // Gate the backlog into merge buckets. On-demand single-contact runs
-  // (includePartialWeek) bypass the gate and fold everything pending now — you
-  // pressed that button because you want this person up to date today — but still
-  // token-batched. Scheduled runs apply the N/floor/ceiling policy, evaluated up
+  // On-demand single-contact runs (includePartialWeek) bypass the gate and fold
+  // everything now (still token-batched) — you pressed that button to bring this
+  // person fully up to date today. Scheduled runs apply the N/floor/ceiling gate up
   // to the last complete week so no merge ever sees a partial one.
   let bucketMsgs;
   if (includePartialWeek) {
     bucketMsgs = [msgs];
   } else {
-    let lastMergeMs = null;
-    if (cursorBefore) {
-      // Max sent_at over everything already merged (id <= cursor) — NOT the cursor
-      // row's own sent_at, which a late-synced sibling can predate. This is exactly
-      // the clock gateBuckets left as `last`, so a resumed run reproduces the
-      // one-shot backfill (see the BACKFILL == PLAY-IT-FORWARD note above).
-      const mq = buildArchiveQuery(sources, row.signal_id, { clause: 'id <= ?', param: cursorBefore }, { select: 'MAX(sent_at) AS mx' });
-      const r = mq && cdb.prepare(mq.sql).get(...mq.params);
-      if (r && r.mx != null) lastMergeMs = r.mx;
-    }
+    // Chronological frontier: newest day already merged for this contact. The gate
+    // measures "age" from here; null (nothing merged) starts the clock at the first
+    // unmerged message, so a fresh rebuild gates from the very start of the history.
+    const fr = cdb.prepare(
+      'SELECT MAX(m.sent_at) AS mx FROM messages m JOIN merged g ON g.message_id = m.id WHERE g.slug = ?'
+    ).get(slug);
+    const lastMergeMs = fr && fr.mx != null ? fr.mx : null;
     bucketMsgs = gateBuckets(msgs, {
       N: INGEST_N, floorDays: INGEST_FLOOR_DAYS, ceilingDays: INGEST_CEILING_DAYS,
       lastMergeMs, endMs: cutoff,
@@ -168,8 +148,6 @@ function planContact(cdb, sdb, slug, opts) {
     name: display,
     profile: rel,
     sources,
-    hasCursor,
-    cursorBefore,
     total: chunks.reduce((n, c) => n + c.count, 0),
     chunks,
   };
@@ -194,11 +172,10 @@ function planAll(cdb, sdb, opts = {}) {
   let tracked = JSON.parse(fs.readFileSync(TRACKED, 'utf8')).slugs || [];
   if (onlySlug) tracked = tracked.filter((s) => s === onlySlug);
 
-  const cursors = loadCursors();
   const nicks = loadNicknames();
   const plans = [];
   for (const slug of tracked) {
-    const p = planContact(cdb, sdb, slug, { cursors, nicks, now, includePartialWeek, backfillDays });
+    const p = planContact(cdb, sdb, slug, { nicks, now, includePartialWeek, backfillDays });
     if (p) plans.push(p);
   }
   return plans;
@@ -283,8 +260,7 @@ function main() {
     for (const p of plans) {
       chunks += p.chunks.length;
       msgs += p.total;
-      console.log(`  ${p.slug} (${p.name}): ${p.total} msgs in ${p.chunks.length} chunk(s)` +
-        `${p.hasCursor ? `, cursor ${p.cursorBefore}` : ', BACKFILL (no cursor)'}`);
+      console.log(`  ${p.slug} (${p.name}): ${p.total} unmerged msg(s) in ${p.chunks.length} chunk(s)`);
       p.chunks.forEach((c, i) => {
         console.log(`    ${String(i + 1).padStart(3)}/${p.chunks.length}  ${c.label.padEnd(24)}` +
           `${String(c.count).padStart(6)} msgs  ~${String(Math.round(c.tokens / 1000)).padStart(3)}k tok  ` +
@@ -300,7 +276,8 @@ function main() {
 
   sdb.close();
   cdb.close();
-  // NOTE: REFRESH_STATE is intentionally NOT written here — see header.
+  // NOTE: planning writes no state — crm-daily records merges in the `merged` table
+  // only after each chunk's merge succeeds (crash safety; see header).
 }
 
 if (require.main === module) main();

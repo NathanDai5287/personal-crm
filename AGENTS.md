@@ -35,19 +35,27 @@ reproducible, lets a wiped profile rebuild exactly, and makes a backfill cost th
 same as having run it live. If you reach for `Date.now()`, "is this the first run?",
 or wall-clock cadence to decide *what* to merge — stop, that breaks it.
 
-Three properties uphold it; preserve all three if you touch the gate:
-- **Fold the backlog in rowid order, not by calendar day** — a released bucket is a
-  rowid-*contiguous* prefix, the only thing the single rowid cursor can represent
-  losslessly. Day-grouping strands late-synced rows (old `sent_at`, high rowid;
-  ~2% of traffic) below the cursor and loses them.
-- **Derive the age clock from the cursor** (`MAX(sent_at) WHERE id <= cursor`), never
-  from the fire day or the cursor row's own `sent_at`.
+How it works, and what to preserve if you touch it:
+- **The merge frontier is the `merged` table** (`crm.db`; `lib/archive.js`), an
+  explicit set of (contact, message) pairs already merged — NOT a rowid cursor.
+  That is what makes ingest lossless: a message linked-device sync inserts late with
+  an OLD `sent_at` is just "not yet merged", so it's picked up next run. (An earlier
+  single rowid-watermark design stranded such rows; don't reintroduce it.)
+- **Process the backlog oldest-first (`sent_at`, then `id`)** so profiles build in
+  chronological order — a bulk-imported old history merges first, not last.
+- **The age clock is a pure function of the frontier**: `MAX(sent_at)` over the
+  contact's merged rows. Never use the fire day or wall-clock time.
 - **Fire-before-add** — release the pile *without* the row that trips the gate, so a
-  bucket always ends on a whole day before its trigger.
+  bucket always ends on a whole day before its trigger, and a one-shot backfill and
+  an early live run cut it at the identical row.
+- **Full group context**: a contact's group messages pull EVERY speaker (minus the
+  old bot), so their lines have context. A group message therefore merges once per
+  tracked member of that group — which is why the frontier is per (contact, message).
 
-If you change `gateBuckets`, re-prove it: replay real `(rowid, sent_at)` series as
-one pass vs. a weekly loop and assert identical buckets + no row stranded below the
-final cursor. All day math goes through `lib/weeks.js` `dayNumber` (04:00-Pacific,
+If you change `gateBuckets` or the planner, re-prove it: replay a real `(id, sent_at)`
+series as one chronological pass vs. a weekly loop (simulating the `merged` set) and
+assert identical buckets, identical coverage, and chronological, non-decreasing
+bucket dates. All day math goes through `lib/weeks.js` `dayNumber` (04:00-Pacific,
 DST-safe, absolute), never raw UTC.
 
 ## Things that will surprise you
