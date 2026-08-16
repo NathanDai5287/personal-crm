@@ -22,6 +22,47 @@ ledgers → an LLM merge writes per-person markdown in `data/contacts/<slug>.md`
 - `scripts/crm-compact.js` → `prompts/compact.md` (no tools, stdin)
 - `scripts/crm-tasks.js` → `prompts/tasks.md` (no tools, stdin, JSON out → `tasks` table)
 
+## Vocabulary (use these exact terms)
+
+- **Sweep** — copy messages from Signal into the archive (`crm-archive.js`).
+  Deterministic, NO AI. A **deep sweep** (`--deep`) ignores per-conversation cursors
+  and re-checks all history (used to backfill the archive itself).
+- **Archive** — `crm.db`; the append-only mirror of every swept message. Source of
+  truth. Nothing downstream reads Signal directly.
+- **Ingest** — the umbrella act of turning a contact's UNMERGED archived messages
+  into profile updates. Not a mode and not one call. **Ingest ≡ backfill ≡
+  play-forward**: the same code path, differing only in how much is pending and the
+  effective date.
+- **Run** — one execution of the pipeline (`crm-daily.js`): sweep → plan → whatever
+  merges the gate releases → timelines. The **cron** only fires runs on a schedule;
+  it makes no cadence decisions.
+- **Gate** — the cadence policy in the planner (`gateBuckets`): release a merge once
+  a contact's backlog crosses **N** messages after the **floor**, or the **ceiling**
+  forces it. A pure function of (backlog, merge frontier, effective date). Floor/
+  ceiling are measured in whole 04:00-Pacific **days** (`dayNumber`), never hours.
+- **Effective date** — the "now" a gate evaluation runs against. A live run uses
+  today; a backfill deterministically replays past effective dates. What you called
+  a "sub-job with a different effective date" is a **bucket** (below).
+- **Bucket** — the set of messages the gate releases in one fire (chronological). A
+  bucket is split into one or more chunks.
+- **Chunk** — the messages fed to ONE merge: whole Pacific weeks, ≤40k tokens
+  (`planChunks`). **One chunk = one merge = one git commit.** Small bucket → one
+  chunk; big bucket → several.
+- **Merge** — ONE model call (`crm-merge.js`) that reads a profile + one chunk's
+  ledger and rewrites What-I-know / Talking-points / Open-questions with citations.
+  The atomic PAID unit; cost tracks the number of merges.
+- **Backfill** — ingest of a contact whose merge frontier is empty or far behind
+  (catching up a lot at once). A large pending set, not a special mode.
+- **Play-forward** — ingest running incrementally, run after run, each handling what
+  newly came due. The steady state.
+- **Merge frontier** — the explicit `(contact, message)` set already merged (the
+  `merged` table). The lossless, chronological replacement for the old rowid
+  **cursor** — that term is RETIRED; don't reintroduce it.
+- **Rebuild** — deliberately clear a contact's profile + merge frontier and ingest
+  from scratch. The paid op to regenerate profiles (after a prompt change or a move).
+- **Compaction / Timeline** — the separate model step (`crm-compact.js`) that
+  condenses aged-out messages into one-line `## Timeline` entries. NOT a merge.
+
 ## BACKFILL == PLAY-IT-FORWARD (governing design principle)
 
 **Ingest is a pure function of `(archive contents, per-contact cursor)` — never of
