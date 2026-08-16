@@ -122,16 +122,12 @@ function planContact(cdb, sdb, slug, opts) {
   if (includePartialWeek) {
     bucketMsgs = [msgs];
   } else {
-    // Chronological frontier: newest day already merged for this contact. The gate
-    // measures "age" from here; null (nothing merged) starts the clock at the first
-    // unmerged message, so a fresh rebuild gates from the very start of the history.
-    const fr = cdb.prepare(
-      'SELECT MAX(m.sent_at) AS mx FROM messages m JOIN merged g ON g.message_id = m.id WHERE g.slug = ?'
-    ).get(slug);
-    const lastMergeMs = fr && fr.mx != null ? fr.mx : null;
+    // The gate measures age from each pile's own start (see gateBuckets), so it
+    // needs no merge-frontier input — `msgs` (already the unmerged set, oldest-first)
+    // is enough. A fresh rebuild gates from the very start of history.
     bucketMsgs = gateBuckets(msgs, {
       N: INGEST_N, floorDays: INGEST_FLOOR_DAYS, ceilingDays: INGEST_CEILING_DAYS,
-      lastMergeMs, endMs: cutoff,
+      endMs: cutoff,
     });
   }
   if (bucketMsgs.length === 0) return null; // gate hasn't opened — retry next run
