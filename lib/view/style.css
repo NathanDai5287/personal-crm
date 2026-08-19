@@ -346,10 +346,14 @@ tr.runrow.live .tw{border-left:3px solid var(--amber)}
 .profile .rel{font-family:Newsreader,serif;font-style:italic;font-size:22px;color:var(--soft);margin-top:7px}
 .profile .rel .efield-input{font-family:Newsreader,serif;font-style:italic;font-size:22px;
   color:var(--soft);width:min(28ch,76vw)}
-.contact{margin:22px 0 2px;display:flex;flex-direction:column;gap:8px}
-.cline{display:flex;align-items:center;gap:11px;font-family:"Courier Prime",monospace;
+.contact{display:flex;flex-wrap:wrap;align-items:center;gap:6px 26px;margin:22px 0 2px}
+.cline{display:flex;align-items:center;gap:8px;font-family:"Courier Prime",monospace;
   font-size:13px;color:var(--soft)}
 .cline b{color:var(--ink);font-weight:400}
+.cl-ic{flex:none;color:var(--soft);opacity:.85;position:relative;top:-1px}
+/* The contact-row pencil reads too high next to the mono value — drop it to the
+   value's baseline (scoped: the global .ebtn is shared across the profile). */
+.cline .ebtn{position:relative;top:2.9px;margin-left:6px}
 .profile .efield-val{cursor:pointer}
 /* Header pencils and editors wear stamp-blue (the design's edit affordance);
    sections keep the ox pencil. */
@@ -650,7 +654,7 @@ button.impmark.norm{opacity:0;transition:opacity .12s ease}
    raw Markdown — no borders, no boxes, just a hairline in the margin. */
 .ebtn{background:none;border:0;padding:0 2px;margin-left:9px;cursor:pointer;
   font-family:Newsreader,serif;font-size:14px;line-height:1;color:var(--faint);
-  opacity:0;transition:opacity .12s ease,color .12s ease;vertical-align:1px}
+  opacity:0;transition:opacity .12s ease,color .12s ease;vertical-align:1px;transform:scaleX(-1)}
 .eunit:hover .ebtn,.efield:hover .ebtn,.ebtn:focus-visible{opacity:1}
 .ebtn:hover{color:var(--ox)}
 .eunit.dirty .ebtn,.efield.dirty .ebtn{opacity:1;color:var(--ox)}
@@ -664,7 +668,7 @@ button.impmark.norm{opacity:0;transition:opacity .12s ease}
 .esrc:focus,.esrc:focus-visible{outline:none}
 .efield-input{font-family:"Courier Prime",monospace;font-size:12.5px;color:var(--ink);
   background:transparent;border:0;border-bottom:1px dashed var(--ox-soft);border-radius:0;
-  padding:0 2px;width:24ch;max-width:60vw}
+  padding:0 2px;width:auto;max-width:100%;resize:none;overflow:hidden}
 .efield-input:focus,.efield-input:focus-visible{outline:none;border-bottom-style:solid}
 
 /* One shared edit state: a quiet bottom bar appears when anything is dirty. */
@@ -707,6 +711,72 @@ table.dtab{width:100%;border-collapse:collapse;font-family:"Courier Prime",monos
 .dtab td.dgap{background:var(--card2)}
 .dtab tr.dhunk td{background:var(--card2);color:var(--soft);padding:4px 8px;font-size:11px}
 .dtab.split td.dc{width:50%}
+
+/* ---- nicknames (profile identity block) ---------------------------------- */
+/* Nicknames the model proposed from the chats. A suggestion is amber with a dotted
+   underline and carries its proof as citation slips; hover/focus reveals
+   ✓ ✎ ↺ (confirm / edit / dismiss). Confirmed ones read plain. position/z-index
+   keep it above the card overlay when it's inside a .cd; harmless elsewhere.
+   Tokens only, so both themes carry through. */
+.nn{position:relative;z-index:1;margin-top:16px}
+.nn-label{display:block;font-family:"Courier Prime",monospace;font-size:10px;font-weight:700;
+  letter-spacing:.13em;text-transform:uppercase;color:var(--soft);margin-bottom:9px}
+/* Each nickname is a tag pill that flows in a wrapped row: confirmed reads as a
+   solid stamp-blue tint, suggested as an amber dashed outline. The pill sets its
+   own text colour, so the word inherits it (no per-status .nn-word rule). */
+.nn-tags{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:10px}
+.nn-tag{display:inline-flex;align-items:center;gap:7px;font-size:14px;padding:3px 11px;border-radius:999px;line-height:1.5}
+.nn-tag.on{background:color-mix(in srgb,var(--stamp) 12%,transparent);color:var(--stamp);border:1px solid color-mix(in srgb,var(--stamp) 30%,transparent)}
+.nn-tag.new{color:var(--amber);border:1px dashed color-mix(in srgb,var(--amber) 55%,transparent)}
+.nn-word{font-weight:500}
+/* Provenance rides inside the pill as faint plain links (dropping the tilted .slip
+   chips here); they ink up and underline on hover, and stay clickable above the card. */
+.nn-cites{display:inline-flex;gap:5px}
+.nn-cite{font-family:"Courier Prime",monospace;font-size:10px;letter-spacing:.02em;color:var(--faint);text-decoration:none;opacity:.85;position:relative;z-index:1}
+.nn-cite:hover{color:var(--ink);text-decoration:underline}
+/* Controls borrow the profile pencil's look (.ebtn): borderless, faint, hidden
+   until the row is hovered (or a control is keyboard-focused), colouring on
+   hover. Opacity lives on the buttons themselves — as with .ebtn — so a mouse
+   click leaves :focus (not :focus-visible) and never pins them open. */
+.nn-ctl{display:inline-flex;gap:8px}
+.nn-ctl button{background:none;border:0;padding:0;cursor:pointer;font-family:Newsreader,serif;
+  font-size:14px;line-height:1;color:var(--faint);opacity:0;position:relative;top:2px;
+  transition:opacity .12s ease,color .12s ease}
+.nn-tag:hover .nn-ctl button,.nn-ctl button:focus-visible{opacity:1}
+.nn-ctl button:focus-visible{outline:none}
+.nn-ok:hover{color:var(--moss)}
+.nn-edit{transform:scaleX(-1)}
+.nn-edit:hover{color:var(--ink)}
+/* The trash control reads danger on hover and stays inked (and visible) while
+   armed for the two-click delete confirm. */
+.nn-del:hover{color:var(--ox)}
+/* Armed for the second click: the trash swaps to a "?" so "click again to
+   delete" reads at a glance (and never collides with the moss ✓ confirm). */
+.nn-del.confirm{color:var(--ox);opacity:1;font-family:Newsreader,serif;font-weight:600}
+.nn-del.confirm svg{display:none}
+.nn-del.confirm::after{content:"?";font-size:16px;line-height:1}
+@media(hover:none){.nn-ctl button{opacity:.4}}
+/* The always-present hand-add affordance reads as a dashed pill that flows inline
+   with the tags, so a nickname can always be added — even on an empty profile. It
+   takes the block's own micro-cap label vocabulary and inks up on hover/focus. The
+   add/edit inputs reuse the shared .efield-input look. */
+.nn-add{display:inline-flex;align-items:center;background:none;border:1px dashed var(--rule);
+  border-radius:999px;padding:3px 11px;cursor:pointer;font-family:"Courier Prime",monospace;
+  font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);
+  transition:color .12s ease,border-color .12s ease}
+.nn-add:hover,.nn-add:focus-visible{color:var(--ink);border-color:var(--soft)}
+.nn-add:focus-visible{outline:none}
+/* An unobtrusive inline note when the server refuses a nickname edit. */
+.nn-note{display:block;margin-top:8px;font-family:"Courier Prime",monospace;font-size:11px;color:var(--amber)}
+/* The inline nickname editor: a textarea that keeps a fixed character width so it
+   never widens the row, and grows in height (script-sized) as you type. While a
+   row is being edited its controls hide so nothing competes with the field. */
+.nn-edit-input{font-family:Newsreader,serif;font-size:13.5px;font-weight:600;color:var(--amber);background:transparent;border:0;border-bottom:1px dashed var(--amber);border-radius:0;padding:0 0 1px;margin:0;width:14ch;max-width:100%;resize:none;overflow:hidden;line-height:1.35;vertical-align:top}
+.nn-edit-input:focus,.nn-edit-input:focus-visible{outline:none;border-bottom-style:solid}
+/* While a pill is being edited, strip its chrome so nothing frames the bare
+   textarea, and hide its controls. */
+.nn-tag.editing{border-color:transparent;background:none;padding-left:0;padding-right:0}
+.nn-tag.editing .nn-ctl{display:none}
 
 @media (max-width:760px){
   .plate{grid-template-columns:1fr}.counts{gap:16px;flex-wrap:wrap}

@@ -356,7 +356,7 @@ function dataStandins(cases, focus) {
   for (const slug of slugs) {
     byServiceId[fakeServiceId(slug)] = { name: displayName(profiles.get(slug), slug), slug };
   }
-  out.set('data/crm-nicknames.json', `${JSON.stringify({ byServiceId }, null, 2)}\n`);
+  out.set('data/crm-display-names.json', `${JSON.stringify({ byServiceId }, null, 2)}\n`);
 
   out.set('data/crm-refresh-state.json', `${JSON.stringify({ cursors, ranAt }, null, 2)}\n`);
   out.set('data/crm-archive-state.json', `${JSON.stringify({

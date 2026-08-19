@@ -19,6 +19,7 @@ const { spawn, execFileSync } = require('child_process');
 const {
   ROOT, CONTACTS_DIR, WEB_PORT, WEB_USER, WEB_PASSWORD_FILE,
   TRACKED, LOGS_DIR, GITDIR, MERGE_MODEL, COMPACT_MODEL,
+  BOT_SERVICE_ID,
 } = require('../lib/config');
 const { openCrmDb, openSignalDb } = require('../lib/signal-db');
 const { estIngestFromRows, isFree, fmtUsd } = require('../lib/cost');
@@ -26,6 +27,7 @@ const { dateKey: ptDateKey, fmtLocal: ptLocal, weekStart, nextWeekStart, nextPac
 const { resolveSources, buildMessageQuery, buildArchiveQuery } = require('../lib/sources');
 const { validateCitations, ensureMessagesTable } = require('../lib/archive');
 const TASKS = require('../lib/tasks');
+const P = require('../lib/nicknames');
 const { STYLE: BINDERY_CSS, FONTS, FONTS_DIR, THEME_INIT, THEME_JS } = require('../lib/view/shell');
 const { render, raw } = require('../lib/view/h');
 const V = require('../lib/view/pages');
@@ -554,16 +556,22 @@ function contactList() {
   const cdb = openCrmDb();
   try {
     ensureMessagesTable(cdb); // make sure the `merged` ledger table exists to join
+    // Held count + live last-contact per contact, bot-excluded (Janet's messages
+    // in a me+contact+bot group don't count as the contact's traffic). `src IS
+    // NOT ?` is NULL-safe, so non-bot rows with a null src still count.
     const held = new Map();
-    for (const r of cdb.prepare("SELECT contact_slug slug, COUNT(*) n FROM messages WHERE contact_slug IS NOT NULL GROUP BY contact_slug").all()) {
+    const lastSeen = new Map();
+    for (const r of cdb.prepare("SELECT contact_slug slug, COUNT(*) n, MAX(sent_at) mx FROM messages WHERE contact_slug IS NOT NULL AND src IS NOT ? GROUP BY contact_slug").all(BOT_SERVICE_ID)) {
       held.set(r.slug, r.n);
+      if (r.mx) lastSeen.set(r.slug, r.mx);
     }
     const pending = cdb.prepare('SELECT COUNT(*) n FROM messages WHERE contact_slug = ? AND id NOT IN (SELECT message_id FROM merged WHERE slug = ?)');
     return listContacts().map((c) => {
       const waiting = pending.get(c.slug, c.slug).n;
       const facts = c.talkingPoints.slice(0, 3).map((tp) => mdInline((tp.date ? `**${tp.date}** ` : '') + tp.text));
       return {
-        slug: c.slug, name: c.name, rel: c.relationship, last: c.last,
+        slug: c.slug, name: c.name, rel: c.relationship,
+        last: lastSeen.has(c.slug) ? ptDateKey(lastSeen.get(c.slug)) : c.last,
         held: held.get(c.slug) || 0, waiting, facts,
         stamp: waiting > 0 ? `${waiting} waiting` : null, stampBlue: true,
       };
@@ -575,6 +583,80 @@ function contactList() {
 
 function indexPage() {
   return page('People — personal-crm', render(V.people(contactList()).body));
+}
+
+// A nickname's citation slips resolve exactly like a fact bullet's: the face is the
+// message's send date relative-to-now (sentLabel), the exact Pacific date rides
+// in the hover title (sd), and no archived date falls back to a dagger. Shared by
+// profilePage and the /c/<slug>/nick/* endpoints so both render the same slips.
+// `dates` is a msgDates() resolver; `now` its reference clock.
+function nickCites(cites, dates, now) {
+  return (cites || []).map((id) => {
+    const ms = dates.dateFor(id);
+    return ms ? { a: id, d: sentLabel(ms, now), sd: ptDateKey(ms) } : { a: id };
+  });
+}
+
+// Render a contact's nicknames to the `.nn` block HTML the profile shows and the
+// endpoints swap in. One msgDates() resolver per call; closed before returning.
+function renderNicks(slug) {
+  const dates = msgDates();
+  try {
+    const now = Date.now();
+    const nicks = P.listNicknames(slug).map((n) => ({ ...n, cites: nickCites(n.cites, dates, now) }));
+    return render(V.Nicks(nicks));
+  } finally {
+    dates.close();
+  }
+}
+
+// The server-enforced nickname length cap. The client also sets maxLength=40 on its
+// inputs, but that is only a hint; this is the real limit for add and edit.
+const NICKNAME_MAX = 40;
+
+// Apply one nickname mutation from the profile's NN_JS, keyed by `action`. Validates
+// the contact exists (like profilePage) and the payload, then delegates to
+// lib/nicknames.js. Every mutation is slug-scoped in the store, so an id belonging to
+// another contact no-ops and is reported as a 404. Returns { ok:true } or
+// { ok:false, status, error }; the caller re-renders the block.
+function applyNickEdit(slug, action, payload) {
+  const file = path.posix.join(CONTACTS_DIR, `${slug}.md`);
+  try { fs.readFileSync(file, 'utf8'); } catch { return { ok: false, status: 404, error: 'no such contact' }; }
+  const nickId = () => {
+    const id = Number(payload.id);
+    return Number.isInteger(id) ? id : null;
+  };
+  const nickText = () => String(payload.text == null ? '' : payload.text).trim();
+  const gone = { ok: false, status: 404, error: 'that nickname no longer exists — reload the page' };
+  if (action === 'add') {
+    const text = nickText();
+    if (!text) return { ok: false, status: 400, error: 'a nickname is required' };
+    if (text.length > NICKNAME_MAX) return { ok: false, status: 400, error: `nickname too long (${NICKNAME_MAX} characters max)` };
+    P.addNickname(slug, text);
+    return { ok: true };
+  }
+  if (action === 'confirm') {
+    const id = nickId();
+    if (id == null) return { ok: false, status: 400, error: 'bad id' };
+    if (P.confirmNickname(slug, id) == null) return gone;
+    return { ok: true };
+  }
+  if (action === 'edit') {
+    const id = nickId();
+    if (id == null) return { ok: false, status: 400, error: 'bad id' };
+    const text = nickText();
+    if (!text) return { ok: false, status: 400, error: 'a nickname is required' };
+    if (text.length > NICKNAME_MAX) return { ok: false, status: 400, error: `nickname too long (${NICKNAME_MAX} characters max)` };
+    if (P.editNickname(slug, id, text) == null) return gone;
+    return { ok: true };
+  }
+  if (action === 'dismiss') {
+    const id = nickId();
+    if (id == null) return { ok: false, status: 400, error: 'bad id' };
+    if (!P.dismissNickname(slug, id)) return gone;
+    return { ok: true };
+  }
+  return { ok: false, status: 400, error: 'unknown action' };
 }
 
 // Shared bubble renderer for both provenance views. Every bubble carries
@@ -755,6 +837,11 @@ function fmtPhone(p) {
   const m = String(p).match(/^\+1(\d{3})(\d{3})(\d{4})$/);
   return m ? `+1 ${m[1]} ${m[2]} ${m[3]}` : String(p);
 }
+// Line icons for the two dated/contact fields — monochrome, currentColor, no
+// emoji (matches the ledger's house style). A cake for birthday, a handset for
+// phone; decorative, so aria-hidden (the pencil already labels the field).
+const CAKE_IC = '<svg class="cl-ic" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 20h18"/><path d="M5 20v-7a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v7"/><path d="M5 14.4c1.4 1.1 2.6 1.1 4 0s2.6-1.1 4 0 2.6 1.1 4 0"/><path d="M12 8V5.2"/><circle cx="12" cy="3.4" r=".95" fill="currentColor" stroke="none"/></svg>';
+const PHONE_IC = '<svg class="cl-ic" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.8 3.5H4.5A1.5 1.5 0 0 0 3 5.2C3 13.4 10.6 21 18.8 21a1.5 1.5 0 0 0 1.7-1.5v-2.3a1 1 0 0 0-.86-1l-2.9-.4a1 1 0 0 0-1 .43l-.8 1.1a12.5 12.5 0 0 1-5.3-5.3l1.1-.8a1 1 0 0 0 .43-1l-.4-2.9a1 1 0 0 0-1-.86Z"/></svg>';
 // The runway: one bar per Pacific calendar month, from the first archived
 // message's month through the current month (Nathan settled on monthly bars,
 // 2026-08-11 — the count grows with the history). Buckets are computed in JS
@@ -826,11 +913,30 @@ function profilePage(slug) {
     if (m) { meta.set(m[1].trim(), m[2].trim()); continue; }
     strays.push(`<p>${mdInline(t)}</p>`);
   }
+  // LIVE STATS, bot-excluded. "Last contact" and "Messages" are otherwise stale
+  // .md snapshots from the last merge — and both counted Janet's messages in a
+  // me+contact+bot group (which the archive already folds into the contact via
+  // contact_slug). Recompute from the archive: last contact is the newest message
+  // from a human (src IS NOT the bot — NULL-safe), and the total/split drops the
+  // bot too (from_them = everything attributed to this contact that isn't me).
+  try {
+    const statDb = openCrmDb();
+    try {
+      const lc = statDb.prepare('SELECT MAX(sent_at) mx FROM messages WHERE contact_slug = ? AND src IS NOT ?').get(slug, BOT_SERVICE_ID);
+      if (lc && lc.mx) meta.set('Last contact', ptDateKey(lc.mx));
+      // From me/them by DIRECTION (type), reliable regardless of which serviceId a
+      // message was sent under; calls aren't messages, so the total is just
+      // outgoing+incoming. The bot is dropped (src IS NOT the bot — NULL-safe).
+      const mine = statDb.prepare("SELECT COUNT(*) n FROM messages WHERE contact_slug = ? AND type = 'outgoing' AND src IS NOT ?").get(slug, BOT_SERVICE_ID).n;
+      const theirs = statDb.prepare("SELECT COUNT(*) n FROM messages WHERE contact_slug = ? AND type = 'incoming' AND src IS NOT ?").get(slug, BOT_SERVICE_ID).n;
+      if (mine + theirs > 0) meta.set('Messages', `${mine + theirs} total (${theirs} from them, ${mine} from me)`);
+    } finally { statDb.close(); }
+  } catch { /* fall back to the stored .md values */ }
   // `show` overrides the display form only — the input always edits the raw
   // stored value (the phone renders grouped but is stored as one token).
   const fieldHtml = (label, key, cur, show) =>
     `<span class="efield-val">${show ?? mdInline(cur == null ? '_TBD_' : cur)}</span>`
-    + `<input class="efield-input" hidden maxlength="120" value="${esc(cur == null || cur === '_TBD_' ? '' : cur)}" aria-label="${esc(label)}">`
+    + `<textarea class="efield-input" hidden maxlength="120" rows="1" aria-label="${esc(label)}">${esc(cur == null || cur === '_TBD_' ? '' : cur)}</textarea>`
     + pencil(label);
 
   const now = Date.now();
@@ -843,9 +949,9 @@ function profilePage(slug) {
     + fieldHtml('Relationship', 'relationship', meta.get('Relationship') ?? null) + '</div>';
   const phoneRaw = meta.get('Phone') ?? null;
   const clines = [
-    `<div class="cline"><span class="efield" data-key="birthday" data-label="Birthday">`
+    `<div class="cline">${CAKE_IC}<span class="efield" data-key="birthday" data-label="Birthday">`
       + fieldHtml('Birthday', 'birthday', meta.get('Birthday') ?? null) + '</span></div>',
-    `<div class="cline"><span class="efield" data-key="phone" data-label="Phone">`
+    `<div class="cline">${PHONE_IC}<span class="efield" data-key="phone" data-label="Phone">`
       + fieldHtml('Phone', 'phone', phoneRaw, phoneRaw == null ? null : esc(fmtPhone(phoneRaw))) + '</span></div>',
   ];
   const PLACED = new Set(['Relationship', 'Birthday', 'First contact', 'Last contact', 'Messages', 'Phone', 'Signal ID']);
@@ -908,9 +1014,15 @@ function profilePage(slug) {
         + '<i class="rw-line"></i><span class="rw-now">now</span></div></div>';
     }
 
+    // Nicknames sit in the identity column, under the contact lines. Always rendered
+    // (V.Nicks keeps a "+ nickname" affordance even when empty); each one's cites resolve
+    // to the same date-faced slips as a fact bullet.
+    const nicks = P.listNicknames(slug).map((n) => ({ ...n, cites: nickCites(n.cites, dates, now) }));
+    const nickHtml = render(V.Nicks(nicks));
+
     const header = [];
     header.push(`<div class="phead-top"><div class="phead-id">${h1}${rel}`
-      + `<div class="contact">${clines.join('')}</div></div>`
+      + `<div class="contact">${clines.join('')}</div>${nickHtml}</div>`
       + (runway || stamp ? `<div class="phead-right">${runway}${stamp}</div>` : '')
       + '</div>');
     header.push(...strays);
@@ -971,7 +1083,7 @@ function profilePage(slug) {
     const body = `<div class="back"><a href="/">&larr; All people</a>`
       + ` &middot; <a href="/c/${encodeURIComponent(slug)}/history">History &rarr;</a></div>`
       + `<div class="profile">${header.join('')}${unitHtml}</div>${bar}${modal}`;
-    return page(name, body + cfgJs + PROFILE_EDIT_JS, '/');
+    return page(name, body + cfgJs + PROFILE_EDIT_JS + NN_JS, '/');
   } finally {
     dates.close();
   }
@@ -1053,15 +1165,21 @@ const PROFILE_EDIT_JS = `<script>(function(){
     val.innerHTML=v?escText(v):'<em>TBD</em>';
     refresh();
   }
+  // The field editors are single-value textareas: they grow in height (never
+  // width) as you type, but still commit one line — Enter commits with no newline
+  // and closeFld's normFld strips any that slipped in. Escape reverts this field
+  // to what the page loaded with (the global Cancel still resets everything).
+  function sizeFld(inp){inp.style.height='auto';inp.style.height=inp.scrollHeight+'px';}
   flds.forEach(function(f){
     var inp=f.querySelector('.efield-input'),val=f.querySelector('.efield-val');
-    var open=function(){f.classList.add('editing');val.hidden=true;inp.hidden=false;inp.focus();};
+    var open=function(){f.classList.add('editing');val.hidden=true;inp.hidden=false;inp.focus();sizeFld(inp);};
     f.querySelector('.ebtn').addEventListener('click',open);
     val.addEventListener('click',open);
-    inp.addEventListener('input',refresh);
+    inp.addEventListener('input',function(){sizeFld(inp);refresh();});
     inp.addEventListener('blur',function(){closeFld(f);});
     inp.addEventListener('keydown',function(e){
-      if(e.key==='Escape'||e.key==='Enter'){e.stopPropagation();closeFld(f);}
+      if(e.key==='Enter'){e.preventDefault();e.stopPropagation();closeFld(f);}
+      else if(e.key==='Escape'){e.stopPropagation();inp.value=inp.defaultValue;closeFld(f);}
     });
   });
 
@@ -1264,6 +1382,102 @@ const PROFILE_EDIT_JS = `<script>(function(){
   // Typing anywhere with pending edits should not be lost to a stray navigation.
   window.addEventListener('beforeunload',function(e){
     if(!bar.hidden&&!bar.querySelector('.btn').disabled){e.preventDefault();e.returnValue='';}
+  });
+})();</script>`;
+
+// Nicknames: confirm ✓ · edit ✎ · dismiss ↺, plus the "+ nickname" hand-add.
+// Event-delegated on the stable .phead-id host so a swapped-in .nn keeps working.
+// Every mutation POSTs to /c/<slug>/nick/<action> and swaps the whole .nn block
+// for the server's freshly-rendered one; a refusal restores the UI and shows a
+// brief inline note. Dependency-free, same inline-edit vocabulary as the profile.
+const NN_JS = `<script>(function(){
+  var host=document.querySelector('.phead-id');if(!host)return;
+  var SLUG=(window.__EDIT_CFG&&window.__EDIT_CFG.slug)||'';if(!SLUG)return;
+
+  function post(action,payload){
+    return fetch('/c/'+encodeURIComponent(SLUG)+'/nick/'+action,{
+      method:'POST',credentials:'same-origin',
+      headers:{'Content-Type':'application/json','X-Requested-With':'fetch'},
+      body:JSON.stringify(payload||{})
+    }).then(function(r){return r.json().catch(function(){return{ok:false,error:'HTTP '+r.status};});});
+  }
+  // Swap the whole .nn block for the server's freshly-rendered one.
+  function swap(html){var nn=host.querySelector('.nn');if(nn&&html!=null)nn.outerHTML=html;}
+  // A brief inline note when the server refuses; replaces any prior note.
+  function note(msg){
+    var nn=host.querySelector('.nn');if(!nn)return;
+    var n=nn.querySelector('.nn-note');
+    if(!n){n=document.createElement('span');n.className='nn-note';nn.appendChild(n);}
+    n.textContent=msg;
+  }
+  // Replace a node with a seeded textarea; Enter commits via commit(value,putBack),
+  // Escape/blur restores the original node. commit calls putBack itself only when
+  // the server refuses (a success swaps the whole block, removing the editor). The
+  // editor keeps a fixed character width (so the layout never widens) and grows in
+  // height as you type; while it is open the enclosing row's controls hide via the
+  // 'editing' class — removed on putBack, and gone anyway on success when the block
+  // is swapped. The add affordance (.nn-add) has no .nn-tag, hence the guard.
+  function editField(anchor,seed,commit){
+    var restore=anchor.outerHTML;
+    var li=anchor.closest&&anchor.closest('.nn-tag');
+    var inp=document.createElement('textarea');
+    inp.className='nn-edit-input';inp.value=seed||'';inp.maxLength=40;inp.rows=1;
+    inp.setAttribute('aria-label','nickname');
+    if(li)li.classList.add('editing');
+    anchor.replaceWith(inp);inp.focus();if(inp.select)inp.select();
+    function grow(){inp.style.height='auto';inp.style.height=inp.scrollHeight+'px';}
+    grow();
+    var handled=false;
+    function putBack(){if(li)li.classList.remove('editing');if(inp.parentNode)inp.outerHTML=restore;}
+    inp.addEventListener('input',grow);
+    inp.addEventListener('keydown',function(e){
+      if(e.key==='Enter'){
+        e.preventDefault();if(handled)return;handled=true;
+        var v=inp.value.replace(/\\s+/g,' ').trim();
+        if(!v){putBack();return;}
+        commit(v,putBack);
+      }else if(e.key==='Escape'){e.preventDefault();e.stopPropagation();if(handled)return;handled=true;putBack();}
+    });
+    inp.addEventListener('blur',function(){if(handled)return;handled=true;putBack();});
+  }
+
+  host.addEventListener('click',function(e){
+    var t=e.target;
+    var add=t.closest&&t.closest('.nn-add');
+    if(add){
+      editField(add,'',function(v,putBack){
+        post('add',{text:v}).then(function(d){if(d.ok)swap(d.html);else{putBack();note(d.error||'could not add');}})
+          .catch(function(){putBack();note('network error');});
+      });
+      return;
+    }
+    var li=t.closest&&t.closest('.nn-tag');if(!li)return;
+    var id=Number(li.getAttribute('data-nn-id'));
+    if(t.closest('.nn-ok')){
+      post('confirm',{id:id}).then(function(d){if(d.ok)swap(d.html);else note(d.error||'could not confirm');})
+        .catch(function(){note('network error');});
+    }else if(t.closest('.nn-del')){
+      // A trash control with a two-click confirm. First click ARMS this button
+      // (and disarms any other armed one); a second click within 2.5s deletes.
+      // Clicks can land on the inner SVG, so resolve the button via closest.
+      var del=t.closest('.nn-del');
+      if(del.classList.contains('confirm')){
+        post('dismiss',{id:id}).then(function(d){if(d.ok)swap(d.html);else note(d.error||'could not delete');})
+          .catch(function(){note('network error');});
+      }else{
+        [].forEach.call(host.querySelectorAll('.nn-del.confirm'),function(b){b.classList.remove('confirm');if(b.dataset.t0!=null)b.title=b.dataset.t0;});
+        del.dataset.t0=del.title;del.classList.add('confirm');del.title='click again to delete';
+        setTimeout(function(){if(del.classList.contains('confirm')){del.classList.remove('confirm');del.title=del.dataset.t0||'delete';}},2500);
+      }
+    }else if(t.closest('.nn-edit')){
+      var word=li.querySelector('.nn-word');if(!word)return;
+      var cur=word.textContent;
+      editField(word,cur,function(v,putBack){
+        if(v===cur){putBack();return;}
+        post('edit',{id:id,text:v}).then(function(d){if(d.ok)swap(d.html);else{putBack();note(d.error||'could not rename');}})
+          .catch(function(){putBack();note('network error');});
+      });
+    }
   });
 })();</script>`;
 
@@ -2701,6 +2915,31 @@ function start() {
         const html = historyPage(slug);
         if (!html) { send(404, page('Not found', '<div class="back"><a href="/">&larr; All contacts</a></div><p>No history for this contact.</p>')); return; }
         send(200, html);
+        return;
+      }
+      // Nickname mutations from the profile's identity block. One JSON POST per
+      // action, mirroring /c/<slug>/edit's auth/body/JSON handling; the response
+      // carries the re-rendered .nn block so the client swaps it in. Must precede
+      // the generic /c/<slug> GET below (whose pattern would not match anyway, but
+      // whose 404 would if this fell through).
+      const cnk = url.pathname.match(/^\/c\/([^/]+)\/nick\/(add|confirm|edit|dismiss)$/);
+      if (cnk && req.method === 'POST') {
+        const slug = decodeURIComponent(cnk[1]);
+        const action = cnk[2];
+        if (!isSafeSlug(slug)) { sendJson(400, { ok: false, error: 'bad request' }); return; }
+        const sfs = req.headers['sec-fetch-site'];
+        if (sfs && sfs !== 'same-origin' && sfs !== 'none') { sendJson(403, { ok: false, error: 'cross-site request refused' }); return; }
+        readBody(req, (raw2) => {
+          try {
+            let payload;
+            try { payload = JSON.parse(raw2 || '{}'); } catch { sendJson(400, { ok: false, error: 'bad JSON' }); return; }
+            const r = applyNickEdit(slug, action, payload || {});
+            if (!r.ok) { sendJson(r.status || 400, { ok: false, error: r.error }); return; }
+            sendJson(200, { ok: true, html: renderNicks(slug) });
+          } catch (e) {
+            try { sendJson(500, { ok: false, error: String(e.message).slice(0, 200) }); } catch { /* sent */ }
+          }
+        });
         return;
       }
       const m = url.pathname.match(/^\/c\/([^/]+)$/);

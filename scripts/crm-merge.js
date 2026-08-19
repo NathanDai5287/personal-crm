@@ -20,9 +20,10 @@
 const fs = require('fs');
 const path = require('path');
 const { execFileSync, spawnSync } = require('child_process');
-const { ROOT, DATA_DIR, PI_CLI, MERGE_MODEL, MERGE_PROMPT } = require('../lib/config');
+const { ROOT, DATA_DIR, PI_CLI, MERGE_MODEL, MERGE_PROMPT, BOT_SERVICE_ID } = require('../lib/config');
 const { dateKey } = require('../lib/weeks');
-const { sumSessionCostUsd } = require('../lib/cost');
+const { sumSessionCostUsd, sessionAssistantText } = require('../lib/cost');
+const { storeNicknameProposals } = require('../lib/nicknames');
 const { detect, learn, redact } = require('../lib/redact');
 
 // Bucket a failed pi run so the retry loop knows what to do:
@@ -112,7 +113,7 @@ function normalizeLastContact(slug, cwd) {
       try {
         const { DatabaseSync } = require('node:sqlite');
         const h = new DatabaseSync(db, { readOnly: true });
-        const r = h.prepare('select max(sent_at) t from messages where contact_slug = ?').get(slug);
+        const r = h.prepare('select max(sent_at) t from messages where contact_slug = ? and src is not ?').get(slug, BOT_SERVICE_ID);
         h.close();
         // PACIFIC, NOT UTC. Every date this repo prints — ledger lines, week
         // boundaries, checkLastContact's ledgerMaxDate — is America/Los_Angeles
@@ -266,8 +267,20 @@ function mergeContact(slug, opts = {}) {
         // attempts' sessions land in the same dir, so this is the true total spend).
         let costUsd = null;
         if (sessionDir) { const c = sumSessionCostUsd(sessionDir); if (c) costUsd = c.costUsd; }
-        console.log(`crm-merge: ${slug}: ok${costUsd != null ? ` ($${costUsd.toFixed(4)})` : ''}${attempt > 1 ? ` (attempt ${attempt})` : ''}`);
-        return { ok: true, output, costUsd, attempts: attempt, lastContactFixed: fixed || undefined };
+        // NICKNAMES. The model emits nicknames as a [[NICKNAMES]] block in its REPLY
+        // (never in the profile — the merge prompt forbids that), so read the reply
+        // back from the session transcript and store each proposal. The store dedups
+        // and filters against the per-contact denylist, so re-storing across a retry
+        // is free. Best-effort: a parse/store failure must never fail a merge.
+        let nicksStored = 0;
+        if (sessionDir) {
+          try {
+            const reply = sessionAssistantText(sessionDir);
+            if (reply) nicksStored = storeNicknameProposals(slug, reply);
+          } catch { /* nickname store is non-fatal telemetry */ }
+        }
+        console.log(`crm-merge: ${slug}: ok${costUsd != null ? ` ($${costUsd.toFixed(4)})` : ''}${nicksStored ? ` (+${nicksStored} nickname${nicksStored === 1 ? '' : 's'})` : ''}${attempt > 1 ? ` (attempt ${attempt})` : ''}`);
+        return { ok: true, output, costUsd, attempts: attempt, nicksStored, lastContactFixed: fixed || undefined };
       } catch (e) {
         lastError = String((e && e.stderr) || stderrCap || (e && e.message) || e).slice(0, 2000);
         lastClass = classifyPiError(lastError);

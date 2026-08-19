@@ -211,7 +211,46 @@ Correct edit: **none.** The Notes line already characterizes the dialect; catalo
 
 # When the ledger adds nothing
 
-Short, contentless, or purely logistical exchanges are common and are not a problem to solve. If nothing in the ledger is worth recording, **your only edit is the `Last contact` line** — a contentless week still moves it — then reply exactly `NO-OP`. Do not manufacture a talking point to justify the run, and do not reword existing content to look productive.
+Short, contentless, or purely logistical exchanges are common and are not a problem to solve. If nothing in the ledger is worth recording, **your only edit is the `Last contact` line** — a contentless week still moves it — then reply `NO-OP` on its own line (a [[NICKNAMES]] block may still follow — see # Nicknames). Do not manufacture a talking point to justify the run, and do not reword existing content to look productive.
+
+# Nicknames
+
+The ledger sometimes shows what this person is actually *called* — a name Nathan or others address them by that differs from their profile name. Surface these in your **reply**, never in the profile. A separate step owns nicknames; the profile files never mention them.
+
+After your `DONE` or `NO-OP` line, emit one block, exactly this shape:
+
+```
+[[NICKNAMES]]
+Kat | ⟨m89123⟩ ⟨m89150⟩
+Professor | ⟨m90920⟩
+[[/NICKNAMES]]
+```
+
+- **One line per nickname:** the nickname, a pipe, then the ledger id(s) of the lines where it was actually used. Same rule as citations for literalness: every id must appear in this ledger, copied character for character. Single ids only, space-separated — never a range like `⟨m89123-m89130⟩`. Each id is one line where the nickname itself appears. The nickname text must not contain a `|`.
+- **The block is independent of DONE/NO-OP.** A contentless week can still show a nickname — emit the block after `NO-OP` all the same. A ledger with no nickname gets no block; never emit an empty one.
+- **Propose every nickname you genuinely see, every run.** Dedup and dismissals are handled downstream — do not skip a nickname because you suspect it was proposed before, and do not try to remember prior runs.
+
+**What counts:** a distinct name the subject is addressed by or referred to as — a shortening ("Kat" for Katia), a handle, an honorific used *as* their name ("Professor"), an affectionate name used as a real address token. Used by Nathan or by anyone else in the chat. Group-chat lines count — cite them — but only when the use clearly addresses or refers to this profile's subject; in a group, a name may belong to someone else.
+
+**What never counts:** one-off typos; generic filler not specific to them ("bro", "dude", "man", "bestie" used the way anyone gets called it); any name for Nathan — never propose a nickname for the profile's owner; group-chat names; the person's own canonical name; a name merely mentioned but never used to address or refer to *this* person. When you cannot tell a real nickname from a passing word, leave it out — precision over recall.
+
+Example — Katia's ledger contains:
+
+```
+[2026-07-04 18:22] ⟨m89123⟩ Nathan: kat did the machine ship yet
+[2026-07-04 18:25] ⟨m89150⟩ (Nat & Kat 🥾🩷) Katia: not yet 😤
+[2026-07-05 09:10] ⟨m89201⟩ Nathan: lmaooo ok bestie
+```
+
+Emit:
+
+```
+[[NICKNAMES]]
+Kat | ⟨m89123⟩
+[[/NICKNAMES]]
+```
+
+"Kat" is a real address token — Nathan calls her it directly. Cite ⟨m89123⟩ only: the group label "Nat & Kat 🥾🩷" is a chat name, not a use of the nickname. "bestie" is generic filler — emit nothing for it.
 
 # Before you finish
 
@@ -232,5 +271,6 @@ Check each of these. If any fails, fix it before replying:
 - No citations in `## Open questions`.
 - Every `###` section you touched covers exactly one topic; surviving claims kept their existing citations.
 - Nothing you wrote is about you, these instructions, or the merge run itself; every claim is written at the strength its messages said it.
+- If you emitted a [[NICKNAMES]] block, it sits after the DONE/NO-OP line, every id in it appears literally in the ledger, and no nickname is Nathan's name or a group-chat name.
 
-Then reply with one line: `DONE — <n> talking points, <n> facts added/changed`, or `NO-OP`.
+Then reply with one line — `DONE — <n> talking points, <n> facts added/changed`, or `NO-OP` — followed by a [[NICKNAMES]] block only when one is due.

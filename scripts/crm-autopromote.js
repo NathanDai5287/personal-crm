@@ -11,7 +11,7 @@
 
 const fs = require("fs");
 const { openSignalDb, openCrmDb } = require("../lib/signal-db");
-const { TRACKED, CONTACTS_DIR, NICKNAMES, BOT_SERVICE_ID } = require("../lib/config");
+const { TRACKED, CONTACTS_DIR, DISPLAY_NAMES, BOT_SERVICE_ID } = require("../lib/config");
 
 const DAY = 86_400_000;
 const WINDOW_DAYS = 30; // look-back window for "recent activity"
@@ -37,7 +37,7 @@ function main() {
   const tracked = JSON.parse(fs.readFileSync(TRACKED, "utf8"));
   const nicks = (() => {
     try {
-      return JSON.parse(fs.readFileSync(NICKNAMES, "utf8")).byServiceId || {};
+      return JSON.parse(fs.readFileSync(DISPLAY_NAMES, "utf8")).byServiceId || {};
     } catch {
       return {};
     }
@@ -97,7 +97,7 @@ function main() {
     if (nick && nick.slug) {
       slug = nick.slug;
       name = nick.name || c.nm || slug;
-      source = "nickname";
+      source = "display name";
     } else if (existing && existing.file_path) {
       // Already a known contact (under any name) — reuse it, never insert a duplicate.
       slug = existing.file_path.replace("data/contacts/", "").replace(/\.md$/, "");
@@ -107,7 +107,7 @@ function main() {
       name = c.nm || c.serviceId.slice(0, 8);
       slug = slugify(name, c.serviceId.slice(0, 8));
       while (usedSlugs.has(slug) || fs.existsSync(`${CONTACTS_DIR}/${slug}.md`)) slug += "-2";
-      source = "Signal name — add a nickname to crm-nicknames.json if wrong";
+      source = "Signal name — add a display name to crm-display-names.json if wrong";
     }
     usedSlugs.add(slug);
     console.log(`- ${c.nm || c.e164 || c.serviceId} → ${slug} (${name})  (${c.total} msgs, ${c.incoming} from them)  [${source}]`);

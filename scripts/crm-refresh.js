@@ -51,7 +51,7 @@ const { resolveSources, buildArchiveQuery } = require('../lib/sources');
 const { fmtLocal, planChunks, lastCompleteWeekStart, gateBuckets } = require('../lib/weeks');
 const { redact } = require('../lib/redact');
 const {
-  TRACKED, NICKNAMES, REFRESH_DIR, BOT_SERVICE_ID,
+  TRACKED, DISPLAY_NAMES, REFRESH_DIR, BOT_SERVICE_ID,
   INGEST_N, INGEST_FLOOR_DAYS, INGEST_CEILING_DAYS,
 } = require('../lib/config');
 
@@ -69,7 +69,7 @@ const MERGE_BACKFILL_DAYS = process.env.CRM_BACKFILL_DAYS ? Number(process.env.C
 
 function loadNicknames() {
   try {
-    return JSON.parse(fs.readFileSync(NICKNAMES, 'utf8')).byServiceId || {};
+    return JSON.parse(fs.readFileSync(DISPLAY_NAMES, 'utf8')).byServiceId || {};
   } catch {
     return {};
   }

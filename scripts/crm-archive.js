@@ -38,7 +38,7 @@ const {
   loadPreviews, describePreview, loadQuotes, describeQuote,
 } = require('../lib/attachments');
 const {
-  TRACKED, TRACKED_GROUPS, NICKNAMES, ARCHIVE_STATE, MY_SERVICE_ID, BOT_SERVICE_ID,
+  TRACKED, TRACKED_GROUPS, DISPLAY_NAMES, ARCHIVE_STATE, MY_SERVICE_ID, BOT_SERVICE_ID,
   ARCHIVE_ID_OFFSET,
 } = require('../lib/config');
 
@@ -100,7 +100,7 @@ function atomicWriteJson(file, obj) {
   fs.renameSync(tmp, file);
 }
 
-// serviceId -> display name (Signal names overridden by Nathan's nicknames).
+// serviceId -> display name (Signal names overridden by Nathan's display names).
 function buildNameMap(sdb, nicks) {
   const m = new Map();
   for (const r of sdb.prepare(
@@ -315,7 +315,7 @@ function runSweep(cdb, sdb, opts = {}) {
   const deep = Boolean(opts.deep);
   const onlySlug = opts.onlySlug || null;
   const now = Date.now();
-  const nicks = loadJson(NICKNAMES, {}).byServiceId || {};
+  const nicks = loadJson(DISPLAY_NAMES, {}).byServiceId || {};
   const state = loadJson(ARCHIVE_STATE, {});
   const cursors = (state && state.cursors) || {};
   const ranAt = state && state.ranAt;

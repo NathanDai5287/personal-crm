@@ -6,6 +6,9 @@ data/
 
 # Run logs (contain message excerpts in step notes)
 logs/
+# crm-web stdout/stderr redirect logs (created when running the web app detached)
+crm-web.out.log
+crm-web.err.log
 
 # Local-only snapshot history of data/
 .memory-history.git/

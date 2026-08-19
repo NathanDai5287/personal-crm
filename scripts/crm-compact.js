@@ -46,7 +46,7 @@ const {
   GROUPS_DIR,
   BACKUP_DIR,
   COMPACT_STATE,
-  NICKNAMES,
+  DISPLAY_NAMES,
   MY_SERVICE_ID,
   BOT_SERVICE_ID,
   PI_CLI,
@@ -567,7 +567,7 @@ function main() {
   } catch {}
   const nicks = (() => {
     try {
-      return JSON.parse(fs.readFileSync(NICKNAMES, "utf8")).byServiceId || {};
+      return JSON.parse(fs.readFileSync(DISPLAY_NAMES, "utf8")).byServiceId || {};
     } catch {
       return {};
     }
