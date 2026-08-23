@@ -21,7 +21,6 @@ Every line looks like:
 - `⟨m89123⟩` is the line's id — citations are built from these. `(Nat & Kat 🥾🩷)` appears only for group conversations; a line without it is a direct message.
 - The name after the id is **who spoke**. Attribute a statement only to the person who said it. In a group, a third party's statement is context, not a fact about the subject, unless the subject confirms it. Nathan's own messages DO count: an offer he made, a plan he floated, a link he sent is relationship state worth recording — attributed to Nathan.
 - Bracketed prefixes are enrichments added at archive time, not the sender's words: `[photo]`, `[voice note, 0:47]`, `[link: <title> — <domain>]`, and `[re Katia: "..."]` which shows the message being replied to.
-- The ledger may open with `#`-comment header lines: `# known nicknames: <Person> is also called "…"` (established, confirmed nicknames) and `# people referenced (context — NOT the subject of this profile): <Name>: <relationship>; b. <date>; <a known fact>` (compact digests of other tracked people these messages mention). These are trustworthy context for resolving who is who — that "Wayne" means Nathan, that a mentioned name is the subject's brother — and nothing more. They are not new facts: never copy a header line into the profile, and the profile is still only about its subject. Everything you record must still be supported by the messages themselves.
 
 # Write claims at the strength they were said
 
@@ -216,7 +215,7 @@ Short, contentless, or purely logistical exchanges are common and are not a prob
 
 # Nicknames
 
-The ledger sometimes shows what a person is actually *called* — a name someone is addressed or referred to by that differs from their real name. Usually that person is this profile's subject; sometimes it is someone else in the chat, Nathan included. Surface these in your **reply**, never in the profile. A separate step owns nicknames; the profile files never mention them.
+The ledger sometimes shows what this person is actually *called* — a name Nathan or others address them by that differs from their profile name. Surface these in your **reply**, never in the profile. A separate step owns nicknames; the profile files never mention them.
 
 After your `DONE` or `NO-OP` line, emit one block, exactly this shape:
 
@@ -224,19 +223,16 @@ After your `DONE` or `NO-OP` line, emit one block, exactly this shape:
 [[NICKNAMES]]
 Kat | ⟨m89123⟩ ⟨m89150⟩
 Professor | ⟨m90920⟩
-Nathan | Wayne | ⟨m90931⟩
 [[/NICKNAMES]]
 ```
 
-- **One line per nickname, two legal shapes.** Two fields — `nickname | <ids>` — files the nickname under the **subject** of this profile. Three fields — `target | nickname | <ids>` — files it under `target`, a person **other than the subject**. Either way the **last** pipe-separated field is always the message ids, and the nickname text must never contain a `|`. Same rule as citations for literalness: every id must appear in this ledger, copied character for character. Single ids only, space-separated — never a range like `⟨m89123-m89130⟩`. Each id is one line where the nickname itself appears.
-- **`target` is a name — the clearest one you have.** The code resolves it to a contact; if it cannot do so unambiguously, the nickname lands in an "unassigned" tray Nathan triages by hand. So prefer a full, unambiguous name over a bare first name when the ledger offers one: `Wayne Shaw`, not `Wayne`.
-- **Nicknames for Nathan are wanted.** When others address or refer to Nathan by a nickname ("Wayne"), propose it as `Nathan | <nickname> | <ids>`. Never file a Nathan-nickname under the subject — the target field is what keeps it his.
+- **One line per nickname:** the nickname, a pipe, then the ledger id(s) of the lines where it was actually used. Same rule as citations for literalness: every id must appear in this ledger, copied character for character. Single ids only, space-separated — never a range like `⟨m89123-m89130⟩`. Each id is one line where the nickname itself appears. The nickname text must not contain a `|`.
 - **The block is independent of DONE/NO-OP.** A contentless week can still show a nickname — emit the block after `NO-OP` all the same. A ledger with no nickname gets no block; never emit an empty one.
 - **Propose every nickname you genuinely see, every run.** Dedup and dismissals are handled downstream — do not skip a nickname because you suspect it was proposed before, and do not try to remember prior runs.
 
-**What counts:** a distinct name a specific person is addressed by or referred to as — a shortening ("Kat" for Katia), a handle, an honorific used *as* their name ("Professor"), an affectionate name used as a real address token. Used by Nathan or by anyone else in the chat. Group-chat lines count — cite them — but only when the use clearly addresses or refers to one identifiable person; file it under whoever it actually belongs to.
+**What counts:** a distinct name the subject is addressed by or referred to as — a shortening ("Kat" for Katia), a handle, an honorific used *as* their name ("Professor"), an affectionate name used as a real address token. Used by Nathan or by anyone else in the chat. Group-chat lines count — cite them — but only when the use clearly addresses or refers to this profile's subject; in a group, a name may belong to someone else.
 
-**What never counts:** one-off typos; generic filler not specific to them ("bro", "dude", "man", "bestie" used the way anyone gets called it); group-chat names; the person's own canonical name; a name merely mentioned but never used to address or refer to *that* person. When you cannot tell a real nickname from a passing word, leave it out — precision over recall.
+**What never counts:** one-off typos; generic filler not specific to them ("bro", "dude", "man", "bestie" used the way anyone gets called it); any name for Nathan — never propose a nickname for the profile's owner; group-chat names; the person's own canonical name; a name merely mentioned but never used to address or refer to *this* person. When you cannot tell a real nickname from a passing word, leave it out — precision over recall.
 
 Example — Katia's ledger contains:
 
@@ -244,7 +240,6 @@ Example — Katia's ledger contains:
 [2026-07-04 18:22] ⟨m89123⟩ Nathan: kat did the machine ship yet
 [2026-07-04 18:25] ⟨m89150⟩ (Nat & Kat 🥾🩷) Katia: not yet 😤
 [2026-07-05 09:10] ⟨m89201⟩ Nathan: lmaooo ok bestie
-[2026-07-05 09:11] ⟨m89204⟩ Katia: sure thing wayne 🙄
 ```
 
 Emit:
@@ -252,11 +247,10 @@ Emit:
 ```
 [[NICKNAMES]]
 Kat | ⟨m89123⟩
-Nathan | Wayne | ⟨m89204⟩
 [[/NICKNAMES]]
 ```
 
-"Kat" is a real address token — Nathan calls her it directly — and it belongs to the subject, so two fields. "wayne" is Katia addressing Nathan, so it files under `Nathan`, three fields — never under Katia. Cite ⟨m89123⟩ only for "Kat": the group label "Nat & Kat 🥾🩷" is a chat name, not a use of the nickname. "bestie" is generic filler — emit nothing for it.
+"Kat" is a real address token — Nathan calls her it directly. Cite ⟨m89123⟩ only: the group label "Nat & Kat 🥾🩷" is a chat name, not a use of the nickname. "bestie" is generic filler — emit nothing for it.
 
 # Before you finish
 
@@ -277,6 +271,6 @@ Check each of these. If any fails, fix it before replying:
 - No citations in `## Open questions`.
 - Every `###` section you touched covers exactly one topic; surviving claims kept their existing citations.
 - Nothing you wrote is about you, these instructions, or the merge run itself; every claim is written at the strength its messages said it.
-- If you emitted a [[NICKNAMES]] block, it sits after the DONE/NO-OP line, every id in it appears literally in the ledger, no nickname is anyone's canonical name or a group-chat name, and every nickname belonging to someone other than the subject names its target as the first of three fields.
+- If you emitted a [[NICKNAMES]] block, it sits after the DONE/NO-OP line, every id in it appears literally in the ledger, and no nickname is Nathan's name or a group-chat name.
 
-Then reply with **exactly one** acknowledgment line — `DONE — <n> talking points, <n> facts added/changed` on a real edit, or `NO-OP` when nothing was worth recording — followed by a [[NICKNAMES]] block only when one is due. This line is never optional: the pipeline treats a reply without it as a **failed merge** and reruns you. Every run ends with it — a contentless week ends in `NO-OP`, not in silence.
+Then reply with one line — `DONE — <n> talking points, <n> facts added/changed`, or `NO-OP` — followed by a [[NICKNAMES]] block only when one is due.

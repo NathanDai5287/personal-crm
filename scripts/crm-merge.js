@@ -24,6 +24,26 @@ const { ROOT, DATA_DIR, PI_CLI, MERGE_MODEL, MERGE_PROMPT, BOT_SERVICE_ID } = re
 const { dateKey } = require('../lib/weeks');
 const { sumSessionCostUsd, sessionAssistantText } = require('../lib/cost');
 const { storeNicknameProposals } = require('../lib/nicknames');
+const { buildResolver } = require('../lib/people-resolve');
+
+// Resolver for nickname TARGETS (feature 2): maps a name the model names in a
+// `target | nickname | ids` line to a contact slug (or Nathan). Built once per
+// process from the contacts table — contacts are ~static across a run, and mergeContact
+// runs in-process per chunk under crm-daily, so this is cached, not rebuilt per merge.
+let _resolver;
+function nickResolver() {
+  if (_resolver) return _resolver;
+  try {
+    const { openCrmDb } = require('../lib/signal-db');
+    const cdb = openCrmDb();
+    const contacts = cdb.prepare('SELECT file_path, name FROM contacts').all()
+      .map((r) => ({ slug: r.file_path ? r.file_path.replace('data/contacts/', '').replace(/\.md$/, '') : null, name: r.name }))
+      .filter((c) => c.slug);
+    cdb.close();
+    _resolver = buildResolver(contacts);
+  } catch { _resolver = { resolve: () => null }; }
+  return _resolver;
+}
 const { detect, learn, redact } = require('../lib/redact');
 
 // Bucket a failed pi run so the retry loop knows what to do:
@@ -289,7 +309,7 @@ function mergeContact(slug, opts = {}) {
         // filters against the per-contact denylist, so re-storing across a retry is
         // free. Best-effort: a parse/store failure must never fail a merge.
         let nicksStored = 0;
-        if (reply) { try { nicksStored = storeNicknameProposals(slug, reply); } catch { /* non-fatal telemetry */ } }
+        if (reply) { try { nicksStored = storeNicknameProposals(slug, reply, { resolve: nickResolver().resolve }); } catch { /* non-fatal telemetry */ } }
         console.log(`crm-merge: ${slug}: ok${costUsd != null ? ` ($${costUsd.toFixed(4)})` : ''}${nicksStored ? ` (+${nicksStored} nickname${nicksStored === 1 ? '' : 's'})` : ''}${attempt > 1 ? ` (attempt ${attempt})` : ''}`);
         return { ok: true, output, costUsd, attempts: attempt, nicksStored, lastContactFixed: fixed || undefined };
       } catch (e) {
