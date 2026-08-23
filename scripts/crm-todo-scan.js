@@ -215,7 +215,7 @@ function main() {
   }
 
   // PASS 2 — the only part that costs anything.
-  console.log(`\nmodel: ${model}${paid ? '  ** PAID **' : '  (subscription — free)'}`);
+  console.log(`\nmodel: ${model}${paid ? '  ** PAID **' : '  (on plan — no metered cost)'}`);
   const cdb = require('../lib/signal-db').openCrmDb();
   let inserted = 0;
   // The tasks actually inserted this run, so the run's detail page can show them

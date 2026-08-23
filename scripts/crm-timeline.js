@@ -4,10 +4,21 @@
 // (forced); it is also runnable standalone from the CLI for one contact/group.
 //
 // A conversation (a 1:1 DM or a group) keeps its `## Timeline` at decreasing resolution:
-//   ### Recent (raw, last 7 days)   verbatim, rebuilt from the Signal DB each run (capped)
-//   ### Daily log (7–21 days)        one line per day
+//   ### Daily log (7–21 days)        one line per Pacific day (Mon-04:00 anchored)
 //   ### Weekly log (3–10 weeks)      one line per Pacific calendar week (Mon 04:00)
 //   ### Older                        coarse/era notes (+ any pre-existing curated timeline)
+//
+// NO verbatim tier. There used to be a "### Recent (raw, last 7 days)" block that
+// copied the last week's messages into the profile word-for-word. Nathan's call
+// (2026-08-23): "I will never read an exact log of a week's worth of messages …
+// I don't want to be reading (or even storing) exact message copies in the
+// profiles." So the timeline is summaries only. The most recent ~week is therefore
+// NOT in the Timeline (its raw block is gone, and a day is only summarized once it
+// has fully aged out, so a partial day is never frozen) — recent substance lives in
+// the merge sections (What I know / Talking points). This keeps the timeline free
+// of verbatim text AND adds no model cost (the Timeline step runs on a paid model);
+// it does not summarize the current week just to fill the gap. The full verbatim
+// history always lives in the archive (crm.db); fetch it with crm-transcript.js.
 // Contact profiles also get:
 //   ### Group activity               folded day-summaries from groups they're in (capped)
 //
@@ -63,10 +74,9 @@ const {
 
 const DAY = 86_400_000;
 const HOUR = 3_600_000;
-const RAW_DAYS = 7;
+const DAILY_FROM_DAYS = 7; // daily tier covers [7, 21) days ago (was the old RAW_DAYS boundary)
 const DAILY_UNTIL_DAYS = 21;
 const WEEKLY_UNTIL_DAYS = 70;
-const RAW_MAX_MSGS = 150; // cap on verbatim lines kept in-profile (full history is in the DB)
 const GROUP_ACTIVITY_MAX = 40; // cap on folded group-activity lines per contact
 
 const args = process.argv.slice(2);
@@ -184,6 +194,10 @@ function summarize(who, periodLabel, lines, style) {
 // ---- timeline block parsing --------------------------------------------------
 
 const TIER_HEADERS = {
+  // `raw` is PARSE-ONLY now: renderTimeline no longer emits it, but keeping the
+  // header here lets parseTiers still recognize (and thereby DROP) a legacy
+  // "### Recent (raw, …)" block left in an old profile, so verbatim message copies
+  // clear out on the next run instead of lingering. See the top-of-file note.
   raw: "### Recent (raw, last 7 days)",
   daily: "### Daily log",
   weekly: "### Weekly log",
@@ -264,10 +278,9 @@ function parseTiers(block) {
   };
 }
 
-function renderTimeline(rawLines, t, { includeGroup }) {
+function renderTimeline(t, { includeGroup }) {
   const sortDesc = (m) => [...m.entries()].sort((a, b) => (a[0] < b[0] ? 1 : -1));
-  const out = ["## Timeline", "", TIER_HEADERS.raw];
-  out.push(rawLines.length ? rawLines.join("\n") : "_(no messages in the last 7 days)_");
+  const out = ["## Timeline"];
   for (const [tier, label] of [
     ["daily", "daily"],
     ["weekly", "weekly"],
@@ -365,26 +378,22 @@ function weekKeyOfDay(dayKey) {
   return dateKey(weekStart(Date.UTC(y, mo - 1, d, 19, 0)));
 }
 
-// Mutates `t` (daily/weekly/older maps). Returns { rawLines, summaries,
-// attempts, newDailies, historyFrom, foldedOut }. `foldedTo` is the era-fold
-// watermark from state: every weekly key ≤ it has already been distilled.
+// Mutates `t` (daily/weekly/older maps). Returns { summaries, attempts,
+// newDailies, historyFrom, foldedOut }. `foldedTo` is the era-fold watermark from
+// state: every weekly key ≤ it has already been distilled.
 function buildConvTiers(cdb, convs, who, since, now, t, foldedTo) {
-  const all = messagesBetween(cdb, convs, now - RAW_DAYS * DAY, now).lines;
-  const rawLines = all.slice(-RAW_MAX_MSGS);
-  if (all.length > rawLines.length)
-    rawLines.unshift(
-      `_(${all.length - rawLines.length} earlier messages this week omitted — full log in the archive; fetch with crm-transcript.js)_`,
-    );
-
   let summaries = 0;
   let attempts = 0; // model calls this run WOULD make — the cost preview under --no-llm
   const newDailies = new Map();
-  // Daily: ensure a line for each 04:00-Pacific day in [RAW_DAYS, DAILY_UNTIL) that
-  // aged out after tiering started. Days are anchored to the Pacific calendar (see
-  // dayStartsForDaily) so the key and the summarized window match and are stable
-  // across run time-of-day and DST.
+  // Daily: ensure a one-line summary for each 04:00-Pacific day in
+  // [DAILY_FROM_DAYS, DAILY_UNTIL) that aged out after tiering started. Every day in
+  // this window is COMPLETE (the current ~week is excluded, so a partial day is never
+  // frozen under its key — and, with the raw tier gone, the recent week simply isn't
+  // in the Timeline). Days are anchored to the Pacific calendar (see dayStartsForDaily)
+  // so the key and the summarized window match and are stable across run time-of-day
+  // and DST.
   const days = dayStartsForDaily(now);
-  for (let d = RAW_DAYS; d < DAILY_UNTIL_DAYS; d++) {
+  for (let d = DAILY_FROM_DAYS; d < DAILY_UNTIL_DAYS; d++) {
     const ds = days[d];
     if (ds < since) continue;
     const key = dateKey(ds);
@@ -481,7 +490,7 @@ function buildConvTiers(cdb, convs, who, since, now, t, foldedTo) {
     foldedOut = weeks[weeks.length - 1];
   }
 
-  return { rawLines, summaries, attempts, newDailies, historyFrom, foldedOut };
+  return { summaries, attempts, newDailies, historyFrom, foldedOut };
 }
 
 function backupAndWrite(file, next) {
@@ -505,7 +514,7 @@ function buildConversationTimeline({ cdb, convs, who, file, stateKey, state, now
   const since = BACKFILL ? 0 : (prevSince != null ? prevSince : now);
 
   const foldedTo = (state[stateKey] && state[stateKey].foldedTo) || null;
-  const { rawLines, summaries, attempts, newDailies, historyFrom, foldedOut } =
+  const { summaries, attempts, newDailies, historyFrom, foldedOut } =
     buildConvTiers(cdb, convs, who, since, now, t, foldedTo);
   const sinceOut = BACKFILL
     ? Math.min(historyFrom != null ? historyFrom : now, prevSince != null ? prevSince : now)
@@ -524,7 +533,7 @@ function buildConversationTimeline({ cdb, convs, who, file, stateKey, state, now
     }
   }
 
-  const newTimeline = renderTimeline(rawLines, t, { includeGroup });
+  const newTimeline = renderTimeline(t, { includeGroup });
   const next = `${head}${newTimeline}${tail}`.replace(/\s*$/, "") + "\n";
   const changed = !fs.existsSync(file) || next !== ensured;
   if (changed && WRITE) {
@@ -534,7 +543,7 @@ function buildConversationTimeline({ cdb, convs, who, file, stateKey, state, now
       fs.writeFileSync(file, next);
     }
   }
-  return { changed, summaries, attempts, since: sinceOut, foldedTo: foldedOut, rawCount: rawLines.length, next, newDailies };
+  return { changed, summaries, attempts, since: sinceOut, foldedTo: foldedOut, next, newDailies };
 }
 
 function buildContactTimeline(cdb, sdb, slug, state, now, foldLines, nicks) {
@@ -554,11 +563,13 @@ function buildContactTimeline(cdb, sdb, slug, state, now, foldLines, nicks) {
     })),
     ...sources.biGroupConvIds.map((id) => ({
       convId: id, prefix: `(${sources.labels[id]}) `, conversation: sources.labels[id],
-      srcFilter: [MY_SERVICE_ID, row.signal_id],
+      // ALL of this person's identities, not just the canonical one — a
+      // re-registered contact's group lines carry an alias src (see lib/sources).
+      srcFilter: [MY_SERVICE_ID, ...sources.allIds],
     })),
     ...sources.multiGroupConvIds.map((id) => ({
       convId: id, prefix: `(${sources.labels[id]}) `, conversation: sources.labels[id],
-      srcFilter: [row.signal_id],
+      srcFilter: [...sources.allIds],
     })),
   ];
   if (convs.length === 0) return { slug, skipped: "no conversations" };
@@ -706,7 +717,7 @@ function main() {
     scanned += 1;
     if (r.changed) changedCount += 1;
     summariesCount += r.summaries || 0;
-    console.log(`- group ${g.slug} (${r.name}): raw=${r.rawCount} summaries=${r.summaries}/${r.attempts} participants=[${r.participants.join(", ")}] changed=${r.changed}`);
+    console.log(`- group ${g.slug} (${r.name}): summaries=${r.summaries}/${r.attempts} participants=[${r.participants.join(", ")}] changed=${r.changed}`);
     if (WRITE) state[`group:${g.slug}`] = { since: r.since, foldedTo: r.foldedTo || undefined, ranAt: now };
     for (const [date, summary] of r.newDailies || []) {
       const line = `- ${date} [${r.name}]: ${summary}`;
@@ -728,7 +739,7 @@ function main() {
     scanned += 1;
     if (r.changed) changedCount += 1;
     summariesCount += r.summaries || 0;
-    console.log(`- ${slug} (${r.name}): raw=${r.rawCount} summaries=${r.summaries}/${r.attempts} changed=${r.changed}`);
+    console.log(`- ${slug} (${r.name}): summaries=${r.summaries}/${r.attempts} changed=${r.changed}`);
     if (WRITE) state[slug] = { since: r.since, foldedTo: r.foldedTo || undefined, ranAt: now };
     if (!WRITE && r.next && slugArg) printTimeline(r.next);
   }

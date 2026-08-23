@@ -46,11 +46,9 @@ const nameQuery = usingSelectorFlag ? undefined : args.positionals[0];
 const limitArg = usingSelectorFlag ? args.positionals[0] : args.positionals[1];
 const limit = parseInt(limitArg || '20', 10);
 
-function pad(n) { return String(n).padStart(2, '0'); }
-function fmtTs(ms) {
-  const d = new Date(ms);
-  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
-}
+// Pacific "YYYY-MM-DD HH:MM", matching every ledger/Timeline stamp (was UTC).
+const { fmtLocal } = require('../lib/weeks');
+function fmtTs(ms) { return fmtLocal(ms); }
 
 const db = openSignalDb();
 

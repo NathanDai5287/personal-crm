@@ -34,6 +34,7 @@ const fs = require('fs');
 const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
 const { CRM_DB, ROOT } = require('../lib/config');
+const { fmtLocal } = require('../lib/weeks');
 
 const DEFAULT_DEST = process.env.CRM_BACKUP_DIR
   || path.posix.join(path.posix.dirname(ROOT), 'personal-crm-backups');
@@ -48,9 +49,12 @@ const STALE_DAYS = 8;          // --check fails past this
 const DAY = 86_400_000;
 const NAME_RE = /^crm-(\d{4})-(\d{2})-(\d{2})T(\d{2})(\d{2})\.db$/;
 
+// Pacific wall-clock stamp (was host-local, i.e. UTC on minmus). The retention
+// reparse (listBackups) reads these parts back only for RELATIVE ordering and
+// week/month bucketing, so a single consistent convention is all it needs.
 function stamp(d) {
-  const p = (n) => String(n).padStart(2, '0');
-  return `crm-${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}${p(d.getMinutes())}.db`;
+  const [date, time] = fmtLocal(d.getTime()).split(' '); // "YYYY-MM-DD HH:MM" Pacific
+  return `crm-${date}T${time.replace(':', '')}.db`;
 }
 
 // Parsed from the filename rather than from mtime: a backup dir may be synced,

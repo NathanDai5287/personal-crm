@@ -12,6 +12,7 @@
 const fs = require("fs");
 const { openSignalDb, openCrmDb } = require("../lib/signal-db");
 const { TRACKED, CONTACTS_DIR, DISPLAY_NAMES, BOT_SERVICE_ID } = require("../lib/config");
+const { dateKey } = require("../lib/weeks");
 
 const DAY = 86_400_000;
 const WINDOW_DAYS = 30; // look-back window for "recent activity"
@@ -27,10 +28,10 @@ function slugify(name, fallback) {
     .replace(/^-+|-+$/g, "");
   return s || fallback;
 }
+// Pacific calendar date — matches every ledger/Timeline/profile stamp (never UTC,
+// or a "Last contact" written after ~4–5pm Pacific would jump to tomorrow).
 function todayKey() {
-  const d = new Date();
-  const p = (n) => String(n).padStart(2, "0");
-  return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())}`;
+  return dateKey(Date.now());
 }
 
 function main() {

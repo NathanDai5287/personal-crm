@@ -225,7 +225,7 @@ function main() {
   }
 
   const explicitLedger = arg('--ledger', null);
-  console.log(`model: ${MODEL}${MODEL.startsWith(FREE_PREFIX) ? '  (subscription — free)' : '  ** PAID **'}`);
+  console.log(`model: ${MODEL}${MODEL.startsWith(FREE_PREFIX) ? '  (on plan — no metered cost)' : '  ** PAID **'}`);
   console.log(`prompt: ${PROMPT_FILE}`);
   console.log(write ? 'MODE: --write (drafts will be inserted)\n' : 'MODE: dry run (nothing written)\n');
 

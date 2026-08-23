@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const { openSignalDb, openCrmDb } = require('../lib/signal-db');
 const { CONTACTS_DIR } = require('../lib/config');
+const { dateKey } = require('../lib/weeks');
 
 function slugify(name) {
   return name.toLowerCase().normalize('NFKD').replace(/[^\w\s-]/g, '').trim().replace(/\s+/g, '-').slice(0, 60) || 'unknown';
@@ -46,8 +47,9 @@ for (const r of rows) {
   const slug = uniqueSlug(name);
   const rel = path.posix.join('data/contacts', `${slug}.md`);
   const filePath = path.join(CONTACTS_DIR, `${slug}.md`);
-  const firstISO = r.first_at ? new Date(r.first_at).toISOString().slice(0, 10) : 'unknown';
-  const lastISO = r.last_at ? new Date(r.last_at).toISOString().slice(0, 10) : 'unknown';
+  // Pacific calendar dates, matching every other date in a profile (was UTC).
+  const firstISO = r.first_at ? dateKey(r.first_at) : 'unknown';
+  const lastISO = r.last_at ? dateKey(r.last_at) : 'unknown';
 
   const body = `# ${name}
 

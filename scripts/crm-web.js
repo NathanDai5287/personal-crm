@@ -1875,7 +1875,12 @@ function adminData() {
     dial(L('ingest'), 'weekly · Mon 4am', ingestMs, 7 * DAY, 'ingest', { prevFire: prevMon, nextFire: nextMon }),
     dial(L('todo'), 'hourly · after sweep', todoMs, HOUR, 'todo', { prevFire: nextHour - HOUR, nextFire: nextHour }),
   ];
-  return { health, roster, dials, toggles: RUN_TOGGLES.getToggles(), models: RUN_MODELS.getModels(), modelOptions: RUN_MODELS.MODELS };
+  // The model each job falls back to when no override is stored — so the picker can
+  // show the real effective model instead of a "default" placeholder. Mirrors the
+  // client-side DEF map in JOB_MODAL_JS (ingest uses MERGE_MODEL; todo defaults to
+  // kimi-k3). Both currently resolve to kimi-k3.
+  const modelDefaults = { ingest: MERGE_MODEL, todo: 'moonshotai/kimi-k3' };
+  return { health, roster, dials, toggles: RUN_TOGGLES.getToggles(), models: RUN_MODELS.getModels(), modelOptions: RUN_MODELS.MODELS, modelDefaults };
 }
 
 // Confirm modal for the job buttons. Replaces the browser confirm() with a
@@ -1921,8 +1926,8 @@ const JOB_MODAL_JS = `<script>(function(){
   // on a match; ingest sums the per-person data-cost of the boxes being run.
   function costLine(kind,isSweep,runBoxes){
     var el=document.getElementById('mCost');
-    if(isSweep){el.textContent='Est. — free · no model call · seconds';return;}
-    if(kind==='todo'){var tm=modelFor('todo');el.textContent='Est. — $0 unless a "make sure" line matches · '+tm.label;return;}
+    if(isSweep){el.textContent='Est. — no model call · seconds';return;}
+    if(kind==='todo'){var tm=modelFor('todo');el.textContent='Est. — no model call unless a "make sure"/"eod" line matches · '+tm.label;return;}
     var mj=modelFor(kind);
     var sum=0,calls=0,dur=0,unknown=false;
     runBoxes.forEach(function(c){
@@ -1931,7 +1936,7 @@ const JOB_MODAL_JS = `<script>(function(){
       calls+=k;
       if(d===''||d==null){if(k>0)unknown=true;}else{sum+=parseFloat(d);}
     });
-    var money=mj.free?('$0 · '+mj.label+' (sub)'):((unknown?'—':fmtUsd(sum))+' · '+mj.label);
+    var money=mj.free?('on plan · '+mj.label):((unknown?'—':fmtUsd(sum))+' · '+mj.label);
     el.textContent='Est. '+money+'  ·  '+fmtDur(dur)+'  ·  '+calls+(calls===1?' week':' weeks');
   }
   function open(btn){
@@ -1953,7 +1958,7 @@ const JOB_MODAL_JS = `<script>(function(){
     st.textContent=kindLabel;
     st.className='modal-stamp '+(isSweep?'sweep':kind);
     document.getElementById('mTitle').textContent='Run '+kindLabel;
-    document.getElementById('mMeta').textContent=isSweep?'Free — copies messages into the archive, no model.':(kind==='todo'?'Scans for "make sure" commitments; a model runs only on a match.':'Calls the model — ingest, then Timeline.');
+    document.getElementById('mMeta').textContent=isSweep?'No model — copies messages into the archive.':(kind==='todo'?'Scans for "make sure"/"eod" commitments; a model runs only on a match.':'Calls the model — ingest, then Timeline.');
     costLine(kind,isSweep,runBoxes);
     document.getElementById('mWhoH').textContent=(kind==='todo'?'Whole archive — ':(everyone?'Everyone — ':''))+'will run on '+who.length+(who.length===1?' person':' people');
     var ul=document.getElementById('mWho');ul.innerHTML='';
@@ -2275,7 +2280,7 @@ function runDetailPage(id) {
   } catch { /* older runs have no persisted log */ }
 
   // Estimated vs actual cost + duration for this run, when recorded.
-  const money = (v, model) => (isFree(model) ? '$0 · sub' : fmtUsd(v == null ? null : v));
+  const money = (v, model) => (isFree(model) ? 'on plan' : fmtUsd(v == null ? null : v));
   const costHtml = (run.costUsd !== undefined || run.actualCostUsd !== undefined)
     ? `<span class="sub"> · cost est ${esc(money(run.costUsd, run.costModel))} · actual ${esc(money(run.actualCostUsd, run.costModel))}</span>`
     : '';
