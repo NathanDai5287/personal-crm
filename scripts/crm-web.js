@@ -587,8 +587,75 @@ function contactList() {
   }
 }
 
+// Suggestions + the contact picker for the People-tab nickname inbox. `list` is a
+// contactList() result, reused so we don't re-query. Cite slips resolve like a
+// profile's. Suggestions come from lib/nicknames (assigned + unassigned).
+function inboxData(list) {
+  const nameBySlug = new Map(list.map((c) => [c.slug, c.name]));
+  const contacts = list.map((c) => ({ slug: c.slug, name: c.name })).sort((a, b) => a.name.localeCompare(b.name));
+  const dates = msgDates();
+  try {
+    const now = Date.now();
+    const suggestions = P.listSuggestions().map((s) => ({
+      id: s.id, text: s.text, slug: s.slug,
+      name: s.slug ? (nameBySlug.get(s.slug) || s.slug) : null,
+      cites: nickCites(s.cites, dates, now),
+    }));
+    return { suggestions, contacts };
+  } finally {
+    dates.close();
+  }
+}
+
+function renderInbox() {
+  const list = contactList();
+  const { suggestions, contacts } = inboxData(list);
+  return render(V.NnInbox(suggestions, contacts));
+}
+
+// One inbox action by nickname id. assign (to a contact — also confirms), confirm
+// (an already-assigned suggestion), or dismiss (delete + denylist).
+function applyNickInbox(action, payload) {
+  const id = Number(payload.id);
+  if (!Number.isInteger(id)) return { ok: false, status: 400, error: 'bad id' };
+  if (action === 'confirm') return P.confirmById(id) ? { ok: true } : { ok: false, status: 409, error: 'assign it to a contact first, or it no longer exists' };
+  if (action === 'dismiss') return P.dismissById(id) ? { ok: true } : { ok: false, status: 404, error: 'that suggestion no longer exists — reload' };
+  if (action === 'assign') {
+    const slug = String(payload.slug || '').trim();
+    if (!isSafeSlug(slug)) return { ok: false, status: 400, error: 'bad contact' };
+    try { fs.readFileSync(path.posix.join(CONTACTS_DIR, `${slug}.md`), 'utf8'); } catch { return { ok: false, status: 404, error: 'no such contact' }; }
+    return P.assignNickname(id, slug) ? { ok: true } : { ok: false, status: 404, error: 'that suggestion no longer exists — reload' };
+  }
+  return { ok: false, status: 400, error: 'unknown action' };
+}
+
+// Client for the People-tab inbox: delegate clicks on #nnInbox controls, POST the
+// action by id, and swap the whole block for the server's re-render.
+const NN_INBOX_JS = `<script>(function(){
+  function post(action,payload){
+    return fetch('/nick/'+action,{method:'POST',credentials:'same-origin',
+      headers:{'Content-Type':'application/json','X-Requested-With':'fetch'},
+      body:JSON.stringify(payload||{})}).then(function(r){return r.json().catch(function(){return{ok:false};});});
+  }
+  document.addEventListener('click',function(e){
+    if(!e.target.closest)return;
+    var btn=e.target.closest('#nnInbox [data-act]'); if(!btn)return;
+    var li=btn.closest('.nn-inbox-item'); if(!li)return;
+    var id=Number(li.getAttribute('data-nn-id')); var act=btn.getAttribute('data-act');
+    var payload={id:id};
+    if(act==='assign'){var sel=li.querySelector('.nn-assign-sel');var slug=sel&&sel.value;if(!slug){if(sel)sel.focus();return;}payload.slug=slug;}
+    btn.disabled=true;
+    post(act,payload).then(function(r){
+      if(r&&r.ok&&r.html!=null){var cur=document.getElementById('nnInbox');if(cur)cur.outerHTML=r.html;}
+      else{btn.disabled=false;}
+    });
+  });
+})();</script>`;
+
 function indexPage() {
-  return page('People — personal-crm', render(V.people(contactList()).body));
+  const list = contactList();
+  const { suggestions, contacts } = inboxData(list);
+  return page('People — personal-crm', render(V.people(list, { suggestions, contacts }).body) + NN_INBOX_JS, '/');
 }
 
 // A nickname's citation slips resolve exactly like a fact bullet's: the face is the
@@ -3227,6 +3294,25 @@ function start() {
       // carries the re-rendered .nn block so the client swaps it in. Must precede
       // the generic /c/<slug> GET below (whose pattern would not match anyway, but
       // whose 404 would if this fell through).
+      // People-tab suggestions inbox: id-based nickname actions (no per-contact slug
+      // in the path). Re-renders the whole #nnInbox block for the client to swap.
+      const nib = url.pathname.match(/^\/nick\/(assign|confirm|dismiss)$/);
+      if (nib && req.method === 'POST') {
+        if (!firstPartyOnly(req)) { sendJson(403, { ok: false, error: 'cross-site request refused' }); return; }
+        readBody(req, (raw2) => {
+          try {
+            let payload;
+            try { payload = JSON.parse(raw2 || '{}'); } catch { sendJson(400, { ok: false, error: 'bad JSON' }); return; }
+            const r = applyNickInbox(nib[1], payload || {});
+            if (!r.ok) { sendJson(r.status || 400, { ok: false, error: r.error }); return; }
+            sendJson(200, { ok: true, html: renderInbox() });
+          } catch (e) {
+            try { sendJson(500, { ok: false, error: String(e.message).slice(0, 200) }); } catch { /* sent */ }
+          }
+        });
+        return;
+      }
+
       const cnk = url.pathname.match(/^\/c\/([^/]+)\/nick\/(add|confirm|edit|dismiss)$/);
       if (cnk && req.method === 'POST') {
         const slug = decodeURIComponent(cnk[1]);

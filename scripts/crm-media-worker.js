@@ -13,15 +13,15 @@
 //
 // ENGINES (auto-detected; missing engine just leaves that kind pending):
 //   OCR  — `tesseract` on PATH (or $CRM_TESSERACT).            [needs: apt tesseract-ocr]
-//   STT  — a Python with faster-whisper at $CRM_STT_PYTHON     [no sudo: pip in a venv]
-//          (model $CRM_STT_MODEL, default "base.en"), via tools/stt.py.
+//   STT  — whisper.cpp: $CRM_WHISPER_CLI (the whisper-cli binary) + $CRM_WHISPER_MODEL
+//          (a ggml model, e.g. ggml-base.en.bin). Audio is transcoded to 16 kHz mono
+//          WAV with ffmpeg ($CRM_FFMPEG, default `ffmpeg`) first, which whisper.cpp needs.
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 const { openCrmDb, openSignalDb } = require('../lib/signal-db');
-const { ROOT } = require('../lib/config');
 const { decryptableByHash, decryptRow } = require('../lib/signal-attachments');
 const M = require('../lib/media');
 
@@ -32,15 +32,16 @@ const argVal = (f, d) => { const i = args.indexOf(f); return i !== -1 && args[i 
 try { os.setPriority(19); } catch { /* best-effort renice to the floor */ }
 
 const TESSERACT = process.env.CRM_TESSERACT || 'tesseract';
-const STT_PYTHON = process.env.CRM_STT_PYTHON || '';
-const STT_MODEL = process.env.CRM_STT_MODEL || 'base.en';
-const STT_SCRIPT = path.join(ROOT, 'tools', 'stt.py');
+const WHISPER_CLI = process.env.CRM_WHISPER_CLI || '';
+const WHISPER_MODEL = process.env.CRM_WHISPER_MODEL || '';
+const FFMPEG = process.env.CRM_FFMPEG || 'ffmpeg';
 
 function have(cmd, probe) {
   try { execFileSync(cmd, probe, { stdio: 'ignore', timeout: 15_000 }); return true; } catch { return false; }
 }
 const ocrOk = () => have(TESSERACT, ['--version']);
-const sttOk = () => Boolean(STT_PYTHON) && fs.existsSync(STT_PYTHON) && fs.existsSync(STT_SCRIPT);
+const sttOk = () => Boolean(WHISPER_CLI) && fs.existsSync(WHISPER_CLI)
+  && Boolean(WHISPER_MODEL) && fs.existsSync(WHISPER_MODEL) && have(FFMPEG, ['-version']);
 
 const EXT = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp', 'image/gif': '.gif',
   'image/bmp': '.bmp', 'image/tiff': '.tiff', 'audio/mp4': '.m4a', 'audio/aac': '.aac',
@@ -52,9 +53,18 @@ function runOcr(file) {
   const out = execFileSync(TESSERACT, [file, 'stdout', '--psm', '3'], { encoding: 'utf8', timeout: 120_000, maxBuffer: 8 * 1024 * 1024 });
   return out.replace(/\r/g, '').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
 }
-function runStt(file) {
-  const out = execFileSync(STT_PYTHON, [STT_SCRIPT, file, STT_MODEL], { encoding: 'utf8', timeout: 600_000, maxBuffer: 8 * 1024 * 1024 });
-  return out.replace(/\s+/g, ' ').trim();
+function runStt(file, tmpDir) {
+  // whisper.cpp needs 16 kHz mono PCM WAV; transcode the decrypted media first.
+  const wav = path.join(tmpDir, `${path.basename(file)}.wav`);
+  try {
+    execFileSync(FFMPEG, ['-y', '-i', file, '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', wav],
+      { stdio: 'ignore', timeout: 120_000 });
+    const out = execFileSync(WHISPER_CLI, ['-m', WHISPER_MODEL, '-f', wav, '-nt', '-np'],
+      { encoding: 'utf8', timeout: 600_000, maxBuffer: 8 * 1024 * 1024 });
+    return out.replace(/\s+/g, ' ').trim();
+  } finally {
+    try { fs.unlinkSync(wav); } catch { /* gone */ }
+  }
 }
 
 // Scan the Signal DB for every DOWNLOADED image/audio attachment and enqueue it.
@@ -77,7 +87,7 @@ function enqueueExisting(cdb, sdb) {
 function processOne(cdb, sdb, kinds, tmpDir) {
   const claim = M.claimNext(cdb, kinds);
   if (!claim) return false;
-  const engine = claim.kind === 'ocr' ? `tesseract` : `faster-whisper ${STT_MODEL}`;
+  const engine = claim.kind === 'ocr' ? 'tesseract' : `whisper.cpp ${path.basename(WHISPER_MODEL || 'whisper')}`;
   let tmp = null;
   try {
     const row = decryptableByHash(sdb, claim.hash);
@@ -85,7 +95,7 @@ function processOne(cdb, sdb, kinds, tmpDir) {
     const buf = decryptRow(row);
     tmp = path.join(tmpDir, `${crypto.randomBytes(8).toString('hex')}${extFor(claim.content_type)}`);
     fs.writeFileSync(tmp, buf);
-    const text = claim.kind === 'ocr' ? runOcr(tmp) : runStt(tmp);
+    const text = claim.kind === 'ocr' ? runOcr(tmp) : runStt(tmp, tmpDir);
     if (!text) M.setSkip(cdb, claim.hash, 'no text extracted');
     else M.setDone(cdb, claim.hash, text, engine);
     console.log(`  ${claim.kind} ${claim.hash.slice(0, 12)}… -> ${text ? `${text.length} chars` : 'empty'}`);
@@ -107,7 +117,7 @@ function main() {
   const sdb = openSignalDb();
   const kinds = [];
   if (ocrOk()) kinds.push('ocr'); else console.log('OCR engine (tesseract) not found — image rows stay pending.');
-  if (sttOk()) kinds.push('stt'); else console.log(`STT engine (faster-whisper at CRM_STT_PYTHON) not found — audio rows stay pending.`);
+  if (sttOk()) kinds.push('stt'); else console.log('STT engine (whisper.cpp at CRM_WHISPER_CLI + CRM_WHISPER_MODEL, plus ffmpeg) not found — audio rows stay pending.');
 
   if (has('--enqueue-existing')) {
     const r = enqueueExisting(cdb, sdb);

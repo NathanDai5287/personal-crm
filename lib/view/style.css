@@ -819,6 +819,23 @@ table.dtab{width:100%;border-collapse:collapse;font-family:"Courier Prime",monos
 .nn-add:focus-visible{outline:none}
 /* An unobtrusive inline note when the server refuses a nickname edit. */
 .nn-note{display:block;margin-top:8px;font-family:"Courier Prime",monospace;font-size:11px;color:var(--amber)}
+/* People-tab nickname-suggestions inbox: one row per suggestion to triage. */
+.nn-inbox{margin:14px 0}
+.nn-inbox[hidden]{display:none}
+.nn-inbox-list{list-style:none;margin:8px 0 0;padding:0;display:flex;flex-direction:column;gap:6px}
+.nn-inbox-item{display:flex;align-items:center;gap:10px;flex-wrap:wrap;background:var(--card);
+  border:1px solid var(--rule);border-radius:6px;padding:7px 11px}
+.nn-inbox-item .nn-word{font-family:"Courier Prime",monospace;font-weight:700}
+.nn-inbox-item .nn-for{color:var(--soft);font-size:12.5px}
+.nn-inbox-item .nn-cites{display:inline-flex;gap:5px}
+.nn-inbox-item .nn-assign-sel{font-family:"Courier Prime",monospace;font-size:12px;padding:2px 4px;
+  border:1px solid var(--rule);border-radius:4px;background:var(--ground);color:var(--ink)}
+.nn-inbox-item .nn-assign-sel:focus,.nn-inbox-item .nn-assign-sel:focus-visible{outline:none;border-color:var(--soft)}
+.nn-inbox-item .nn-ctl{margin-left:auto;display:flex;gap:6px}
+.nn-inbox-item .nn-ctl button{font-family:"Courier Prime",monospace;font-size:11px;cursor:pointer;
+  border:1px solid var(--rule);border-radius:4px;background:transparent;color:var(--soft);padding:2px 8px}
+.nn-inbox-item .nn-ok:hover,.nn-inbox-item .nn-assign:hover{color:var(--moss);border-color:color-mix(in srgb,var(--moss) 55%,transparent)}
+.nn-inbox-item .nn-del:hover{color:var(--ox);border-color:color-mix(in srgb,var(--ox) 55%,transparent)}
 /* The inline nickname editor: a textarea that keeps a fixed character width so it
    never widens the row, and grows in height (script-sized) as you type. While a
    row is being edited its controls hide so nothing competes with the field. */
