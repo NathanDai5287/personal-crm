@@ -115,9 +115,13 @@ function main() {
   if (has('--status')) { console.log('media_text:', JSON.stringify(M.counts(cdb))); cdb.close(); return; }
 
   const sdb = openSignalDb();
-  const kinds = [];
+  let kinds = [];
   if (ocrOk()) kinds.push('ocr'); else console.log('OCR engine (tesseract) not found — image rows stay pending.');
   if (sttOk()) kinds.push('stt'); else console.log('STT engine (whisper.cpp at CRM_WHISPER_CLI + CRM_WHISPER_MODEL, plus ffmpeg) not found — audio rows stay pending.');
+  // --kinds ocr,stt restricts what this run processes (the rest stays pending) — handy
+  // for draining just images, or just voice notes.
+  const only = argVal('--kinds', '');
+  if (only) kinds = kinds.filter((k) => only.split(',').map((s) => s.trim()).includes(k));
 
   if (has('--enqueue-existing')) {
     const r = enqueueExisting(cdb, sdb);
