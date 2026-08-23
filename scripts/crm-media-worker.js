@@ -50,7 +50,8 @@ const extFor = (ct) => EXT[(ct || '').toLowerCase()] || '.bin';
 
 function runOcr(file) {
   // tesseract writes plain text to stdout with the `stdout` output arg.
-  const out = execFileSync(TESSERACT, [file, 'stdout', '--psm', '3'], { encoding: 'utf8', timeout: 120_000, maxBuffer: 8 * 1024 * 1024 });
+  const out = execFileSync(TESSERACT, [file, 'stdout', '--psm', '3'],
+    { encoding: 'utf8', timeout: 120_000, maxBuffer: 8 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] });
   return out.replace(/\r/g, '').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 function runStt(file, tmpDir) {
@@ -60,7 +61,7 @@ function runStt(file, tmpDir) {
     execFileSync(FFMPEG, ['-y', '-i', file, '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', wav],
       { stdio: 'ignore', timeout: 120_000 });
     const out = execFileSync(WHISPER_CLI, ['-m', WHISPER_MODEL, '-f', wav, '-nt', '-np'],
-      { encoding: 'utf8', timeout: 600_000, maxBuffer: 8 * 1024 * 1024 });
+      { encoding: 'utf8', timeout: 600_000, maxBuffer: 8 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] });
     return out.replace(/\s+/g, ' ').trim();
   } finally {
     try { fs.unlinkSync(wav); } catch { /* gone */ }
