@@ -60,6 +60,42 @@ deferred to a later run. Read as min/max/cutoff:
 A released pile is then split by `planChunks()` into week-aligned, token-bounded chunks — one
 merge model call per chunk (the unit the cost estimate and per-chunk cursor commit both use).
 
+### REFERENCE — the self-calibrating cost estimator (`lib/cost.js`)
+Yes, it exists. Two estimates, one truth:
+
+- **Call COUNT** comes from replaying the REAL ingest gate — `estIngestFromRows()` runs the same
+  `gateBuckets` + `planChunks` the pipeline uses, so the number of merges it predicts is what
+  will actually happen, not a one-merge-per-week proxy.
+- **Per-call PRICE is self-calibrating.** Two things dominate a bill and neither is knowable up
+  front: how many agentic **turns** a merge loops (the whole input payload is re-sent each turn)
+  and how many **output+reasoning tokens** it emits. Rather than freeze guesses, we fit them per
+  model from actual runs:
+
+  ```
+  usd ≈ A·base + B      with  A = price_in · turns,  B = price_out · out
+  ⇒   turns = A / price_in,   out = B / price_out
+  ```
+
+  where `base` = `mergeInputBase` (system prompt + profile + ledger + tool scaffold — the
+  per-turn input). `recordCostSample()` appends `{model, base, usd, at}` to
+  `data/crm-cost-samples.jsonl` whenever crm-daily sees a real billed cost; `fitCostModel()`
+  least-squares fits A and B per model and writes `data/crm-cost-model.json`, re-fit after each
+  run. `mergeCallUsd()` then uses the measured `turns`/`out` for that model.
+
+- **Guards.** `FIT_MIN_SAMPLES = 5` — below that a model keeps `evals/estimate.js`'s midpoint
+  defaults (3 turns / 5,000 out). A pathological fit (turns outside 0.5–20, out outside 0–100k)
+  is rejected and the defaults stand. `anthropic/*` bill $0 under subscription auth (`isFree`),
+  so they contribute NO samples — only paid (`moonshotai/*`) models ever get a fitted curve.
+- **Ground truth** the fit calibrates against: `sumSessionCostUsd()` sums pi's real per-turn
+  `usage.cost.total` out of the session JSONL after a run — the actual billed figure, not an
+  estimate.
+
+Surfaces in the `/admin` roster pending-cost, the job confirm modal, and the run ledger
+(`fmtUsd`, labelled "est."). **Current state (2026-08-22):** no model has ≥5 paid samples yet
+(DUNA has only ~5 ingest runs and its recent runs were free Anthropic), so `crm-cost-model.json`
+is empty and every estimate is still on the 3-turns/5k-out defaults — which is exactly why the
+backfill figures quoted this session are ±50% ballparks, not fitted numbers.
+
 ### DECISION — todo triggers settle for 5 minutes before extraction
 Nathan asked what happens if he sends "i'll make sure …" right at the top of the hour, before
 the conversation has enough context. It exposed a real gap: the sweep and `crm-todo-scan.js`

@@ -295,14 +295,6 @@ pre.log{background:var(--paper);border:1px solid var(--rule);padding:12px 14px;f
 pre.diff{background:var(--paper);border:1px solid var(--rule);padding:12px 14px;font-size:12px;overflow-x:auto;color:var(--ink)}
 pre.diff .add{color:#2e9e5b}pre.diff .del{color:var(--ox)}pre.diff .hunk{color:var(--stamp)}pre.diff .ctx{color:var(--soft)}
 .difflabel{font-family:"Courier Prime",monospace;font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--soft);margin:14px 0 4px}
-.toggles{display:flex;flex-wrap:wrap;gap:10px;margin-top:10px}
-.toggle{display:flex;align-items:center;gap:12px;background:var(--card);border:1px solid var(--rule);border-radius:8px;padding:8px 12px;min-width:250px}
-.toggle.off{opacity:.9}
-.toggle-main{display:flex;flex-direction:column;gap:1px;margin-right:auto}
-.toggle-sub{font-size:11px;color:var(--soft)}
-.toggle-state{font-family:"Courier Prime",monospace;font-size:10px;letter-spacing:.08em;text-transform:uppercase;padding:2px 8px;border-radius:999px;border:1px solid transparent}
-.toggle-state.on{color:var(--moss);border-color:color-mix(in srgb,var(--moss) 45%,transparent);background:color-mix(in srgb,var(--moss) 12%,transparent)}
-.toggle-state.off{color:var(--amber);border-color:color-mix(in srgb,var(--amber) 50%,transparent);background:color-mix(in srgb,var(--amber) 12%,transparent)}
 details.step{background:var(--card);border:1px solid var(--rule);border-radius:8px;padding:8px 12px;margin:6px 0}
 details.step summary{cursor:pointer;display:flex;gap:10px;align-items:baseline}
 details.step summary .nm{font-weight:600}
@@ -2086,13 +2078,24 @@ function liveJobRow() {
 }
 
 function runsPage() {
-  const records = loadRuns()
-    // Legacy records predate `kind`; they are all ingest runs.
-    .map((r) => ({ ...r, kind: r.kind || 'ingest' }))
-    // No-op hourly ticks are recorded on disk but hidden here so they don't bury
-    // the runs that mattered: a sweep that archived nothing, or a todo scan that
-    // found no triggers and inserted nothing. Everything with any effect shows.
+  const all = loadRuns().map((r) => ({ ...r, kind: r.kind || 'ingest' }));
+  // The MOST RECENT run of each cadence kind always shows — so every scheduled
+  // job (sweep, deep-sweep, ingest, todo) is visibly represented in the ledger as
+  // a heartbeat, even when its latest tick did nothing. `crm-archive --deep`
+  // records kind 'sweep', so a deep sweep counts as the sweep heartbeat.
+  const latestOfKind = new Map();
+  for (const r of all) {
+    const k = r.kind;
+    const prev = latestOfKind.get(k);
+    if (!prev || (r.startedAt || 0) > (prev.startedAt || 0)) latestOfKind.set(k, r);
+  }
+  const latestIds = new Set([...latestOfKind.values()].map((r) => r.id));
+  const records = all
+    // Older no-op hourly ticks are hidden so they don't bury the runs that
+    // mattered — but a run is kept if it did something OR it is the latest of its
+    // kind (the heartbeat, above). Everything with any effect always shows.
     .filter((r) => {
+      if (latestIds.has(r.id)) return true;
       if (r.kind === 'sweep' && !r.inserted) return false;
       if (r.kind === 'todo' && !r.triggers && !r.inserted) return false;
       return true;
@@ -2881,9 +2884,14 @@ function start() {
         readBody(req, (body) => {
           try {
             const p = new URLSearchParams(body);
-            const job = p.get('job') || '';
-            const enabled = p.get('enabled') === '1' || p.get('enabled') === 'true';
+            const job = p.get('job') || p.get('toggle') || '';
             if (!RUN_TOGGLES.JOBS.includes(job)) { send(400, page('Bad request', '<p>Unknown job.</p>')); return; }
+            // The per-dial switch is a single button that posts a bare `toggle=<job>`
+            // → flip the current state. An explicit `enabled` (any two-state caller)
+            // still wins.
+            const enabled = p.has('enabled')
+              ? (p.get('enabled') === '1' || p.get('enabled') === 'true')
+              : !RUN_TOGGLES.isEnabled(job);
             RUN_TOGGLES.setToggle(job, enabled);
             res.writeHead(303, { Location: '/admin' });
             res.end();
