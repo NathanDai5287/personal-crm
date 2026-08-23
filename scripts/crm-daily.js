@@ -65,13 +65,16 @@ const { openCrmDb, openSignalDb } = require('../lib/signal-db');
     if (a === '--only') { i += 1; continue; }
     if (a === '--max-chunks') { i += 1; continue; }
     if (a === '--timeline-backfill') continue;
+    if (a === '--force') continue;
     console.error(`crm-daily: unknown flag '${a}'`);
-    console.error('known: --dry-run, --only <slug>, --max-chunks <n>, --timeline-backfill');
+    console.error('known: --dry-run, --only <slug>, --max-chunks <n>, --timeline-backfill, --force');
     process.exit(2);
   }
 }
 
 const DRY_RUN = process.argv.includes('--dry-run');
+// --force bypasses the run-toggle pause (a hand-started UI run always proceeds).
+const FORCE = process.argv.includes('--force');
 // Step 5 builds Timeline tiers from the whole archived history (one weekly
 // summary per historical week — paid) instead of only forward from now.
 const TIMELINE_BACKFILL = process.argv.includes('--timeline-backfill');
@@ -210,6 +213,15 @@ function loadRefreshState() {
 
 function main() {
   const startedAt = Date.now();
+  // RUN-TOGGLE PAUSE. A real (non-dry, non-forced) ingest is skipped when the
+  // web UI has paused it — the whole run spends money, so pausing short-circuits
+  // before the backup even. Cursors are untouched, so it resumes cleanly when
+  // switched back on. Dry-runs (free planning) and --force (a hand-started UI
+  // run) always proceed.
+  if (!DRY_RUN && !FORCE && !require('../lib/run-toggles').isEnabled('ingest')) {
+    console.log('crm-daily: ingest is PAUSED via the web UI toggle — skipping (switch it back on, or pass --force).');
+    return;
+  }
   // Same formula as the run-log id below, so a chunk commit's `Run:` trailer
   // joins straight to the run record in the dashboard.
   const runTag = new Date(startedAt).toISOString().replace(/[:.]/g, '-');

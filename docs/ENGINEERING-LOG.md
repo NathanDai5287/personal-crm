@@ -15,6 +15,51 @@ Newest first.
 
 ## 2026-08-22
 
+### REFERENCE — the minmus (Ubuntu) deployment, as it stands
+The pipeline is being migrated from DUNA (Windows desktop) to **MINMUS** (`ssh natha@minmus`,
+Ubuntu, repo at `/home/natha/personal-crm`). State as of today:
+
+- **Signal source**: Signal Desktop runs *on minmus*; its DB is at
+  `/home/natha/.config/Signal/sql/db.sqlite`, decrypted with the vendored linux-x64 sqlcipher
+  prebuild (`vendor/sqlcipher/prebuilds/linux-x64/`). It syncs live.
+- **`.env` (per-machine)** sets the Linux paths: `CRM_SIGNAL_DB`, `CRM_SIGNAL_CONFIG`,
+  `CRM_SIGNAL_LOCAL_STATE`, `CRM_PI_CLI=/usr/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js`,
+  and **`CRM_ARCHIVE_ID_OFFSET=100000000`** — minmus stamps archive ids +100M so they can
+  never collide with DUNA's when the two archives are compared/merged. minmus therefore has its
+  OWN independently-built `crm.db`, not a copy of DUNA's.
+- **Secrets present**: `data/signal-key.txt`, `data/web-password.txt`. Display-name overrides
+  were renamed here too (`crm-nicknames.json` → `crm-display-names.json`).
+- **Scheduling**: the archive sweep is a **systemd timer** — `crm-sweep.timer` → `crm-sweep.service`,
+  hourly. That is the ONLY scheduled job on minmus. There is **no cron** and **no timer** for
+  ingest / todo-scan / compact / deep-sweep yet.
+- **crm-web**: a **bare `node scripts/crm-web.js` process** (NOT a systemd unit), binding
+  `127.0.0.1:8787` (`WEB_PORT` default), restarted by hand — it will not survive a reboot.
+- **pi auth**: Anthropic was added 2026-08-22 (was moonshotai-only). So free Anthropic model
+  runs are now possible; before that only paid Kimi was.
+- **Still pending for a real cutover**: a `crm-web.service` unit + timers for the paid jobs;
+  minmus has NEVER run an ingest (0 ingest runs); `crm.db` backup is stale/missing; and
+  `crm.cal.taxi` still points at DUNA (DUNA still sweeps, redundantly).
+
+### REFERENCE — the ingest cadence gate (when a contact's messages get merged)
+`lib/weeks.js` `gateBuckets()`, driven by three constants in `lib/config.js`:
+`INGEST_N = 200`, `INGEST_FLOOR_DAYS = 7`, `INGEST_CEILING_DAYS = 35`.
+
+Messages accumulate oldest-first into a **pile**. The pile is released as a merge bucket when
+**either**:
+- it has spanned **≥ 35 days** (`ceilingDays`) — the *silent-pile ceiling*, so even a quiet
+  contact is merged at least ~monthly regardless of volume; **or**
+- it has spanned **≥ 7 days** (`floorDays`) **and** holds **≥ 200 messages** (`N`).
+
+Everything in the **current incomplete week** (`day ≥ cutoffDay`) is never released — it is
+deferred to a later run. Read as min/max/cutoff:
+- **Min time (7d floor)** — a burst is never merged younger than a week, so rapid back-and-forth
+  settles into one coherent bucket instead of many thin ones.
+- **Max time (35d ceiling)** — a slow trickle is force-merged after 35 days even with < 200 msgs.
+- **Message cutoff (200)** — the volume that, combined with the floor, triggers an early release.
+
+A released pile is then split by `planChunks()` into week-aligned, token-bounded chunks — one
+merge model call per chunk (the unit the cost estimate and per-chunk cursor commit both use).
+
 ### DECISION — todo triggers settle for 5 minutes before extraction
 Nathan asked what happens if he sends "i'll make sure …" right at the top of the hour, before
 the conversation has enough context. It exposed a real gap: the sweep and `crm-todo-scan.js`

@@ -82,12 +82,13 @@ function main() {
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (!a.startsWith('--')) continue;
-    if (['--write', '--allow-paid', '--verbose'].includes(a)) continue;
+    if (['--write', '--allow-paid', '--verbose', '--force'].includes(a)) continue;
     if (['--since', '--slug', '--model'].includes(a)) { i += 1; continue; }
-    console.error(`unknown flag '${a}'\nknown: --write, --allow-paid, --verbose, --since <id>, --slug <slug>, --model <m>`);
+    console.error(`unknown flag '${a}'\nknown: --write, --allow-paid, --verbose, --force, --since <id>, --slug <slug>, --model <m>`);
     process.exit(2);
   }
   const write = argv.includes('--write');
+  const force = argv.includes('--force');
   const model = arg('--model', MODEL);
   const sinceOverride = arg('--since', null);
   const onlySlug = arg('--slug', null);
@@ -185,6 +186,18 @@ function main() {
     for (const w of f.windows) console.log(`  ${f.slug} ⟨m${w.msgId}⟩ ${w.weekday} ${w.when} — "${w.body.slice(0, 70)}"`);
   }
 
+  // RUN-TOGGLE PAUSE. When the web UI has paused todo capture, a real run reports
+  // the triggers it found but makes NO model call and does NOT advance the cursors
+  // of the `found` conversations — so they are re-extracted once it is switched
+  // back on. A hand-started UI run passes --force and skips this. Dry runs (free)
+  // fall through to the plan below.
+  if (write && !force && !require('../lib/run-toggles').isEnabled('todo')) {
+    console.log(`\ntodo capture is PAUSED via the web UI toggle — ${total} trigger(s) held, no model call (switch it back on, or pass --force).`);
+    saveState(state);
+    recordTodoRun(startedAt, scanned, slugs.length, total, 0, model, []);
+    return;
+  }
+
   const paid = !model.startsWith(FREE_PREFIX);
   if (paid && !argv.includes('--allow-paid') && process.env.CRM_ALLOW_PAID !== '1') {
     console.error(`\nREFUSING to call '${model}': bills per token. Pass --allow-paid, or set`);
@@ -200,6 +213,10 @@ function main() {
   console.log(`\nmodel: ${model}${paid ? '  ** PAID **' : '  (subscription — free)'}`);
   const cdb = require('../lib/signal-db').openCrmDb();
   let inserted = 0;
+  // The tasks actually inserted this run, so the run's detail page can show them
+  // as an additions-only diff (a todo run has no profile to diff, but this is the
+  // equivalent record of what it produced).
+  const captured = [];
   try {
     for (const f of found) {
       // extractFor reads a ledger from a path, so the scanned window is staged to a temp
@@ -228,6 +245,7 @@ function main() {
         const out = TASKS.insertDraft(cdb, t);
         if (out === 'inserted') {
           inserted += 1;
+          captured.push({ slug: f.slug, title: t.title, deadline: t.deadline || null, importance: imp, actionable: t.actionable !== false });
           console.log(`   + draft [${imp}] ${t.title}${t.deadline ? `  (due ${t.deadline})` : ''}${t.actionable ? '' : '  [blocked]'}`);
         } else {
           console.log(`   = already had: ${t.title}`);
@@ -242,13 +260,13 @@ function main() {
   }
   saveState(state);
   console.log(`\ninserted ${inserted} task(s)`);
-  if (write) recordTodoRun(startedAt, scanned, slugs.length, total, inserted, model);
+  if (write) recordTodoRun(startedAt, scanned, slugs.length, total, inserted, model, captured);
 }
 
 // Record the scan in the /admin/runs ledger. Like sweeps, a no-op tick (no
 // triggers, nothing inserted) is written but hidden in the UI, so the hourly
 // cadence doesn't bury the runs that mattered. Non-fatal.
-function recordTodoRun(startedAt, scanned, contacts, triggers, inserted, model = MODEL) {
+function recordTodoRun(startedAt, scanned, contacts, triggers, inserted, model = MODEL, captured = []) {
   // One model call per trigger (each "make sure" line is extracted on its own);
   // a scan with no triggers spends nothing. Estimate only — see lib/cost.js.
   let costUsd = null;
@@ -266,6 +284,7 @@ function recordTodoRun(startedAt, scanned, contacts, triggers, inserted, model =
       contacts,
       triggers,
       inserted,
+      captured,
       costUsd,
       costModel: model,
     });

@@ -64,6 +64,8 @@ const GROUP_ACTIVITY_MAX = 40; // cap on folded group-activity lines per contact
 const args = process.argv.slice(2);
 const WRITE = args.includes("--write");
 const NO_LLM = args.includes("--no-llm");
+// --force bypasses the web-UI run-toggle pause (a hand-started run always proceeds).
+const FORCE = args.includes("--force");
 // --backfill: build the Timeline tiers from the WHOLE archived history — one
 // weekly summary per complete week from the conversation's first archived
 // message — instead of only forward from when tiering started. This is what
@@ -561,6 +563,15 @@ function compactGroup(cdb, sdb, group, state, now) {
 
 function main() {
   const now = Date.now();
+  // RUN-TOGGLE PAUSE. Only a WRITE run that would actually call a paid model is
+  // gated — a dry run (free), --no-llm (free), a free subscription model, or
+  // --force (a hand-started UI run) all proceed. Cursors/state are untouched, so
+  // it resumes when switched back on.
+  const wouldSpend = WRITE && !NO_LLM && !require("../lib/cost").isFree(COMPACT_MODEL);
+  if (wouldSpend && !FORCE && !require("../lib/run-toggles").isEnabled("compact")) {
+    console.log("crm-compact: Timeline compaction is PAUSED via the web UI toggle — skipping (switch it back on, or pass --force).");
+    return;
+  }
   let state = {};
   try {
     state = JSON.parse(fs.readFileSync(COMPACT_STATE, "utf8"));

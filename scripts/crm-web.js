@@ -28,6 +28,7 @@ const { resolveSources, buildMessageQuery, buildArchiveQuery } = require('../lib
 const { validateCitations, ensureMessagesTable } = require('../lib/archive');
 const TASKS = require('../lib/tasks');
 const P = require('../lib/nicknames');
+const RUN_TOGGLES = require('../lib/run-toggles');
 const { STYLE: BINDERY_CSS, FONTS, FONTS_DIR, THEME_INIT, THEME_JS } = require('../lib/view/shell');
 const { render, raw } = require('../lib/view/h');
 const V = require('../lib/view/pages');
@@ -293,6 +294,15 @@ table.tbl td.num{font-variant-numeric:tabular-nums;text-align:right}
 pre.log{background:var(--paper);border:1px solid var(--rule);padding:12px 14px;font-size:12px;overflow-x:auto;white-space:pre-wrap;word-break:break-word;color:var(--ink)}
 pre.diff{background:var(--paper);border:1px solid var(--rule);padding:12px 14px;font-size:12px;overflow-x:auto;color:var(--ink)}
 pre.diff .add{color:#2e9e5b}pre.diff .del{color:var(--ox)}pre.diff .hunk{color:var(--stamp)}pre.diff .ctx{color:var(--soft)}
+.difflabel{font-family:"Courier Prime",monospace;font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--soft);margin:14px 0 4px}
+.toggles{display:flex;flex-wrap:wrap;gap:10px;margin-top:10px}
+.toggle{display:flex;align-items:center;gap:12px;background:var(--card);border:1px solid var(--rule);border-radius:8px;padding:8px 12px;min-width:250px}
+.toggle.off{opacity:.9}
+.toggle-main{display:flex;flex-direction:column;gap:1px;margin-right:auto}
+.toggle-sub{font-size:11px;color:var(--soft)}
+.toggle-state{font-family:"Courier Prime",monospace;font-size:10px;letter-spacing:.08em;text-transform:uppercase;padding:2px 8px;border-radius:999px;border:1px solid transparent}
+.toggle-state.on{color:var(--moss);border-color:color-mix(in srgb,var(--moss) 45%,transparent);background:color-mix(in srgb,var(--moss) 12%,transparent)}
+.toggle-state.off{color:var(--amber);border-color:color-mix(in srgb,var(--amber) 50%,transparent);background:color-mix(in srgb,var(--amber) 12%,transparent)}
 details.step{background:var(--card);border:1px solid var(--rule);border-radius:8px;padding:8px 12px;margin:6px 0}
 details.step summary{cursor:pointer;display:flex;gap:10px;align-items:baseline}
 details.step summary .nm{font-weight:600}
@@ -1867,7 +1877,7 @@ function adminData() {
     dial('Ingest', 'weekly · Mon 4am', ingestMs, 7 * DAY, 'ingest', { prevFire: prevMon, nextFire: nextMon }),
     dial('Todo', 'hourly · after sweep', todoMs, HOUR, 'todo', { prevFire: nextHour - HOUR, nextFire: nextHour }),
   ];
-  return { health, roster, dials };
+  return { health, roster, dials, toggles: RUN_TOGGLES.getToggles() };
 }
 
 // Confirm modal for the job buttons. Replaces the browser confirm() with a
@@ -2149,6 +2159,33 @@ function runDetailPage(id) {
         : '')
     : '';
 
+  // Todo runs have no profile to diff — their equivalent is the DRAFTS they
+  // captured, rendered as an additions-only diff (green `+` lines) grouped by
+  // contact, matching the profile diff's styling. `captured` is [{slug, title,
+  // deadline, importance, actionable}]; legacy records predate it → treat as [].
+  const todoHtml = run.kind === 'todo'
+    ? (() => {
+        const captured = Array.isArray(run.captured) ? run.captured : [];
+        if (!captured.length) {
+          const trig = run.triggers || 0;
+          return `<h2>Drafts captured</h2><pre class="diff"><span class="ctx">no drafts captured (${trig} trigger${trig === 1 ? '' : 's'} — paused, duplicates, or nothing extractable)</span></pre>`;
+        }
+        const bySlug = new Map();
+        for (const c of captured) { const k = c.slug || ''; if (!bySlug.has(k)) bySlug.set(k, []); bySlug.get(k).push(c); }
+        const panes = [...bySlug.entries()].map(([slug, items]) => {
+          const lines = items.map((c) => {
+            const bits = [`[${c.importance || '—'}]`, c.title || '(untitled)'];
+            if (c.deadline) bits.push(`(due ${c.deadline})`);
+            if (c.actionable === false) bits.push('[blocked]');
+            return `<span class="add">+ ${esc(bits.join('  '))}</span>`;
+          }).join('\n');
+          const head = slug ? `<div class="difflabel">${esc(slug)}</div>` : '';
+          return `${head}<pre class="diff">${lines}</pre>`;
+        }).join('');
+        return `<h2>Drafts captured</h2>${panes}`;
+      })()
+    : '';
+
   const warnHtml = (run.warnings || []).length
     ? `<h2>Warnings</h2><ul>${run.warnings.map((w) => `<li class="bad">${esc(w)}</li>`).join('')}</ul>`
     : '';
@@ -2196,9 +2233,9 @@ function runDetailPage(id) {
     `<header class="top"><h1>Run ${esc(fmtWhen(run.startedAt))}</h1>` +
     `<span class="mk ${esc(kind)}">${esc(kindWord)}</span>` +
     `<span class="sub">${esc(runMode(run))} · ${fmtMs(run.durationMs)}</span>${modelsHtml}${costHtml}</header>` +
-    // A manual run has no contacts table — its whole story is the steps
-    // (field before→after), the why, and the line diff.
-    `<h2>Steps</h2>${stepsHtml}${manualHtml}${run.kind === 'manual' ? '' : contactsHtml}${compactCiteHtml}${warnHtml}${logHtml}`;
+    // A manual run's story is its steps + why + line diff; a todo run's is the
+    // drafts it captured — neither has a contacts table.
+    `<h2>Steps</h2>${stepsHtml}${manualHtml}${todoHtml}${(run.kind === 'manual' || run.kind === 'todo') ? '' : contactsHtml}${compactCiteHtml}${warnHtml}${logHtml}`;
   return page(`Run ${run.id}`, body, '/runs');
 }
 
@@ -2438,26 +2475,53 @@ function diffPage(id, slug, chunkIdx) {
   const pre = (chunk && chunk.preSha) || run.preSha;
   const post = (chunk && chunk.postSha) || run.postSha;
   if (!pre || !post) return null;
+  const rel = `data/contacts/${slug}.md`;
   let diff;
   try {
-    diff = execFileSync('git', ['--git-dir', GITDIR, 'diff', `${pre}..${post}`, '--', `data/contacts/${slug}.md`],
+    diff = execFileSync('git', ['--git-dir', GITDIR, 'diff', `${pre}..${post}`, '--', rel],
       { cwd: ROOT, encoding: 'utf8', timeout: 15_000, maxBuffer: 8 * 1024 * 1024 });
   } catch (e) {
     diff = null;
   }
-  const rendered = diff && diff.trim()
-    ? diff.split('\n').map((l) => {
-        const e = esc(l);
-        if (l.startsWith('+++') || l.startsWith('---')) return `<span class="ctx">${e}</span>`;
-        if (l.startsWith('@@')) return `<span class="hunk">${e}</span>`;
-        if (l.startsWith('+')) return `<span class="add">${e}</span>`;
-        if (l.startsWith('-')) return `<span class="del">${e}</span>`;
-        return `<span class="ctx">${e}</span>`;
-      }).join('\n')
-    : '<span class="ctx">(no changes to this profile in this run)</span>';
+  // The profile .md holds both the merge-written prose AND the `## Timeline`
+  // section (owned by compaction), so one diff can carry both. Find the Timeline
+  // heading's line in the POST image and file each hunk by which side it lands on:
+  // a hunk whose post-image start is at/after the heading is a Timeline change,
+  // everything else is Profile. (A single chunk's merge diff never touches the
+  // Timeline, so its Timeline pane is simply empty — accurate, not a bug.)
+  let timelineLine = Infinity;
+  try {
+    const postText = execFileSync('git', ['--git-dir', GITDIR, 'show', `${post}:${rel}`],
+      { cwd: ROOT, encoding: 'utf8', timeout: 15_000, maxBuffer: 8 * 1024 * 1024 });
+    const idx = postText.split('\n').findIndex((l) => /^##\s+Timeline\b/.test(l));
+    if (idx !== -1) timelineLine = idx + 1; // 1-based, to compare against @@ +c
+  } catch { /* no Timeline section → everything files as Profile */ }
+  const styleLine = (l) => {
+    const e = esc(l);
+    if (l.startsWith('@@')) return `<span class="hunk">${e}</span>`;
+    if (l.startsWith('+')) return `<span class="add">${e}</span>`;
+    if (l.startsWith('-')) return `<span class="del">${e}</span>`;
+    return `<span class="ctx">${e}</span>`;
+  };
+  const profile = [];
+  const timeline = [];
+  let bucket = null; // skip the file header (diff --git / index / --- / +++) until the first hunk
+  if (diff && diff.trim()) {
+    for (const l of diff.split('\n')) {
+      const m = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(l);
+      if (m) bucket = Number(m[1]) >= timelineLine ? timeline : profile;
+      if (bucket) bucket.push(styleLine(l));
+    }
+  }
+  const pane = (title, lines) =>
+    `<div class="difflabel">${esc(title)}</div><pre class="diff">` +
+    (lines.length ? lines.join('\n') : '<span class="ctx">(no changes)</span>') + '</pre>';
+  const bodyDiff = diff && diff.trim()
+    ? pane('Profile', profile) + pane('Timeline', timeline)
+    : '<pre class="diff"><span class="ctx">(no changes to this profile in this run)</span></pre>';
   const body = `<div class="back"><a href="/runs/${encodeURIComponent(id)}">&larr; back to run</a></div>` +
     `<header class="top"><h1>${esc(slug)} — changes</h1><span class="sub">run ${esc(fmtWhen(run.startedAt))}</span></header>` +
-    `<pre class="diff">${rendered}</pre>`;
+    bodyDiff;
   return page(`diff ${slug}`, body, '/runs');
 }
 
@@ -2490,16 +2554,18 @@ function jobCommands({ kind, slugs, deep, plan }) {
   }
   if (kind === 'ingest') {
     const people = slugs.length ? slugs : loadTrackedSlugs();
-    return people.map((s) => [DAILY_JS, '--only', s, ...(plan ? ['--dry-run'] : [])]);
+    // --force: a hand-started run always bypasses the web-UI run-toggle pause.
+    return people.map((s) => [DAILY_JS, '--only', s, ...(plan ? ['--dry-run'] : []), '--force']);
   }
   if (kind === 'compact') {
     const people = slugs.length ? slugs : [null];
-    return people.map((s) => [COMPACT_JS, '--write', ...(s ? ['--slug', s] : [])]);
+    return people.map((s) => [COMPACT_JS, '--write', ...(s ? ['--slug', s] : []), '--force']);
   }
   if (kind === 'todo') {
     // Global — reads the whole archive, not per-contact; slugs are ignored.
-    // --allow-paid so a web-triggered scan may call the paid model on a match.
-    return [[TODO_JS, '--write', '--allow-paid']];
+    // --allow-paid so a web-triggered scan may call the paid model on a match;
+    // --force so a hand-started scan bypasses the run-toggle pause.
+    return [[TODO_JS, '--write', '--allow-paid', '--force']];
   }
   return null;
 }
@@ -2799,6 +2865,27 @@ function start() {
             const r = startJob({ kind, slugs, deep, plan });
             if (!r.ok) { send(409, page('Busy', `<div class="back"><a href="/admin/jobs/current">&larr; current job</a></div><p class="bad">${esc(r.error)}</p>`)); return; }
             res.writeHead(303, { Location: '/admin/jobs/current' });
+            res.end();
+          } catch {
+            try { send(400, page('Bad request', '<p>Bad request.</p>')); } catch { /* sent */ }
+          }
+        });
+        return;
+      }
+      // Enable/disable one of the paid periodic jobs (ingest/todo/compact). A
+      // toggle only pauses the AUTOMATIC schedule — hand-started UI runs pass
+      // --force and always proceed. No-JS friendly: a tiny form per switch.
+      if (url.pathname === '/admin/toggle' && req.method === 'POST') {
+        const sfs = req.headers['sec-fetch-site'];
+        if (sfs && sfs !== 'same-origin' && sfs !== 'none') { send(403, page('Forbidden', '<p>Cross-site request refused.</p>')); return; }
+        readBody(req, (body) => {
+          try {
+            const p = new URLSearchParams(body);
+            const job = p.get('job') || '';
+            const enabled = p.get('enabled') === '1' || p.get('enabled') === 'true';
+            if (!RUN_TOGGLES.JOBS.includes(job)) { send(400, page('Bad request', '<p>Unknown job.</p>')); return; }
+            RUN_TOGGLES.setToggle(job, enabled);
+            res.writeHead(303, { Location: '/admin' });
             res.end();
           } catch {
             try { send(400, page('Bad request', '<p>Bad request.</p>')); } catch { /* sent */ }
