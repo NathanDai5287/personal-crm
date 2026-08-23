@@ -13,6 +13,69 @@ Newest first.
 
 ---
 
+## 2026-08-23
+
+### REFERENCE — the minmus systemd layout (what runs, where, and how to update it)
+crm.cal.taxi now serves from minmus. The pieces are split across **two** systemd managers,
+which is the thing to internalise before touching any of it:
+
+**1. The web app — a SYSTEM service, `crm-web.service`.**
+- Lives at `/etc/systemd/system/crm-web.service`; managed with plain `systemctl` (root/sudo to
+  start/stop/disable/edit; `systemctl status crm-web` is fine unprivileged).
+- `Type=simple`, `User=natha`, `WorkingDirectory=/home/natha/personal-crm`,
+  `ExecStart=/usr/bin/node scripts/crm-web.js`, `Restart=always`, `RestartSec=5`, enabled at boot.
+- It is **only the long-running web server** on `127.0.0.1:8787`. It does **not** contain,
+  schedule, or run any of the pipeline jobs. It renders the dashboard and, when you press a
+  button in the UI, shells out to the job scripts on demand — but it is not itself the jobs.
+
+**2. The periodic jobs — USER units under `~/.config/systemd/user/`.**
+- Managed with `systemctl --user` (no sudo). `Linger=yes` is set for natha
+  (`loginctl show-user natha -p Linger`), so the user manager — and these units — run at boot
+  even with nobody logged in.
+- Only one job is scheduled: **`crm-sweep.timer`** (`OnCalendar=hourly`, `Persistent=true`) →
+  **`crm-sweep.service`** (`Type=oneshot`, `ExecStart=/usr/bin/node scripts/crm-archive.js`).
+  The hourly sweep is the sole automatic job on minmus.
+- There is **no timer for ingest / todo / compact / deep-sweep**. They only run when you press
+  their ▸ run button in the UI. (The archive sweep never backs up crm.db — the backup runs only
+  inside an ingest, `crm-daily.js` step 0 — which is why minmus's backup is stale: 0 ingests.)
+
+**The UI toggle is not a scheduler.** The pause switch and model dropdown on each cadence card
+write flags to `data/crm-run-toggles.json` / `data/crm-run-models.json` that a run *reads at
+startup*. They gate and configure a run; they cannot create the *schedule* that fires one. A job
+runs automatically only if it has a `--user` timer (today: sweep only). So enabling a toggle for
+ingest does nothing on its own — there is no ingest timer to gate.
+
+**Updating after a git pull.** `crm-web` loads the view/server code into a long-lived node
+process, so **code changes require a restart** (do it after every pull to be safe). Two ways,
+both leave the exact same schedule intact:
+- No sudo: `kill $(systemctl show -p MainPID --value crm-web)` — `Restart=always` respawns it in
+  ~5 s on the new code. This is what the deploy step does over ssh.
+- With sudo: `sudo systemctl restart crm-web`.
+The job scripts (sweep etc.) are launched fresh each fire/press, so they pick up new code with no
+restart needed.
+
+### SURPRISE — a duplicate user `crm-web.service` crash-looped the new system service
+Installing the system `crm-web.service` (2026-08-23) collided with a **pre-existing user-level
+`crm-web.service`** that was still enabled with `Linger=yes`. Both bound `127.0.0.1:8787`, so
+whichever lost the race sat in `activating` crash-looping on `EADDRINUSE` (MainPID 0 while the
+port still answered — the tell that *something else* owned it). Fixed by
+`systemctl --user disable --now crm-web`; the system unit is now the only crm-web. Two footguns
+here: (a) minmus has **no `pkill`** — the install script's `pkill` silently no-op'd (exit 127),
+leaving an orphan holding the port, so kill by explicit PID; (b) a stuck `activating` + `MainPID
+0` on a `Restart=always` unit almost always means a *different* process owns its port — check
+`ss -ltnp | grep <port>` and the process's PPID (PPID 1 = the intended system service; anything
+else is a stray).
+
+### DECISION — web is a system unit, jobs are user units (don't need to match)
+Kept crm-web as a **system** service but left the sweep (and any future ingest/todo/compact
+timers) as **user** units. Rationale: consolidating would need sudo I can't run headless
+(disabling a system unit, or writing timers into `/etc/systemd/system`), whereas user timers need
+no sudo and the sweep already lives there. So the pattern going forward: **new periodic jobs =
+`--user` timers next to `crm-sweep.timer`; the web server stays the one system unit.** Scheduling
+ingest means recurring paid spend, so its timer is deliberately not created yet.
+
+---
+
 ## 2026-08-22
 
 ### REFERENCE — the minmus (Ubuntu) deployment, as it stands
