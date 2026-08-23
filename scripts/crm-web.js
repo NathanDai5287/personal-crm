@@ -1977,7 +1977,7 @@ function rowForRun(r) {
   const took = fmtMs(r.durationMs);
   if (r.kind === 'sweep') {
     return {
-      t, kind: 'sweep',
+      t, kind: 'sweep', kindWord: r.deep ? 'deep' : 'sweep',
       pass: r.deep ? 'deep' : 'hourly',
       scope: r.only || 'everyone',
       examined: String(r.seen ?? ''),
@@ -2107,8 +2107,38 @@ function runsPage() {
   // Keep the ledger fresh while something runs: the live row updates and turns
   // into a completed row on its own once the run lands its record.
   const refresh = job && job.running ? '<script>setTimeout(function(){location.reload();},5000);</script>' : '';
-  return page('Runs — personal-crm', render(V.runs(rows).body) + refresh);
+  return page('Runs — personal-crm', render(V.runs(rows).body) + RUNS_FILTER_JS + refresh);
 }
+
+// Client-side filtering for the runs ledger: kind chips (click to hide a kind)
+// and a "hide free runs" checkbox, both remembered in localStorage. Rows carry
+// data-kind / data-free (see RunRow); a live (running) row is never hidden.
+const RUNS_FILTER_JS = `<script>(function(){
+  var tb=document.querySelector('.ledger table tbody'); if(!tb)return;
+  var chips=Array.prototype.slice.call(document.querySelectorAll('.rfchip'));
+  var free=document.getElementById('rfHideFree');
+  function load(k,d){try{var v=localStorage.getItem(k);return v==null?d:JSON.parse(v);}catch(e){return d;}}
+  function save(k,v){try{localStorage.setItem(k,JSON.stringify(v));}catch(e){}}
+  var offKinds=load('crm.runkinds',[]);
+  chips.forEach(function(c){ if(offKinds.indexOf(c.getAttribute('data-k'))!==-1){c.classList.remove('on');c.classList.add('off');} });
+  if(free)free.checked=!!load('crm.runsHideFree',false);
+  function apply(){
+    var off={}; chips.forEach(function(c){ if(!c.classList.contains('on'))off[c.getAttribute('data-k')]=1; });
+    var hf=free&&free.checked;
+    Array.prototype.slice.call(tb.querySelectorAll('tr.runrow')).forEach(function(tr){
+      if(tr.classList.contains('live')){tr.hidden=false;return;}
+      var k=tr.getAttribute('data-kind'), isFree=tr.getAttribute('data-free')==='1';
+      tr.hidden = !!off[k] || (hf&&isFree);
+    });
+  }
+  chips.forEach(function(c){ c.addEventListener('click',function(){
+    c.classList.toggle('on'); c.classList.toggle('off');
+    save('crm.runkinds', chips.filter(function(x){return !x.classList.contains('on');}).map(function(x){return x.getAttribute('data-k');}));
+    apply();
+  }); });
+  if(free)free.addEventListener('change',function(){ save('crm.runsHideFree',free.checked); apply(); });
+  apply();
+})();</script>`;
 
 function runDetailPage(id) {
   let run;
