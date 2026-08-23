@@ -26,17 +26,18 @@ ledgers → an LLM merge writes per-person markdown in `data/contacts/<slug>.md`
 
 The system runs exactly **four periodic jobs**, defined once in **`lib/jobs.js`**
 (the single source of truth — `run-toggles`, `run-models`, and the dashboard all
-read from it). Each job runs on its own cycle. **Every period a job checks its
-enable flag (`lib/run-toggles`); if the flag is on, it does its work.** A
-hand-started run from the dashboard passes `--force` and always proceeds; only the
-unattended schedule is paused by the flag.
+read from it). Each job runs on its own cycle. The two **paid** jobs (ingest, todo)
+carry an enable switch (`lib/run-toggles`): an automatic run whose switch is off is
+skipped; a hand-started run from the dashboard passes `--force` and always proceeds.
+The two **free** sweeps carry NO switch — they always run, because pausing archiving
+would risk losing disappearing messages for no cost saving.
 
-| Job | Script | Model? | What it does |
-|---|---|---|---|
-| **sweep** | `crm-archive.js` | no | copy new Signal messages into `crm.db` |
-| **deep-sweep** | `crm-archive.js --deep` | no | re-walk ALL history (catch reused row ids) |
-| **ingest** | `crm-daily.js` | yes | read waiting messages into a profile: **merge** then **timeline** |
-| **todo** | `crm-todo-scan.js` | yes | scan for "make sure …" commitments (model only on a match) |
+| Job | Script | Model? | Switch? | What it does |
+|---|---|---|---|---|
+| **sweep** | `crm-archive.js` | no | no (always on) | copy new Signal messages into `crm.db` |
+| **deep-sweep** | `crm-archive.js --deep` | no | no (always on) | re-walk ALL history (catch reused row ids) |
+| **ingest** | `crm-daily.js` | yes | yes | read waiting messages into a profile: **merge** then **timeline** |
+| **todo** | `crm-todo-scan.js` | yes | yes | scan for "make sure …" commitments (model only on a match) |
 
 **`ingest` has two halves: MERGE (the prose profile) and TIMELINE (the
 chronology).** They are not separate jobs. `crm-daily.js` runs the merge, then

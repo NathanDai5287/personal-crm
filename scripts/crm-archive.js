@@ -10,9 +10,9 @@
 // hour is never lost to the AI steps, no matter when it expires.
 //
 // JOBS: this one script backs TWO of the four jobs in lib/jobs.js — `sweep` (the
-// hourly incremental copy) and `deep-sweep` (a full re-walk, `--deep`). Each has
-// its own enable flag (lib/run-toggles); an automatic run whose flag is off is
-// skipped. `--force` (a hand-started UI run) bypasses the flag. Both are free.
+// hourly incremental copy) and `deep-sweep` (a full re-walk, `--deep`). Both are
+// free and ALWAYS run — they carry no enable switch, because pausing archiving
+// would risk losing disappearing messages for no cost saving.
 //
 // WHAT IT SWEEPS:
 //   - every tracked contact's sources (DM + bi-groups + multi-groups, the
@@ -443,27 +443,17 @@ if (require.main === module) {
   const argv = process.argv.slice(2);
   // A misspelled --deepp silently performs the narrow sweep you did not ask for,
   // so an unknown flag aborts rather than falling through to a default.
-  const known = new Set(['--deep', '--only', '--force']);
+  const known = new Set(['--deep', '--only']);
   for (let i = 0; i < argv.length; i += 1) {
     if (!argv[i].startsWith('--')) continue;
     if (argv[i] === '--only') { i += 1; continue; }
     if (!known.has(argv[i])) {
-      console.error(`crm-archive: unknown flag '${argv[i]}'\nknown: --deep, --only <slug>, --force`);
+      console.error(`crm-archive: unknown flag '${argv[i]}'\nknown: --deep, --only <slug>`);
       process.exit(2);
     }
   }
-  // RUN-TOGGLE PAUSE (lib/run-toggles). This script backs two jobs; --deep is the
-  // deep-sweep job, otherwise it is the sweep job. An automatic run (no --force)
-  // whose flag is off is skipped before any work. A hand-started UI run passes
-  // --force and always proceeds. Pausing a sweep stops archiving — including
-  // disappearing messages before they vanish — so both flags default on.
+  // The sweeps carry no run-toggle — they are free and always run (see the header).
   const deep = argv.includes('--deep');
-  const jobId = deep ? 'deep-sweep' : 'sweep';
-  const RT = require('../lib/run-toggles');
-  if (RT.paused(jobId, { dryRun: false, force: argv.includes('--force') })) {
-    console.log(RT.pauseMessage(jobId));
-    process.exit(0);
-  }
   // --only <slug>: sweep ONE contact (or one group, as `group:<slug>`) — the
   // dashboard's per-person archive button and targeted "pull his whole history
   // right now" both need this, where a full sweep re-walks 83k rows.

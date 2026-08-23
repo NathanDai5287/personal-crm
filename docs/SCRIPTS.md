@@ -36,10 +36,12 @@ model.
 
 These are the four jobs (`lib/jobs.js`). Each is a dial on the dashboard's
 Pipeline tab with its own **▸ run** button (scoped to the checked roster, or
-everyone) and its own enable switch (top-right of the dial). The switch pauses
-only the AUTOMATIC schedule — a hand-started **▸ run** passes `--force` and always
-proceeds. An automatic run whose switch is off is skipped without advancing its
-cursor, so nothing is lost.
+everyone). The two **paid** jobs (ingest, todo) also carry an enable switch
+(top-right of the dial) that pauses only the AUTOMATIC schedule — a hand-started
+**▸ run** passes `--force` and always proceeds, and a paused automatic run is
+skipped without advancing its cursor, so nothing is lost. The **free** sweeps have
+no switch: they always run (pausing archiving would risk losing disappearing
+messages for no cost saving).
 
 | Job | Runs | Cadence | Model | In run log |
 |---|---|---|---|---|

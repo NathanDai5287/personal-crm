@@ -40,10 +40,13 @@ What changed:
    `compactCall*` → `timelineCall*`, run-record `kind:'compact'` → `'timeline'`, and the UI ink
    `--k-compact` → `--k-timeline`. Legacy run records with `kind:'compact'` still render (readers
    normalize the old spelling; `.mk.compact` etc. kept as aliases).
-4. **All four jobs now carry an enable flag** (was: only the model jobs). `sweep`/`deep-sweep` gained
-   flags in `crm-archive.js` via the shared `run-toggles.paused()` gate, defaulting ON. NOTE: pausing
-   a sweep stops archiving — including disappearing messages before they vanish — so this is an
-   operational pause, not a cost pause; it is rarely touched.
+4. **Only the two PAID jobs (ingest, todo) carry an enable switch.** The free sweeps always run.
+   (An earlier draft of this refactor added switches to `sweep`/`deep-sweep` too, to make the
+   "every job checks a flag" model uniform. That was REVERTED after a review pointed out it is a
+   silent-data-loss footgun: pausing a sweep stops archiving disappearing messages before they
+   vanish, for no cost saving. Nathan's call: sweeps are always on, no switch. So `run-toggles`
+   and the dashboard toggle set are `MODEL_JOBS` = `['ingest','todo']`, and `crm-archive.js` has
+   no pause gate.)
 
 **Intentional carryovers (do NOT "fix" these):** the prompt file `prompts/compact.md` (authored
 separately), the on-disk `data/crm-compact-state.json` and `data/_compact-backup/` (renaming would

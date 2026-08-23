@@ -588,7 +588,10 @@ function main() {
     // Which model did which half of the work. Recorded per run so a profile diff
     // is always attributable to a model — the whole point of being able to A/B
     // MERGE_MODEL on one contact and compare the output.
-    models: { merge: MERGE_MODEL, timeline: TIMELINE_MODEL },
+    // The EFFECTIVE model both halves actually ran on (UI 'ingest' dropdown >
+    // env > default), not the static default — else a UI override makes this
+    // attribution field lie. Merge and Timeline share MERGE_MODEL_EFF this run.
+    models: { merge: MERGE_MODEL_EFF, timeline: MERGE_MODEL_EFF },
     // Estimated merge-side spend (this record's half of the combined job; the
     // Timeline half is priced in crm-timeline's own record). null = model not in
     // pi's price catalog. See lib/cost.js — an estimate, never a bill.
@@ -597,7 +600,7 @@ function main() {
     // no chunk reported usage (nothing merged, or capture failed). This is the
     // "actual" the ledger shows against the estimate above.
     actualCostUsd: actualCostSeen ? actualCostUsd : null,
-    costModel: MERGE_MODEL,
+    costModel: MERGE_MODEL_EFF,
     promoted,
     contactsWithActivity: plans.length,
     totalChunks,

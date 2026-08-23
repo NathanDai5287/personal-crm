@@ -62,10 +62,14 @@ try {
   if (!/did not match|pathspec/i.test(out)) console.log('untrack issue:', out || e.message);
 }
 
+// A REAL failure here must be visible to the caller (crm-daily gates its
+// crash-safe snapshot on this process succeeding), so set a non-zero exit code
+// rather than logging and exiting 0. "nothing to commit" is NOT a failure.
 try {
   git('add', '-f', ...PATHS, ...EXCLUDE);
 } catch (e) {
   console.log('add issue:', (e.stdout || '') + (e.stderr || '') || e.message);
+  process.exitCode = 1;
 }
 try {
   git('commit', '-m', msg);
@@ -73,5 +77,5 @@ try {
 } catch (e) {
   const out = (e.stdout || '') + (e.stderr || '');
   if (/nothing to commit|no changes added/i.test(out)) console.log('no changes to commit');
-  else console.log('commit issue:', out || e.message);
+  else { console.log('commit issue:', out || e.message); process.exitCode = 1; }
 }

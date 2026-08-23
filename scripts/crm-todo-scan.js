@@ -306,5 +306,12 @@ function recordTodoRun(startedAt, scanned, contacts, triggers, inserted, model =
   }
 }
 
-if (require.main === module) main();
+if (require.main === module) {
+  // Cross-process pipeline lock (see lib/pipeline-lock.js). The hourly scheduled
+  // scan must not run concurrently with a web-triggered ingest — two processes
+  // touching crm.db, and a duplicate paid extraction. A scheduled loser exits 0.
+  const lock = require('../lib/pipeline-lock').acquire('todo');
+  if (!lock.ok) { console.log(`crm-todo-scan: skipped, run in progress (${lock.holderDesc}).`); process.exit(0); }
+  try { main(); } finally { lock.release(); }
+}
 module.exports = { renderLedger };

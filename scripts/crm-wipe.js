@@ -1,9 +1,13 @@
 // crm-wipe.js — reset an arbitrary set of contacts to a clean slate.
 //
 // For each named contact (or --all tracked): blank their profile back to a stub,
-// drop their ingest cursor and Timeline state, and delete their pending refresh
-// ledger. The message archive (crm.db) is NEVER touched, so a wiped contact can
-// be rebuilt simply by re-ingesting — nothing is lost, only the derived profile.
+// clear their MERGE FRONTIER (the `merged` ledger in crm.db), drop their Timeline
+// state, and delete their pending refresh ledger. Clearing the frontier is what
+// actually arms a rebuild: the planner defines "pending" as archive rows NOT IN
+// `merged` (crm-refresh.js), so without it a wiped contact re-ingests NOTHING and
+// its profile stays a stub forever. Only the DERIVED ledger is cleared — the
+// append-only MESSAGE ARCHIVE (crm.db's `messages` table) is never touched, so a
+// wiped contact rebuilds by re-ingesting from scratch; nothing irreplaceable is lost.
 //
 // SAFE BY DEFAULT — dry-run unless --write. On --write it first snapshots data/
 // into the local history repo (memory-commit) so every wipe has a recovery point;
@@ -16,12 +20,13 @@
 //   node scripts/crm-wipe.js <slug...>                  # preview (dry-run)
 //   node scripts/crm-wipe.js <slug...> --write          # wipe those contacts
 //   node scripts/crm-wipe.js --all --write              # wipe every tracked contact
-//   node scripts/crm-wipe.js <slug> --write --backfill  # wipe + arm a FULL re-ingest
 //   node scripts/crm-wipe.js --runs --write             # clear the whole runs ledger
 //
-// --backfill sets the cursor to 0 instead of removing it, so the next ingest
-// replays the contact's ENTIRE archived history (see crm-refresh.js: a cursor of
-// 0 means "id > 0" = everything; no cursor means only the last 30 days).
+// A plain wipe already arms a FULL re-ingest: clearing the `merged` frontier means
+// the planner sees every archived message as pending, so the next ingest replays
+// the contact's entire history. `--backfill` is now redundant (it used to poke the
+// retired REFRESH_STATE cursor, which the planner no longer reads) and is accepted
+// as a no-op.
 //
 // --runs is a separate, GLOBAL action (not per-contact): it deletes every record
 // under logs/runs/ plus logs/last-run.json — the source of the dashboard's Runs
@@ -34,6 +39,8 @@ const { execFileSync } = require('child_process');
 const {
   ROOT, TRACKED, CONTACTS_DIR, REFRESH_DIR, REFRESH_STATE, TIMELINE_STATE, LOGS_DIR,
 } = require('../lib/config');
+const { openCrmDb } = require('../lib/signal-db');
+const { ensureMessagesTable } = require('../lib/archive');
 
 const STUB_BODY = '## What I know\n_Not yet enriched._\n\n## Timeline\n';
 const KNOWN_FLAGS = new Set(['--write', '--all', '--backfill', '--runs']);
@@ -100,22 +107,29 @@ function main() {
   const runFiles = runs ? runRecordFiles() : [];
   const hasLastRun = runs && fs.existsSync(LAST_RUN);
 
+  // The merge frontier lives in crm.db's `merged` ledger (NOT the `messages`
+  // archive). Open it to count what a wipe would clear (preview) and to clear it
+  // (apply). ensureMessagesTable is idempotent and just guarantees the table.
+  const cdb = openCrmDb();
+  ensureMessagesTable(cdb);
+  const frontierCount = cdb.prepare('SELECT COUNT(*) n FROM merged WHERE slug = ?');
+
   // ---- plan ----
   console.log(`crm-wipe: ${write ? 'WRITE' : 'DRY-RUN'}`
-    + `${targets.length ? ` | ${targets.length} contact(s)${backfill ? ' | --backfill (arm full re-ingest)' : ''}` : ''}`
+    + `${targets.length ? ` | ${targets.length} contact(s)` : ''}`
     + `${runs ? ` | runs ledger (${runFiles.length} record${runFiles.length === 1 ? '' : 's'}${hasLastRun ? ' + last-run.json' : ''})` : ''}`);
   for (const slug of targets) {
-    const hadCursor = Object.prototype.hasOwnProperty.call(refresh.cursors, slug);
+    const nFrontier = frontierCount.get(slug).n;
     const hadTimeline = Object.prototype.hasOwnProperty.call(timelineState, slug);
     const hadLedger = fs.existsSync(path.join(REFRESH_DIR, `${slug}.new.txt`));
-    const cursorAfter = backfill ? 'set to 0 (full backfill armed)' : (hadCursor ? 'removed' : 'none');
-    console.log(`  ${slug}: profile -> stub · cursor ${cursorAfter}`
+    console.log(`  ${slug}: profile -> stub · merge frontier ${nFrontier ? `clear ${nFrontier} row(s) (full re-ingest armed)` : 'none'}`
       + `${hadTimeline ? ' · timeline state removed' : ''}${hadLedger ? ' · pending ledger removed' : ''}`);
   }
   if (runs) console.log(`  runs: remove ${runFiles.length} record(s) from logs/runs/${hasLastRun ? ' + last-run.json' : ''}`);
 
   if (!write) {
-    console.log('\nDry-run — nothing changed. Re-run with --write to apply. crm.db is never touched.');
+    cdb.close();
+    console.log('\nDry-run — nothing changed. Re-run with --write to apply. The message archive is never touched (only the derived merge frontier is cleared).');
     return;
   }
 
@@ -135,20 +149,25 @@ function main() {
     }
   }
 
+  const delFrontier = cdb.prepare('DELETE FROM merged WHERE slug = ?');
+  let frontierCleared = 0;
   for (const slug of targets) {
     const file = path.join(CONTACTS_DIR, `${slug}.md`);
     fs.writeFileSync(file, stubProfile(fs.readFileSync(file, 'utf8')));
-    if (backfill) refresh.cursors[slug] = 0;
-    else delete refresh.cursors[slug];
+    // Clear the merge frontier — this is what actually arms the re-ingest.
+    frontierCleared += delFrontier.run(slug).changes || 0;
+    // REFRESH_STATE is the retired cursor file the planner no longer reads; kept
+    // tidy for any old tooling that still inspects it, but it does nothing here.
+    delete refresh.cursors[slug];
     delete timelineState[slug];
     try { fs.unlinkSync(path.join(REFRESH_DIR, `${slug}.new.txt`)); } catch { /* no pending ledger */ }
   }
   if (targets.length) {
     fs.writeFileSync(REFRESH_STATE, `${JSON.stringify(refresh, null, 2)}\n`);
     fs.writeFileSync(TIMELINE_STATE, `${JSON.stringify(timelineState, null, 2)}\n`);
-    console.log(`\ncrm-wipe: wiped ${targets.length} contact(s). Rebuild by re-ingesting`
-      + ' (Ingest on their card, or node scripts/crm-daily.js --only <slug>).');
-    if (backfill) console.log('crm-wipe: cursors set to 0 — the next ingest replays their FULL archived history.');
+    console.log(`\ncrm-wipe: wiped ${targets.length} contact(s); cleared ${frontierCleared} merge-frontier row(s) from crm.db`
+      + ' (the append-only message archive is untouched). The next ingest replays their FULL archived history —'
+      + ' Ingest on their card, or node scripts/crm-daily.js --only <slug>.');
   }
 
   if (runs) {
@@ -159,6 +178,7 @@ function main() {
     try { fs.unlinkSync(LAST_RUN); } catch { /* none */ }
     console.log(`crm-wipe: cleared runs ledger — removed ${removed} record(s).`);
   }
+  cdb.close();
 }
 
 if (require.main === module) main();

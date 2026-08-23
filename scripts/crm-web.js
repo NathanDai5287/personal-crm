@@ -2094,7 +2094,10 @@ function liveJobRow() {
 }
 
 function runsPage() {
-  const all = loadRuns().map((r) => ({ ...r, kind: r.kind || 'ingest' }));
+  // Normalize kind on read: null → 'ingest' (legacy records predate `kind`), and
+  // the pre-rename 'compact' → 'timeline' — else an old compact record buckets as
+  // its own kind and is pinned forever as a second, frozen heartbeat row.
+  const all = loadRuns().map((r) => ({ ...r, kind: r.kind === 'compact' ? 'timeline' : (r.kind || 'ingest') }));
   // The MOST RECENT run of each cadence kind always shows — so every scheduled
   // job (sweep, deep-sweep, ingest, todo) is visibly represented in the ledger as
   // a heartbeat, even when its latest tick did nothing. `crm-archive --deep`
@@ -2669,19 +2672,34 @@ const TODO_JS = path.join(ROOT, 'scripts', 'crm-todo-scan.js');
 // lib/jobs.js); crm-daily.js runs it. The only launchable jobs are the four in
 // lib/jobs.js — sweep, deep-sweep (a sweep with --deep), ingest, and todo.
 
-// A job spec → the argv(s) to run. Every launched job passes --force, since a
+// A job spec → the argv(s) to run. The PAID jobs pass --force, since a
 // hand-started run from the UI always bypasses the run-toggle pause (the confirm
-// modal already showed its cost). An empty `slugs` means "everyone": sweep has a
-// native all-people pass (run once), while ingest is per-contact by design
-// (crm-daily --only, which also builds that contact's Timeline), so it expands to
-// every tracked slug.
-//   sweep   → crm-archive.js  [--only <slug>] [--deep] --force   (free, no model)
+// modal already showed its cost); the free sweeps have no toggle, so they don't.
+// An empty `slugs` means "everyone": sweep has a native all-people pass (run
+// once), while ingest is per-contact by design (crm-daily --only, which also
+// builds that contact's Timeline), so it expands to every tracked slug.
+//   sweep   → crm-archive.js  [--only <slug>] [--deep]           (free, no model)
 //   ingest  → crm-daily.js    --only <slug> --force              (merge + timeline)
 //   todo    → crm-todo-scan.js --allow-paid --force              (global "make sure" scan)
+// CSRF guard for mutating routes. Basic-auth credentials are auto-attached by the
+// browser on ANY request to this origin with no SameSite protection, so a forged
+// cross-site POST would carry them and could fire a paid run or flip a toggle.
+// Require a first-party signal: Sec-Fetch-Site must be same-origin/same-site;
+// anything else — including 'none' (file:// pages, some proxies/extensions) and
+// cross-site — is refused. When the header is absent (older client), fall back to
+// an Origin whose host matches Host; absent both, allow (a no-JS same-origin form
+// post or a local CLI probe, still gated by basic auth).
+function firstPartyOnly(req) {
+  if (sfs) return sfs === 'same-origin' || sfs === 'same-site';
+  const origin = req.headers.origin;
+  if (!origin) return true;
+  try { return new URL(origin).host === req.headers.host; } catch { return false; }
+}
+
 function jobCommands({ kind, slugs, deep, plan }) {
   if (kind === 'sweep') {
     const people = slugs.length ? slugs : [null];
-    return people.map((s) => [ARCHIVE_JS, ...(s ? ['--only', s] : []), ...(deep ? ['--deep'] : []), '--force']);
+    return people.map((s) => [ARCHIVE_JS, ...(s ? ['--only', s] : []), ...(deep ? ['--deep'] : [])]);
   }
   if (kind === 'ingest') {
     const people = slugs.length ? slugs : loadTrackedSlugs();
@@ -2904,8 +2922,7 @@ function start() {
       if (url.pathname.startsWith('/tasks/') && req.method === 'POST') {
         // Same CSRF guard as /actions/run: allow same-origin and direct curl
         // (which sends no Sec-Fetch-Site), refuse anything cross-site.
-        const sfs = req.headers['sec-fetch-site'];
-        if (sfs && sfs !== 'same-origin' && sfs !== 'none') { send(403, page('Forbidden', '<p>Cross-site request refused.</p>')); return; }
+        if (!firstPartyOnly(req)) { send(403, page('Forbidden', '<p>Cross-site request refused.</p>')); return; }
         const action = url.pathname.slice('/tasks/'.length);
         readBody(req, (raw) => {
           let cdb = null;
@@ -2977,8 +2994,7 @@ function start() {
       // own trigger; `who` carries every checked roster slug; `deep` / `plan` are
       // per-kind modifiers.
       if (url.pathname === '/admin/jobs' && req.method === 'POST') {
-        const sfs = req.headers['sec-fetch-site'];
-        if (sfs && sfs !== 'same-origin' && sfs !== 'none') { send(403, page('Forbidden', '<p>Cross-site request refused.</p>')); return; }
+        if (!firstPartyOnly(req)) { send(403, page('Forbidden', '<p>Cross-site request refused.</p>')); return; }
         readBody(req, (body) => {
           try {
             const p = new URLSearchParams(body);
@@ -3005,8 +3021,7 @@ function start() {
       // toggle only pauses the AUTOMATIC schedule — hand-started UI runs pass
       // --force and always proceed. No-JS friendly: a tiny form per switch.
       if (url.pathname === '/admin/toggle' && req.method === 'POST') {
-        const sfs = req.headers['sec-fetch-site'];
-        if (sfs && sfs !== 'same-origin' && sfs !== 'none') { send(403, page('Forbidden', '<p>Cross-site request refused.</p>')); return; }
+        if (!firstPartyOnly(req)) { send(403, page('Forbidden', '<p>Cross-site request refused.</p>')); return; }
         readBody(req, (body) => {
           try {
             const p = new URLSearchParams(body);
@@ -3032,8 +3047,7 @@ function start() {
       // clears the override (back to the pipeline default). setModel validates the
       // id against the curated list and throws on anything else → 400.
       if (url.pathname === '/admin/model' && req.method === 'POST') {
-        const sfs = req.headers['sec-fetch-site'];
-        if (sfs && sfs !== 'same-origin' && sfs !== 'none') { send(403, page('Forbidden', '<p>Cross-site request refused.</p>')); return; }
+        if (!firstPartyOnly(req)) { send(403, page('Forbidden', '<p>Cross-site request refused.</p>')); return; }
         readBody(req, (body) => {
           try {
             const p = new URLSearchParams(body);
@@ -3088,8 +3102,7 @@ function start() {
       if (cf && req.method === 'POST') {
         const slug = decodeURIComponent(cf[1]);
         if (!isSafeSlug(slug)) { sendJson(400, { ok: false, error: 'bad request' }); return; }
-        const sfs = req.headers['sec-fetch-site'];
-        if (sfs && sfs !== 'same-origin' && sfs !== 'none') { sendJson(403, { ok: false, error: 'cross-site request refused' }); return; }
+        if (!firstPartyOnly(req)) { sendJson(403, { ok: false, error: 'cross-site request refused' }); return; }
         // 512 KB: a save can carry several whole sections (the Timeline included).
         readBody(req, (raw2) => {
           try {
@@ -3107,8 +3120,7 @@ function start() {
       // Render one unit's Markdown for the profile page's in-place editor —
       // closing an editor swaps in exactly what a reload would show.
       if (url.pathname === '/render' && req.method === 'POST') {
-        const sfs = req.headers['sec-fetch-site'];
-        if (sfs && sfs !== 'same-origin' && sfs !== 'none') { sendJson(403, { ok: false, error: 'cross-site request refused' }); return; }
+        if (!firstPartyOnly(req)) { sendJson(403, { ok: false, error: 'cross-site request refused' }); return; }
         readBody(req, (raw2) => {
           try {
             let payload;
@@ -3130,8 +3142,7 @@ function start() {
         const slug = decodeURIComponent(cn[1]);
         if (!isSafeSlug(slug)) { send(400, page('Bad request', '<p>Bad request.</p>')); return; }
         if (req.method === 'POST') {
-          const sfs = req.headers['sec-fetch-site'];
-          if (sfs && sfs !== 'same-origin' && sfs !== 'none') { send(403, page('Forbidden', '<p>Cross-site request refused.</p>')); return; }
+          if (!firstPartyOnly(req)) { send(403, page('Forbidden', '<p>Cross-site request refused.</p>')); return; }
           readBody(req, (raw2) => {
             try {
               const name = String(new URLSearchParams(raw2).get('name') || '').replace(/[\r\n]+/g, ' ').trim().slice(0, 120);
@@ -3170,8 +3181,7 @@ function start() {
         const slug = decodeURIComponent(cnk[1]);
         const action = cnk[2];
         if (!isSafeSlug(slug)) { sendJson(400, { ok: false, error: 'bad request' }); return; }
-        const sfs = req.headers['sec-fetch-site'];
-        if (sfs && sfs !== 'same-origin' && sfs !== 'none') { sendJson(403, { ok: false, error: 'cross-site request refused' }); return; }
+        if (!firstPartyOnly(req)) { sendJson(403, { ok: false, error: 'cross-site request refused' }); return; }
         readBody(req, (raw2) => {
           try {
             let payload;
