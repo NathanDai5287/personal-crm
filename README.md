@@ -125,10 +125,12 @@ every flag, every job, the dashboard's pipeline buttons — is in
 
 ## Models
 
-The merge, Timeline, and todo steps each pick a model independently. Any provider
-`pi` supports works — e.g. `anthropic/claude-opus-5` or `moonshotai/kimi-k3`
-(the default) — so point each step at whatever you have access to. Override per
-run without editing code:
+Ingest runs on one model, which governs **both** its halves — merge and Timeline —
+so a run can't silently split a free merge against a paid Timeline. Todo picks its
+own model. Any provider `pi` supports works — e.g. `anthropic/claude-opus-5` or
+`moonshotai/kimi-k3` (the default). (`crm-timeline.js` run standalone falls back to
+`TIMELINE_MODEL`, but a normal ingest overrides it with the ingest model.) Override
+per run without editing code:
 ```
 CRM_MERGE_MODEL=anthropic/claude-opus-5 node scripts/crm-daily.js --only <slug>
 ```

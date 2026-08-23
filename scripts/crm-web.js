@@ -30,6 +30,7 @@ const TASKS = require('../lib/tasks');
 const P = require('../lib/nicknames');
 const RUN_TOGGLES = require('../lib/run-toggles');
 const RUN_MODELS = require('../lib/run-models');
+const JOBS_DEF = require('../lib/jobs'); // single source of truth for the job set + labels
 const { STYLE: BINDERY_CSS, FONTS, FONTS_DIR, THEME_INIT, THEME_JS } = require('../lib/view/shell');
 const { render, raw } = require('../lib/view/h');
 const V = require('../lib/view/pages');
@@ -1864,11 +1865,15 @@ function adminData() {
   const nextDeep = nextPacificDaily(3, 0, now);
   const prevMon = weekStart(now);
   const nextMon = nextWeekStart(prevMon);
+  // Dial LABELS come from lib/jobs.js (the single source of truth for the job set
+  // and its names); the SCHEDULE (cadence text + fire times) is dashboard-owned,
+  // since lib/jobs.js deliberately holds no cron. One dial per job id, in flow order.
+  const L = JOBS_DEF.labelFor;
   const dials = [
-    dial('Sweep', 'hourly', sweepMs, HOUR, 'sweep', { prevFire: nextHour - HOUR, nextFire: nextHour }),
-    dial('Deep sweep', 'daily · 3am', deepMs, DAY, 'deep-sweep', { prevFire: nextDeep - DAY, nextFire: nextDeep }),
-    dial('Ingest', 'weekly · Mon 4am', ingestMs, 7 * DAY, 'ingest', { prevFire: prevMon, nextFire: nextMon }),
-    dial('Todo', 'hourly · after sweep', todoMs, HOUR, 'todo', { prevFire: nextHour - HOUR, nextFire: nextHour }),
+    dial(L('sweep'), 'hourly', sweepMs, HOUR, 'sweep', { prevFire: nextHour - HOUR, nextFire: nextHour }),
+    dial(L('deep-sweep'), 'daily · 3am', deepMs, DAY, 'deep-sweep', { prevFire: nextDeep - DAY, nextFire: nextDeep }),
+    dial(L('ingest'), 'weekly · Mon 4am', ingestMs, 7 * DAY, 'ingest', { prevFire: prevMon, nextFire: nextMon }),
+    dial(L('todo'), 'hourly · after sweep', todoMs, HOUR, 'todo', { prevFire: nextHour - HOUR, nextFire: nextHour }),
   ];
   return { health, roster, dials, toggles: RUN_TOGGLES.getToggles(), models: RUN_MODELS.getModels(), modelOptions: RUN_MODELS.MODELS };
 }

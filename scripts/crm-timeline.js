@@ -682,7 +682,7 @@ function main() {
     let actualCostUsd = null;
     try {
       const cost = require("../lib/cost");
-      const per = cost.timelineCallUsd(TIMELINE_MODEL_EFF);
+      const per = cost.shortCallUsd(TIMELINE_MODEL_EFF);
       costUsd = per == null ? null : per * summariesCount;
       // Real billed cost, summed from the session dir every summary wrote into.
       if (SESSION_CAPTURE) {

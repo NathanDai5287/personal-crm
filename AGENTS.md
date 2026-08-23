@@ -61,9 +61,11 @@ the old spelling on purpose — renaming them would orphan data or is out of sco
   into profile updates. Not a mode and not one call. **Ingest ≡ backfill ≡
   play-forward**: the same code path, differing only in how much is pending and the
   effective date.
-- **Run** — one execution of the pipeline (`crm-daily.js`): sweep → plan → whatever
-  merges the gate releases → timelines. The **cron** only fires runs on a schedule;
-  it makes no cadence decisions.
+- **Run** — one execution of the **ingest** job (`crm-daily.js`): archive-first sweep
+  → plan → whatever merges the gate releases → the Timeline half. (Ingest sweeps
+  inline so it never reads a stale archive; the standalone `sweep`/`deep-sweep` jobs
+  keep the archive fresh between ingests.) The **cron/timer** only fires jobs on a
+  schedule; it makes no cadence decisions.
 - **Gate** — the cadence policy in the planner (`gateBuckets`): release a merge once
   a contact's backlog crosses **N** messages after the **floor**, or the **ceiling**
   forces it. A pure function of (backlog, merge frontier, effective date). Floor/

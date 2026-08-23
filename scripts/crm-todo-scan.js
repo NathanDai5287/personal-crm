@@ -283,7 +283,7 @@ function recordTodoRun(startedAt, scanned, contacts, triggers, inserted, model =
   // (null when nothing was captured). Neither is ever fed to the fitted estimator.
   let costUsd = null;
   try {
-    const per = require('../lib/cost').timelineCallUsd(model, { bucketTokens: 2_000 });
+    const per = require('../lib/cost').shortCallUsd(model, { bucketTokens: 2_000 });
     costUsd = per == null ? null : per * triggers;
   } catch { /* pricing is best-effort */ }
   try {
