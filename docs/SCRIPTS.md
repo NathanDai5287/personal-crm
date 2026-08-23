@@ -151,7 +151,9 @@ node scripts/crm-autopromote.js --write      # actually promote
 ### `crm-todo-scan.js` — cheap commitment capture (model only when regex fires)
 Reads `crm.db` directly and regex-scans for Nathan saying "make sure …"; the
 model is invoked only on a match (≈0.2×/month). Meant to run frequently. **Dry-run
-unless `--write`.**
+unless `--write`.** A trigger must be ≥ `CRM_TODO_SETTLE_MIN` minutes old (default 5)
+before it is extracted, so its discharge window can fill first — see the 2026-08-22
+engineering-log entry.
 ```
 node scripts/crm-todo-scan.js               # scan + report, no writes
 node scripts/crm-todo-scan.js --write        # extract + insert, advance cursor

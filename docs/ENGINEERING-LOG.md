@@ -13,6 +13,37 @@ Newest first.
 
 ---
 
+## 2026-08-22
+
+### DECISION — todo triggers settle for 5 minutes before extraction
+Nathan asked what happens if he sends "i'll make sure …" right at the top of the hour, before
+the conversation has enough context. It exposed a real gap: the sweep and `crm-todo-scan.js`
+run back-to-back in one hourly Task Scheduler job (`run-archive-hidden.vbs`), so a trigger is
+normally archived *and* extracted in the same pass — before the lines after it exist. The
+extraction is once-only (the cursor advances past the trigger), so a discharge ("nvm") that
+lands after that pass is never reconsidered. That is the `AFTER = 8` window in
+`lib/task-trigger.js` being defeated by timing, and it is the concrete form of the 2026-08-04
+OPEN item #2 ("no discharge detection").
+
+Fix: a **settle margin** — a trigger is not extracted until it is ≥ `CRM_TODO_SETTLE_MIN`
+minutes old (default **5**; `0` disables → today's behaviour). Implemented in `crm-todo-scan.js`
+by holding back any candidate whose `sent_at` is within the margin and capping both the cursor
+(`safeHi`) and the extraction ledger just below the earliest held trigger — the cap on the
+ledger is load-bearing because `extractFor` re-scans whatever ledger it is handed
+(`crm-tasks.js:116`), so filtering a list is not enough to keep a held trigger out of the model
+call. A held trigger stays above the cursor and is reconsidered, now older, next run.
+
+Latency cost, given the hourly sweep+scan cadence (M = 5):
+- **Best case** ≈ M (~5 min) — sent just over M before a top-of-hour.
+- **Worst case** ≈ 60 + M (~65 min) — sent just under M before the hour, missing this run's
+  margin and waiting one extra cycle. (Without the guard: best ~seconds, worst ~1 hour.)
+
+Everything still lands as a **draft** for manual acceptance, so this only affects *when* a draft
+appears, never whether a live reminder fires. Held triggers are logged (`… N trigger(s) too
+fresh`) so a deferred capture is never silent.
+
+---
+
 ## 2026-08-04
 
 ### DECISION — the full-ledger tasks pass is DELETED, not retired

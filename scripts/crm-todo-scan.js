@@ -44,6 +44,14 @@ const FREE_PREFIX = 'anthropic/';
 // scan still resolves. Only the TRIGGER has to be new; its context does not.
 const CONTEXT_LOOKBACK = 60;
 
+// SETTLE MARGIN. A trigger is not extracted until it is at least this old, so the AFTER
+// window (lib/task-trigger.js) has time to fill with an immediate discharge ("nvm") before
+// the once-only extraction runs. Without it, a "make sure" swept and scanned in the same
+// hourly pass is extracted before its next lines exist, and the discharge — which lands
+// after — is never reconsidered (the trigger sits below the cursor forever). See the
+// 2026-08-22 entry in docs/ENGINEERING-LOG.md. 0 disables (today's behaviour); default 5m.
+const SETTLE_MS = Math.max(0, Number(process.env.CRM_TODO_SETTLE_MIN || 5)) * 60_000;
+
 function loadState() {
   try { return JSON.parse(fs.readFileSync(STATE, 'utf8')); } catch { return { cursors: {} }; }
 }
@@ -98,6 +106,7 @@ function main() {
   // needed at all, so the paid-model guard only fires when there is real work.
   const found = [];
   let scanned = 0;
+  let heldTotal = 0;
   const nearMisses = [];
   for (const slug of slugs) {
     const cursor = sinceOverride != null ? Number(sinceOverride) : (state.cursors[slug] || 0);
@@ -120,7 +129,22 @@ function main() {
     }
     // A trigger at or below the cursor was already handled on an earlier run; it is only
     // present here to provide context.
-    const fresh = res.windows.filter((w) => w.msgId > cursor);
+    const candidates = res.windows.filter((w) => w.msgId > cursor);
+    // SETTLE GUARD. Hold back any candidate whose trigger was sent within SETTLE_MS: it is
+    // too fresh for its AFTER window to have filled. `safeHi` is the highest id we may
+    // advance the cursor to without stepping past a held trigger — everything below the
+    // earliest held one is settled and may be extracted now; the held one is left above the
+    // cursor so it is reconsidered (older) next run. sent_at is absolute epoch ms, so this
+    // comparison is timezone-independent (the Pacific formatting is display-only).
+    const NOW = Date.now();
+    const sentAtOf = (id) => { const r = rows.find((x) => x.id === id); return r ? r.sent_at : 0; };
+    const heldIds = candidates.filter((w) => sentAtOf(w.msgId) > NOW - SETTLE_MS).map((w) => w.msgId);
+    const safeHi = heldIds.length ? Math.min(maxRow.hi, Math.min(...heldIds) - 1) : maxRow.hi;
+    heldTotal += heldIds.length;
+    // Ripe = settled AND below the earliest held trigger. extractFor re-scans whatever
+    // ledger it is handed, so the extraction ledger is CAPPED at safeHi — that is the only
+    // way to keep a held trigger out of the model call, not merely off this list.
+    const ripe = candidates.filter((w) => w.msgId <= safeHi);
     // Every near-miss past the cursor, unbounded. The first-run branch above returns
     // before this, so the cursor is what keeps the list short — no age or count cap needed,
     // and capping would hide the case this exists to catch.
@@ -129,11 +153,18 @@ function main() {
       const row = rows.find((r) => r.id === nm.id);
       nearMisses.push({ slug, ...nm, at: row ? row.sent_at : 0 });
     }
-    if (fresh.length) found.push({ slug, ledger, windows: fresh, hi: maxRow.hi });
-    else if (write) state.cursors[slug] = maxRow.hi;   // nothing to do; move on
+    if (ripe.length) {
+      const capped = safeHi >= maxRow.hi ? ledger : renderLedger(rows.filter((r) => r.id <= safeHi));
+      found.push({ slug, ledger: capped, windows: ripe, hi: safeHi });
+    } else if (write) {
+      state.cursors[slug] = safeHi;   // nothing ripe; advance only past settled ground
+    }
   }
 
   console.log(`scanned ${scanned} new message(s) across ${slugs.length} contact(s)`);
+  if (heldTotal) {
+    console.log(`  … ${heldTotal} trigger(s) too fresh (<${SETTLE_MS / 60_000}m old) — holding for a later run so the discharge window can fill`);
+  }
   if (firstRun && sinceOverride == null) {
     console.log('FIRST RUN: recording current position only. Past triggers are deliberately');
     console.log('not backfilled — Nathan: "it is not important that every past task is picked up".');
