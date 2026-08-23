@@ -18,7 +18,7 @@ const crypto = require('crypto');
 const { spawn, execFileSync } = require('child_process');
 const {
   ROOT, CONTACTS_DIR, WEB_PORT, WEB_USER, WEB_PASSWORD_FILE,
-  TRACKED, LOGS_DIR, GITDIR, MERGE_MODEL, COMPACT_MODEL,
+  TRACKED, LOGS_DIR, GITDIR, MERGE_MODEL, TIMELINE_MODEL,
   BOT_SERVICE_ID,
 } = require('../lib/config');
 const { openCrmDb, openSignalDb } = require('../lib/signal-db');
@@ -1804,7 +1804,7 @@ function attachPendingCosts(roster) {
       const q = cdb.prepare('SELECT sent_at, length(body) AS blen FROM messages WHERE contact_slug = ? AND id NOT IN (SELECT message_id FROM merged WHERE slug = ?) ORDER BY sent_at');
       for (const x of stale) {
         const rows = q.all(x.slug, x.slug);
-        pendingCostCache.set(x.slug, { waiting: x.waiting, est: estIngestFromRows(MERGE_MODEL, COMPACT_MODEL, rows) });
+        pendingCostCache.set(x.slug, { waiting: x.waiting, est: estIngestFromRows(MERGE_MODEL, TIMELINE_MODEL, rows) });
       }
     } finally {
       cdb.close();
@@ -1855,8 +1855,8 @@ function adminData() {
   };
   // A dial per scheduled job, named to match the Key — no vague "pipeline". Each
   // maps to a real registered task (tools/register-*.ps1): sweep is the hourly
-  // archive copy; the deep sweep is a daily full re-walk; ingest and compact are
-  // the two steps of the weekly Monday run, so they share its clock.
+  // archive copy; the deep sweep is a daily full re-walk; ingest is the weekly
+  // Monday run (its merge + Timeline halves share one clock); todo is hourly.
   // Real cron schedules (tools/register-*.ps1): archive sweep + todo at the top of
   // every hour; deep sweep daily 03:00 Pacific; the weekly AI run Monday 04:00
   // Pacific. Each dial counts down to its NEXT fire, not a rolling interval.
@@ -1978,7 +1978,7 @@ function statusPage() {
 // Screen A — /runs, /runs/<id>, /runs/<id>/diff/<slug>
 // ---------------------------------------------------------------------------
 // One ledger row per run record. `kind` drives the row's colour (sweep/ingest/
-// compact each get a distinct chip) and which fields fill the shared columns —
+// timeline each get a distinct chip) and which fields fill the shared columns —
 // the numbers mean different things per kind, but the header labels stay generic
 // and the note clarifies. `ok:false` renders the note in oxblood.
 function rowForRun(r) {
@@ -1995,9 +1995,11 @@ function rowForRun(r) {
       note: r.reuse ? 'rowid reuse detected' : `${r.inserted ?? 0} message(s) archived`,
     };
   }
-  if (r.kind === 'compact') {
+  // 'timeline' is the current kind; 'compact' is the pre-rename spelling still
+  // present in older run records, normalized to the same row here.
+  if (r.kind === 'timeline' || r.kind === 'compact') {
     return {
-      t, kind: 'compact',
+      t, kind: 'timeline',
       pass: r.only ? 'timeline (one)' : 'timeline',
       scope: r.only || 'everyone',
       examined: String(r.scanned ?? ''),
@@ -2234,14 +2236,17 @@ function runDetailPage(id) {
 
   // Which model wrote this run's output. Shown next to the diff links on
   // purpose: a profile diff is only interpretable if you know which model
-  // produced it, and merge/compact can now be pointed at different models.
+  // produced it, and merge/timeline can now be pointed at different models.
+  // run.models.timeline is the current field; .compact is the pre-rename spelling
+  // still present in older records.
+  const runTimelineModel = run.models && (run.models.timeline || run.models.compact);
   const modelsHtml = run.models
     ? `<span class="sub"> · merge <code>${esc(run.models.merge || '?')}</code>` +
-      (run.models.compact && run.models.compact !== run.models.merge
-        ? ` · timeline <code>${esc(run.models.compact)}</code>` : '') + `</span>`
+      (runTimelineModel && runTimelineModel !== run.models.merge
+        ? ` · timeline <code>${esc(runTimelineModel)}</code>` : '') + `</span>`
     : '';
-  const cc = run.compactCitations;
-  const compactCiteHtml = cc
+  const cc = run.timelineCitations || run.compactCitations;
+  const timelineCiteHtml = cc
     ? `<h2>Timeline citations</h2><p class="${cc.bad && cc.bad.length ? 'bad' : 'ok'}">` +
       (cc.bad && cc.bad.length
         ? `unresolvable ids in ${cc.bad.length} file(s): ${esc(cc.bad.join(' '))}`
@@ -2270,14 +2275,14 @@ function runDetailPage(id) {
   // The kind chip wears the same job ink as the runs ledger (legacy records
   // predate `kind` and are all ingest runs).
   const kind = run.kind || 'ingest';
-  const kindWord = { sweep: 'sweep', ingest: 'ingest', compact: 'timeline', todo: 'todo', manual: 'by hand' }[kind] || kind;
+  const kindWord = { sweep: 'sweep', ingest: 'ingest', timeline: 'timeline', compact: 'timeline', todo: 'todo', manual: 'by hand' }[kind] || kind;
   const body = `<div class="back"><a href="/runs">&larr; All runs</a></div>` +
     `<header class="top"><h1>Run ${esc(fmtWhen(run.startedAt))}</h1>` +
     `<span class="mk ${esc(kind)}">${esc(kindWord)}</span>` +
     `<span class="sub">${esc(runMode(run))} · ${fmtMs(run.durationMs)}</span>${modelsHtml}${costHtml}</header>` +
     // A manual run's story is its steps + why + line diff; a todo run's is the
     // drafts it captured — neither has a contacts table.
-    `<h2>Steps</h2>${stepsHtml}${manualHtml}${todoHtml}${(run.kind === 'manual' || run.kind === 'todo') ? '' : contactsHtml}${compactCiteHtml}${warnHtml}${logHtml}`;
+    `<h2>Steps</h2>${stepsHtml}${manualHtml}${todoHtml}${(run.kind === 'manual' || run.kind === 'todo') ? '' : contactsHtml}${timelineCiteHtml}${warnHtml}${logHtml}`;
   return page(`Run ${run.id}`, body, '/runs');
 }
 
@@ -2418,8 +2423,8 @@ function ledgerPage(slug, sha) {
   }).join('');
   const counted = lines.filter((l) => /^\[[^\]]+\]\s+⟨m\d+⟩/.test(l)).length;
 
-  // The profile's judged sections only — the Timeline is compaction's and would
-  // bury the thing you are checking.
+  // The profile's judged sections only — the Timeline is the Timeline step's and
+  // would bury the thing you are checking.
   const judged = profile
     ? profile.split(/^## Timeline/m)[0]
     : '(profile not present at this commit)';
@@ -2598,7 +2603,7 @@ function diffPage(id, slug, chunkIdx) {
   const A = splitLines(preText);
   const B = splitLines(postText);
   // The profile .md holds both the merge-written prose AND the `## Timeline`
-  // section (owned by compaction). One divider row marks where Timeline starts.
+  // section (owned by the Timeline step). One divider row marks where Timeline starts.
   const timelineB = B.findIndex((l) => /^##\s+Timeline\b/.test(l));
 
   const backHeader = `<div class="back"><a href="/runs/${encodeURIComponent(id)}">&larr; back to run</a></div>` +
@@ -2644,7 +2649,7 @@ function diffPage(id, slug, chunkIdx) {
 }
 
 // ---------------------------------------------------------------------------
-// Screen C — the pipeline jobs: sweep / ingest / compact, launched from /admin
+// Screen C — the pipeline jobs: sweep / deep-sweep / ingest / todo, launched from /admin
 // ---------------------------------------------------------------------------
 // In-memory single-job lock: one run at a time, so two launches can never
 // interleave cursor state (a second launch while one runs is rejected with 409).
@@ -2654,30 +2659,29 @@ let job = null;
 
 const ARCHIVE_JS = path.join(ROOT, 'scripts', 'crm-archive.js');
 const DAILY_JS = path.join(ROOT, 'scripts', 'crm-daily.js');
-const COMPACT_JS = path.join(ROOT, 'scripts', 'crm-compact.js');
 const TODO_JS = path.join(ROOT, 'scripts', 'crm-todo-scan.js');
+// NOTE: there is no timeline job here. Timeline is ingest's second half (see
+// lib/jobs.js); crm-daily.js runs it. The only launchable jobs are the four in
+// lib/jobs.js — sweep, deep-sweep (a sweep with --deep), ingest, and todo.
 
-// A job spec → the argv(s) to run. An empty `slugs` means "everyone": sweep and
-// compact each have a native all-people pass (run once), while ingest is
-// per-contact by design (crm-daily --only, which now also builds that contact's
-// Timeline), so it expands to every tracked slug.
-//   sweep   → crm-archive.js  [--only <slug>] [--deep]     (free, no model)
-//   ingest  → crm-daily.js    --only <slug>               (merge + timeline)
-//   compact → crm-compact.js  --write [--slug <slug>]      (timeline summaries)
-//   todo    → crm-todo-scan.js --write --allow-paid        (global "make sure" scan)
+// A job spec → the argv(s) to run. Every launched job passes --force, since a
+// hand-started run from the UI always bypasses the run-toggle pause (the confirm
+// modal already showed its cost). An empty `slugs` means "everyone": sweep has a
+// native all-people pass (run once), while ingest is per-contact by design
+// (crm-daily --only, which also builds that contact's Timeline), so it expands to
+// every tracked slug.
+//   sweep   → crm-archive.js  [--only <slug>] [--deep] --force   (free, no model)
+//   ingest  → crm-daily.js    --only <slug> --force              (merge + timeline)
+//   todo    → crm-todo-scan.js --allow-paid --force              (global "make sure" scan)
 function jobCommands({ kind, slugs, deep, plan }) {
   if (kind === 'sweep') {
     const people = slugs.length ? slugs : [null];
-    return people.map((s) => [ARCHIVE_JS, ...(s ? ['--only', s] : []), ...(deep ? ['--deep'] : [])]);
+    return people.map((s) => [ARCHIVE_JS, ...(s ? ['--only', s] : []), ...(deep ? ['--deep'] : []), '--force']);
   }
   if (kind === 'ingest') {
     const people = slugs.length ? slugs : loadTrackedSlugs();
     // --force: a hand-started run always bypasses the web-UI run-toggle pause.
     return people.map((s) => [DAILY_JS, '--only', s, ...(plan ? ['--dry-run'] : []), '--force']);
-  }
-  if (kind === 'compact') {
-    const people = slugs.length ? slugs : [null];
-    return people.map((s) => [COMPACT_JS, '--write', ...(s ? ['--slug', s] : []), '--force']);
   }
   if (kind === 'todo') {
     // Global — reads the whole archive, not per-contact; slugs are ignored.
@@ -2690,7 +2694,9 @@ function jobCommands({ kind, slugs, deep, plan }) {
 
 function startJob(spec) {
   if (job && job.running) return { ok: false, error: 'a run is already in progress' };
-  if (!['sweep', 'ingest', 'compact', 'todo'].includes(spec.kind)) return { ok: false, error: 'bad job kind' };
+  // deep-sweep is unfolded to kind 'sweep' (+deep) before it reaches here, so the
+  // launchable kinds are sweep / ingest / todo. Timeline is not a job.
+  if (!['sweep', 'ingest', 'todo'].includes(spec.kind)) return { ok: false, error: 'bad job kind' };
   const cmds = jobCommands(spec);
   if (!cmds || !cmds.length) return { ok: false, error: 'nothing to run (no such people?)' };
   // Cross-process lock: refuse if a scheduled sweep or a CLI run is mid-flight,
@@ -2763,7 +2769,7 @@ function runQueue(cmds, i) {
 // any banner is the plan size, and chunks done is the count of crm-merge ok
 // lines while running (max'd with the cursor lines so the final dump doesn't
 // double-count). ETA extrapolates the live per-chunk rate; the Timeline
-// (compaction) phase is indeterminate.
+// phase is indeterminate.
 function parseJobProgress(buf, elapsedMs) {
   const s = String(buf || '');
   const marks = [...s.matchAll(/[\[ ](\d+)\/(\d+)[\s(\]]/g)];
@@ -2774,7 +2780,7 @@ function parseJobProgress(buf, elapsedMs) {
     (s.match(/: ok, cursor ->/g) || []).length,
     (s.match(/^crm-merge: .+?: ok\b/gm) || []).length,
   );
-  const timeline = /\[5\] timeline|crm-compact:/.test(s);
+  const timeline = /\[5\] timeline|crm-timeline:/.test(s);
   const phase = (done >= total || timeline) ? 'timeline' : 'ingest';
   let etaMs = null;
   if (phase === 'ingest' && done > 0 && elapsedMs > 0) etaMs = Math.max(0, (total - done) * (elapsedMs / done));
@@ -2961,7 +2967,7 @@ function start() {
         return;
       }
 
-      // Launch a pipeline job (sweep / ingest / compact) from the pipeline desk.
+      // Launch a pipeline job (sweep / deep-sweep / ingest / todo) from the pipeline desk.
       // The desk is one <form>: `job` is the kind, or "<kind>:<slug>" for a row's
       // own trigger; `who` carries every checked roster slug; `deep` / `plan` are
       // per-kind modifiers.
@@ -2990,7 +2996,7 @@ function start() {
         });
         return;
       }
-      // Enable/disable one of the paid periodic jobs (ingest/todo/compact). A
+      // Enable/disable one of the periodic jobs (sweep/deep-sweep/ingest/todo). A
       // toggle only pauses the AUTOMATIC schedule — hand-started UI runs pass
       // --force and always proceed. No-JS friendly: a tiny form per switch.
       if (url.pathname === '/admin/toggle' && req.method === 'POST') {

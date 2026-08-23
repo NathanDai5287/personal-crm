@@ -31,7 +31,7 @@
 // contact covers every source (their DM plus any groups) at once.
 //
 // DM + GROUP CHATS: "messages with a person" is not just their 1:1 DM — see
-// lib/sources.js, which owns those rules and is shared with compaction and the
+// lib/sources.js, which owns those rules and is shared with the Timeline step and the
 // web status board so all three agree.
 //
 // CRASH SAFETY: crm-daily records a chunk's messages in the `merged` table only

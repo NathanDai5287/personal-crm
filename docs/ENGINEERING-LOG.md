@@ -15,6 +15,46 @@ Newest first.
 
 ## 2026-08-23
 
+### DECISION — the code now matches the operator's four-job mental model; "compaction" is renamed "Timeline" and is no longer a job
+The job vocabulary in the code had drifted from how the system is actually operated, which was a
+standing source of confusion. Realigned both, and made the alignment structural so it can't drift
+again.
+
+**The mental model (now the code's model, documented in `AGENTS.md`):** there are exactly FOUR
+periodic jobs — `sweep`, `deep-sweep`, `ingest`, `todo`. Each runs on its own cycle and checks an
+enable flag; if on, it does its work. **`ingest` has two halves, MERGE and TIMELINE.** Timeline is
+NOT a job — it is ingest's second half.
+
+What changed:
+1. **`lib/jobs.js` is the single source of truth** for the job list (`JOBS`, `JOB_IDS`,
+   `MODEL_JOBS`). `run-toggles`, `run-models`, and the dashboard all derive from it — no more two
+   hand-maintained `JOBS = [...]` arrays that disagreed.
+2. **`compact` is no longer a job.** It had been a third toggle/model entry (`run-toggles`,
+   `run-models`) with a whole `compact` job-kind in the web dispatcher and its own standalone
+   timer — yet no dashboard dial ever surfaced it, so those were dead-but-live controls, and the
+   standalone timer duplicated the Timeline work ingest already does. All of that is removed.
+   Timeline runs ONLY as ingest's second half.
+3. **Rename `compact` → `timeline` throughout the pipeline:** `scripts/crm-compact.js` →
+   `scripts/crm-timeline.js`, `lib/compact-prompt.js` → `lib/timeline-prompt.js`, config
+   `COMPACT_MODEL/PROMPT/STATE` → `TIMELINE_*` (old `CRM_COMPACT_*` env still honoured), cost
+   `compactCall*` → `timelineCall*`, run-record `kind:'compact'` → `'timeline'`, and the UI ink
+   `--k-compact` → `--k-timeline`. Legacy run records with `kind:'compact'` still render (readers
+   normalize the old spelling; `.mk.compact` etc. kept as aliases).
+4. **All four jobs now carry an enable flag** (was: only the model jobs). `sweep`/`deep-sweep` gained
+   flags in `crm-archive.js` via the shared `run-toggles.paused()` gate, defaulting ON. NOTE: pausing
+   a sweep stops archiving — including disappearing messages before they vanish — so this is an
+   operational pause, not a cost pause; it is rarely touched.
+
+**Intentional carryovers (do NOT "fix" these):** the prompt file `prompts/compact.md` (authored
+separately), the on-disk `data/crm-compact-state.json` and `data/_compact-backup/` (renaming would
+orphan aging state / backups), and the `evals/compact-*.js` harness (isolated subsystem) keep the
+old spelling. Only their surrounding prose was updated.
+
+**SUPERSEDES** parts of the uniform-CLI-contract entry directly below: its point 3 spoke of "the
+compact toggle" and "the standalone weekly compact timer" — both are gone. Ingest's internal
+Timeline call still passes `--force`, but there is no longer any compact toggle to be re-gated by;
+`crm-timeline.js` has no pause gate at all now (it is not a job).
+
 ### DECISION — one uniform CLI contract for every scheduled model job
 After the compact-dry-ran-forever bug (below), standardized the three scheduled model scripts
 (`crm-daily.js`, `crm-todo-scan.js`, `crm-compact.js`) onto one contract so a timer can never

@@ -9,7 +9,7 @@
 // (lib/sources.js) resolves a contact's conversations against THIS machine's
 // Signal DB, i.e. this machine's ids. So buildArchiveQuery's `conv_id IN (...)`
 // filter never matches the copied rows, and the entire copied history is
-// invisible to ingest/compaction — a contact would merge only the handful of
+// invisible to ingest/timeline — a contact would merge only the handful of
 // messages this device swept for itself. The data is present; it is just
 // unreachable by the source-rule queries.
 //

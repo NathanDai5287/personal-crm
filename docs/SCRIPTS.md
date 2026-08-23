@@ -7,30 +7,39 @@ tokens. Run all of them from the repo root as `node scripts/<name>.js`.
 
 ```
 Signal Desktop DB
-      │  crm-archive.js  (SWEEP — no model)
+      │  crm-archive.js  (SWEEP / DEEP-SWEEP — no model)
       ▼
   data/crm.db  ── the append-only archive of record (never deleted; the one
       │            irreplaceable file — it keeps messages Signal has purged)
       │
-      ├─ crm-refresh.js → crm-merge.js   (INGEST — model)
-      │      reads new messages, writes the PROSE KNOWLEDGE of a profile:
+      ▼
+  crm-daily.js  (INGEST — model) — runs in two halves per contact:
+      ├─ half 1  MERGE     crm-refresh.js → crm-merge.js
+      │      writes the PROSE KNOWLEDGE of a profile:
       │      ## What I know · ## Talking points · ## Open questions · metadata
       │      (never touches ## Timeline)
       │
-      └─ crm-compact.js                  (TIMELINE — model)
+      └─ half 2  TIMELINE  crm-timeline.js
              builds & maintains the CHRONOLOGY of a profile:
              ## Timeline (Recent raw → Daily → Weekly → Older) + Group activity
 ```
 
-**Ingest and compact write different halves of the profile and are independent
-passes.** A full `crm-daily.js` run ingests every contact, then compacts every
-contact; the two are not interleaved per week, and interleaving would produce
-identical output (no cross-dependency).
+**Merge and Timeline are the two halves of one job, ingest.** A full
+`crm-daily.js` run merges every contact, then builds every contact's Timeline;
+the two are not interleaved per week, and interleaving would produce identical
+output (no cross-dependency). The Timeline step (`crm-timeline.js`) is not a job
+of its own — it has no schedule and no enable flag; it runs because ingest runs.
+The canonical job list lives in `lib/jobs.js`; see `AGENTS.md` for the mental
+model.
 
 ## Every job that can be run
 
-Each of these is a dial on the dashboard's Pipeline tab with its own **▸ run**
-button (scoped to the checked roster, or everyone).
+These are the four jobs (`lib/jobs.js`). Each is a dial on the dashboard's
+Pipeline tab with its own **▸ run** button (scoped to the checked roster, or
+everyone) and its own enable switch (top-right of the dial). The switch pauses
+only the AUTOMATIC schedule — a hand-started **▸ run** passes `--force` and always
+proceeds. An automatic run whose switch is off is skipped without advancing its
+cursor, so nothing is lost.
 
 | Job | Runs | Cadence | Model | In run log |
 |---|---|---|---|---|
@@ -40,13 +49,17 @@ button (scoped to the checked roster, or everyone).
 | **Todo** | `crm-todo-scan.js` | top of every hour (after the sweep) | only when a "make sure" line matches (≈0.2×/mo) | yes (no-op ticks hidden) |
 | _(full run)_ | `crm-daily.js` | Monday 04:00 (task currently unregistered) | yes | yes |
 
-Ingest (`crm-daily --only`) now runs merge **and** that contact's Timeline
-(`crm-compact --slug`); it skips only autopromote (an all-contact pass). The full
-run does every contact's ingest + timeline. The standalone Timeline pass still
-exists as `crm-compact.js` (below) for CLI use, but is no longer a separate
-dashboard button.
+The **full run** is ingest over everyone (merge + Timeline for every contact).
+The **Timeline step** is not in this table because it is not a job — it is
+ingest's second half, run by `crm-timeline.js` from inside `crm-daily.js`.
 
-Model cost: `MERGE_MODEL` / `COMPACT_MODEL` / the todo model default to
+Ingest (`crm-daily --only`) runs merge **and** that contact's Timeline
+(`crm-timeline --slug`); it skips only autopromote (an all-contact pass). The full
+run does every contact's merge + Timeline. The Timeline builder still
+exists as `crm-timeline.js` (below) for standalone CLI use, but is not a job and
+has no dashboard button of its own.
+
+Model cost: `MERGE_MODEL` / `TIMELINE_MODEL` / the todo model default to
 `moonshotai/kimi-k3` — **paid per token** (needs `MOONSHOT_API_KEY`). Override any
 of them with `anthropic/claude-opus-5` (or another `anthropic/*`) for a $0
 subscription run. The todo scan is regex-gated, so it calls the model only on a
@@ -66,9 +79,9 @@ node scripts/crm-archive.js --only <slug>   # one contact (or group:<slug>)
 ```
 
 ### `crm-daily.js` — the ingest orchestrator (model)
-The full pipeline: snapshot → autopromote → refresh → per-contact merge with a
-crash-safe cursor commit → compact → snapshot → logs. This is the only writer of
-the ingest cursors (`crm-refresh-state.json`).
+The ingest job, both halves: snapshot → autopromote → refresh → per-contact merge
+with a crash-safe cursor commit → Timeline (`crm-timeline.js`) → snapshot → logs.
+This is the only writer of the ingest cursors (`crm-refresh-state.json`).
 ```
 node scripts/crm-daily.js               # full run: ingest ALL, then timeline ALL
 node scripts/crm-daily.js --only <slug> # one contact: merge + Timeline; skips autopromote
@@ -102,18 +115,20 @@ node scripts/crm-merge.js <slug>            # invoke the model
 node scripts/crm-merge.js <slug> --dry-run  # print the argv it would run
 ```
 
-### `crm-compact.js` — build & maintain the Timeline (model) — runs inside Ingest
-Builds each conversation's `## Timeline` and keeps it at decreasing resolution
+### `crm-timeline.js` — build & maintain the Timeline (model) — ingest's second half
+Ingest's Timeline step, run by `crm-daily.js`; also runnable standalone from the
+CLI. Builds each conversation's `## Timeline` and keeps it at decreasing resolution
 (Recent raw / Daily / Weekly / Older). One model call per aged-out day or week.
 Also folds group day-summaries into participant profiles. **Real by default;
-`--dry-run` previews. Backs up each file first.** (STANDARD CONTRACT — same
-shape as ingest/todo; see the engineering log.)
+`--dry-run` previews. Backs up each file first.** It is NOT a job — it has no
+enable flag of its own (the ingest switch pauses it). `--force` is accepted as a
+no-op (ingest passes it). Formerly `crm-compact.js`.
 ```
-node scripts/crm-compact.js                 # apply (default), all tracked contacts + groups
-node scripts/crm-compact.js --dry-run       # preview only, no writes, no model
-node scripts/crm-compact.js --slug <slug>   # one contact
-node scripts/crm-compact.js --group <slug>  # one group
-node scripts/crm-compact.js --no-llm        # structural only, skip summaries
+node scripts/crm-timeline.js                 # apply (default), all tracked contacts + groups
+node scripts/crm-timeline.js --dry-run       # preview only, no writes, no model
+node scripts/crm-timeline.js --slug <slug>   # one contact
+node scripts/crm-timeline.js --group <slug>  # one group
+node scripts/crm-timeline.js --no-llm        # structural only, skip summaries
 ```
 
 ---
@@ -129,7 +144,7 @@ node scripts/crm-web.js
 
 ### `crm-wipe.js` — reset contacts / clear the runs ledger (no model)
 The CLI-only destructive reset. Blanks a contact's profile to a stub, drops its
-ingest cursor + compact state, and deletes its pending ledger; `crm.db` is never
+ingest cursor + Timeline state, and deletes its pending ledger; `crm.db` is never
 touched, so a wiped contact rebuilds by re-ingesting. **Dry-run unless
 `--write`, which first snapshots `data/` into the history repo.**
 ```
@@ -152,7 +167,7 @@ node scripts/crm-autopromote.js --write      # actually promote
 ### `crm-todo-scan.js` — cheap commitment capture (model only when regex fires)
 Reads `crm.db` directly and regex-scans for Nathan saying "make sure …"; the
 model is invoked only on a match (≈0.2×/month). Meant to run frequently. **Real by
-default; `--dry-run` previews** (STANDARD CONTRACT — same shape as ingest/compact).
+default; `--dry-run` previews** (STANDARD CONTRACT — same shape as ingest/timeline).
 A trigger must be ≥ `CRM_TODO_SETTLE_MIN` minutes old (default 5) before it is
 extracted, so its discharge window can fill first — see the 2026-08-22
 engineering-log entry.
@@ -213,11 +228,14 @@ PowerShell registrars in `tools/` (run once, from an elevated shell):
 |---|---|---|---|
 | `register-archive-task.ps1` | Personal CRM Archive Sweep | top of every hour | `crm-archive.js` |
 | `register-deep-sweep-task.ps1` | Personal CRM Deep Sweep | daily 03:00 | `crm-archive.js --deep` |
-| `register-task.ps1` | Personal CRM Weekly AI | Monday 04:00 | `crm-daily.js` (ingest + compact) |
+| `register-task.ps1` | Personal CRM Weekly AI | Monday 04:00 | `crm-daily.js` (ingest = merge + Timeline) |
 
 `register-task.ps1` (the model-spending weekly run) is intentionally **not
-registered** right now — ingest and compact are triggered manually from the
-dashboard. Sweeps are the only thing on a schedule.
+registered** right now — ingest is triggered manually from the dashboard. Sweeps
+are the only thing on a schedule.
+
+(On the Linux host, jobs run as systemd user timers rather than Task Scheduler;
+see the engineering log for that layout.)
 
 `run-web-hidden.vbs` launches `crm-web.js` with no console window; a shortcut to
 it in the Startup folder keeps the dashboard up across reboots.

@@ -5,7 +5,7 @@
 //   2. crm-autopromote.js --write                          (non-fatal on failure)
 //   3. crm-refresh.js                                      (fatal if it throws)
 //   4. per-contact merge + CURSOR COMMIT (crash-safe, see below)
-//   5. crm-compact.js --force (apply; forced = ingest's own Timeline sub-step)  (non-fatal)
+//   5. crm-timeline.js --force (apply; forced = ingest's own Timeline sub-step) (non-fatal)
 //   6. memory-commit.js "daily post-refresh"
 //   7. logs/last-run.json + logs/daily.log
 //   8. health warning if Signal Desktop looks closed
@@ -27,11 +27,11 @@
 //   node scripts/crm-daily.js              # run the full pipeline
 //   node scripts/crm-daily.js --only <slug> # ONE contact: refresh --only + merge +
 //                                          # cursor commit + that contact's Timeline
-//                                          # (crm-compact --slug <slug>). Skips only
+//                                          # (crm-timeline --slug <slug>). Skips only
 //                                          # autopromote, which is inherently all-contact.
 //   node scripts/crm-daily.js --dry-run    # steps 1-3 + merge/cursor PLANNING only;
 //                                          # never invokes pi, never writes REFRESH_STATE,
-//                                          # never applies compact or the post-commit.
+//                                          # never applies the Timeline step or the post-commit.
 //                                          # DEVIATION: also runs autopromote WITHOUT --write
 //                                          # (its own dry-run) rather than --write, so a
 //                                          # --dry-run of the orchestrator never mutates
@@ -44,7 +44,7 @@ const path = require('path');
 const { execFileSync, execSync } = require('child_process');
 const {
   ROOT, LOGS_DIR, REFRESH_STATE, CONTACTS_DIR, GROUPS_DIR, GITDIR,
-  MERGE_MODEL, COMPACT_MODEL, MERGE_PROMPT,
+  MERGE_MODEL, TIMELINE_MODEL, MERGE_PROMPT,
 } = require('../lib/config');
 const { mergeContact } = require('./crm-merge');
 const { planAll, writeChunkLedger, chunkSummary } = require('./crm-refresh');
@@ -77,7 +77,7 @@ const DRY_RUN = process.argv.includes('--dry-run');
 const FORCE = process.argv.includes('--force');
 // The effective merge model: the web-UI 'ingest' dropdown selection, else the
 // CRM_MERGE_MODEL env / default. It governs the WHOLE run — the merge and the
-// Timeline (compact) step both use it — so a run can't split across a free merge
+// Timeline step both use it — so a run can't split across a free merge
 // model and a paid Timeline model. Read once per process; a fresh run picks up a
 // UI change.
 const MERGE_MODEL_EFF = require('../lib/run-models').getModel('ingest') || MERGE_MODEL;
@@ -104,7 +104,7 @@ if (MAXC_IDX !== -1 && (!Number.isInteger(MAX_CHUNKS) || MAX_CHUNKS < 1)) {
 const SCRIPTS = {
   memoryCommit: path.join(ROOT, 'scripts', 'memory-commit.js'),
   autopromote: path.join(ROOT, 'scripts', 'crm-autopromote.js'),
-  compact: path.join(ROOT, 'scripts', 'crm-compact.js'),
+  timeline: path.join(ROOT, 'scripts', 'crm-timeline.js'),
   backup: path.join(ROOT, 'scripts', 'crm-backup.js'),
   // NOTE: refresh is no longer spawned as a subprocess — crm-daily calls
   // planAll() from crm-refresh.js in-process so it gets real chunk objects.
@@ -505,35 +505,34 @@ function main() {
     catch (e) { warnings.push(`cost refit failed (non-fatal): ${e.message}`); }
   }
 
-  // ---- 5. timeline (compact) -----------------------------------------------------
-  let compactChanged = 0;
-  let compactCitations = null;
+  // ---- 5. timeline (ingest's second half) ----------------------------------------
+  let timelineChanged = 0;
+  let timelineCitations = null;
   if (!fatal && !DRY_RUN) {
-    // COMBINED JOB: a single-contact run builds that contact's Timeline right
-    // after ingesting them, so one dashboard "Ingest" does both halves; a full
-    // run builds everyone's. Compaction makes one pi call per aged-out day/week
-    // per conversation, so first runs after a gap can take a while — half an hour.
-    // --timeline-backfill makes step 5 build tiers from the whole archived
-    // history (crm-compact --backfill) — the flag for a post-wipe re-backfill,
+    // INGEST'S SECOND HALF: a single-contact run builds that contact's Timeline
+    // right after ingesting them, so one dashboard "Ingest" does both halves; a
+    // full run builds everyone's. The Timeline step makes one pi call per aged-out
+    // day/week per conversation, so first runs after a gap can take a while — half
+    // an hour. --timeline-backfill makes step 5 build tiers from the whole archived
+    // history (crm-timeline --backfill) — the flag for a post-wipe re-backfill,
     // so profile AND timeline regenerate in the same pass. Explicit only; a
     // normal nightly run must never re-walk history.
-    // --force: this is ingest's own Timeline sub-step (apply is the default now), not an
-    // independent scheduled compact, so it inherits ingest's authorization and is NOT
-    // re-gated by the compact toggle — that toggle pauses only the standalone weekly compact.
-    const compactArgs = ONLY ? ['--force', '--slug', ONLY] : ['--force'];
+    // --force is a no-op for crm-timeline.js (it has no toggle — Timeline is not a
+    // job, see lib/jobs.js); passed only because crm-timeline still accepts it.
+    const timelineArgs = ONLY ? ['--force', '--slug', ONLY] : ['--force'];
     // Timeline runs on the SAME model as the merge for this run (see MERGE_MODEL_EFF).
-    compactArgs.push('--model', MERGE_MODEL_EFF);
-    if (TIMELINE_BACKFILL) compactArgs.push('--backfill');
-    const compact = timed('compact', () => runNode(SCRIPTS.compact, compactArgs, { timeout: 1_800_000 }));
-    logLines.push(`[5] timeline --write${ONLY ? ` --slug ${ONLY}` : ''}: ${compact.ok ? 'ok' : 'FAILED (non-fatal)'}`);
-    logLines.push(compact.output || compact.error || '');
-    if (!compact.ok) warnings.push(`timeline failed (non-fatal): ${compact.error}`);
-    compactChanged = ((compact.output || '').match(/changed=true/g) || []).length;
+    timelineArgs.push('--model', MERGE_MODEL_EFF);
+    if (TIMELINE_BACKFILL) timelineArgs.push('--backfill');
+    const timelineRun = timed('timeline', () => runNode(SCRIPTS.timeline, timelineArgs, { timeout: 1_800_000 }));
+    logLines.push(`[5] timeline${ONLY ? ` --slug ${ONLY}` : ''}: ${timelineRun.ok ? 'ok' : 'FAILED (non-fatal)'}`);
+    logLines.push(timelineRun.output || timelineRun.error || '');
+    if (!timelineRun.ok) warnings.push(`timeline failed (non-fatal): ${timelineRun.error}`);
+    timelineChanged = ((timelineRun.output || '').match(/changed=true/g) || []).length;
 
-    // PROVENANCE CHECK for compaction (non-fatal). Compaction writes ⟨m…⟩ ids
+    // PROVENANCE CHECK for the Timeline step (non-fatal). It writes ⟨m…⟩ ids
     // into ## Timeline itself, and it runs AFTER the merges — so the per-merge
     // check above never sees a single line of its output. Re-validate every file
-    // it may have touched. This matters most when COMPACT_MODEL is set to a
+    // it may have touched. This matters most when TIMELINE_MODEL is set to a
     // cheaper model than the one whose citation fidelity you already trust:
     // copying ids verbatim is exactly the skill weaker models drop first.
     try {
@@ -552,19 +551,19 @@ function main() {
         if (v.missing.length > 0) bad.push(`${path.basename(f, '.md')}(${v.missing.slice(0, 5).join(',')})`);
       }
       cdb.close();
-      compactCitations = { files: files.length, cited, bad };
+      timelineCitations = { files: files.length, cited, bad };
       if (bad.length > 0) {
-        const msg = `citation check post-compact: unresolvable ids in ${bad.length} file(s): ${bad.slice(0, 10).join(' ')}`;
+        const msg = `citation check post-timeline: unresolvable ids in ${bad.length} file(s): ${bad.slice(0, 10).join(' ')}`;
         warnings.push(msg);
         logLines.push(`[5] ${msg}`);
       } else {
-        logLines.push(`[5] citation check post-compact: ${cited} cited ids across ${files.length} files, all resolve`);
+        logLines.push(`[5] citation check post-timeline: ${cited} cited ids across ${files.length} files, all resolve`);
       }
     } catch (e) {
-      logLines.push(`[5] citation check post-compact: skipped (${String(e).slice(0, 120)})`);
+      logLines.push(`[5] citation check post-timeline: skipped (${String(e).slice(0, 120)})`);
     }
   } else if (DRY_RUN) {
-    logLines.push('[5] compact --write: skipped (--dry-run)');
+    logLines.push('[5] timeline: skipped (--dry-run)');
   }
 
   // ---- 6. post-refresh snapshot ---------------------------------------------------
@@ -589,9 +588,9 @@ function main() {
     // Which model did which half of the work. Recorded per run so a profile diff
     // is always attributable to a model — the whole point of being able to A/B
     // MERGE_MODEL on one contact and compare the output.
-    models: { merge: MERGE_MODEL, compact: COMPACT_MODEL },
+    models: { merge: MERGE_MODEL, timeline: TIMELINE_MODEL },
     // Estimated merge-side spend (this record's half of the combined job; the
-    // Timeline half is priced in crm-compact's own record). null = model not in
+    // Timeline half is priced in crm-timeline's own record). null = model not in
     // pi's price catalog. See lib/cost.js — an estimate, never a bill.
     costUsd: mergeCostKnown ? mergeCostUsd : null,
     // Real billed merge cost, summed from pi's session usage per chunk. null when
@@ -606,8 +605,8 @@ function main() {
     messagesMerged: contactDetails.filter((c) => c.ok).reduce((n, c) => n + c.count, 0),
     merged,
     mergeFailures,
-    compactChanged,
-    compactCitations,
+    timelineChanged,
+    timelineCitations,
     warnings,
   };
 
@@ -636,7 +635,7 @@ function main() {
     // Full human log for this run, so /admin/runs/<id> can show what happened
     // (the record's per-step notes are truncated). Keyed by the same runId.
     try { fs.writeFileSync(path.join(runsDir, `${runId}.log`), logLines.join('\n')); } catch { /* non-fatal */ }
-    const oneLine = `${nowIso()} durationMs=${summary.durationMs} promoted=${promoted} activity=${plans.length} chunks=${summary.chunksMerged}/${totalChunks} merged=${merged.length} mergeFailures=${mergeFailures.length} compactChanged=${compactChanged} warnings=${warnings.length}`;
+    const oneLine = `${nowIso()} durationMs=${summary.durationMs} promoted=${promoted} activity=${plans.length} chunks=${summary.chunksMerged}/${totalChunks} merged=${merged.length} mergeFailures=${mergeFailures.length} timelineChanged=${timelineChanged} warnings=${warnings.length}`;
     fs.appendFileSync(path.join(LOGS_DIR, 'daily.log'), `${oneLine}\n${logLines.join('\n')}\n`);
   } else {
     console.log(logLines.join('\n'));

@@ -2,7 +2,7 @@
 //
 // Scans Nathan's Signal 1:1 conversations; any non-tracked person with enough recent
 // back-and-forth gets promoted: a stub profile is created, a crm.db row added, and the
-// slug appended to crm-tracked.json — so the next refresh/compaction starts tiering them.
+// slug appended to crm-tracked.json — so the next refresh/timeline starts tiering them.
 //
 // SAFE BY DEFAULT — dry-run (just lists candidates) unless --write.
 // Usage:
@@ -156,7 +156,7 @@ function main() {
 
   if (WRITE && promoted > 0) {
     fs.writeFileSync(TRACKED, JSON.stringify(tracked, null, 2) + "\n");
-    console.log(`\npromoted ${promoted}; added to crm-tracked.json (run crm-compact next to tier them).`);
+    console.log(`\npromoted ${promoted}; added to crm-tracked.json (run crm-timeline next to tier them).`);
   } else if (!WRITE) {
     console.log("\n(dry-run — re-run with --write to promote these.)");
   }

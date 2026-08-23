@@ -13,7 +13,7 @@ fragment of one. Changing the day or hour here without changing ANCHOR_HOUR /
 the Monday anchor in lib/weeks.js would break that alignment: the run would fire
 mid-week and the last partial week would sit unmerged until the following week.
 
-This task runs the AI pipeline (merges + compaction). It is NOT what captures
+This task runs the AI pipeline (ingest: merges + Timeline). It is NOT what captures
 messages — that is the separate hourly "Personal CRM Archive Sweep" task (see
 tools/register-archive-task.ps1), which must stay registered. The hourly sweep
 is what protects disappearing messages; this weekly task only reads the archive.
@@ -56,7 +56,7 @@ Register-ScheduledTask `
     -Action $action `
     -Trigger $trigger `
     -Settings $settings `
-    -Description 'Runs the personal-crm AI pipeline (scripts/crm-daily.js): week-aligned merges + compaction. Mondays 04:00 Pacific, matching the week boundary in lib/weeks.js. Message capture is the separate hourly archive sweep.' `
+    -Description 'Runs the personal-crm AI pipeline (scripts/crm-daily.js): ingest = week-aligned merges + Timeline. Mondays 04:00 Pacific, matching the week boundary in lib/weeks.js. Message capture is the separate hourly archive sweep.' `
     -Force
 
 Write-Host "Registered scheduled task '$TaskName' -> $Cmd (Mondays @ 04:00, StartWhenAvailable)"

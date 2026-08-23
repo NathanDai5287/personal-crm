@@ -5,9 +5,14 @@
 // 1-day timer can be gone from Signal's DB before the nightly pipeline ever
 // sees it. This sweep runs every hour (Task Scheduler) and copies anything
 // new into crm.db's permanent archive — no AI, no profile edits, seconds of
-// work. The daily pipeline (merge ledgers, compaction timelines) then reads
+// work. The daily pipeline (merge ledgers, Timeline) then reads
 // message content FROM THE ARCHIVE, so anything that survived at least one
 // hour is never lost to the AI steps, no matter when it expires.
+//
+// JOBS: this one script backs TWO of the four jobs in lib/jobs.js — `sweep` (the
+// hourly incremental copy) and `deep-sweep` (a full re-walk, `--deep`). Each has
+// its own enable flag (lib/run-toggles); an automatic run whose flag is off is
+// skipped. `--force` (a hand-started UI run) bypasses the flag. Both are free.
 //
 // WHAT IT SWEEPS:
 //   - every tracked contact's sources (DM + bi-groups + multi-groups, the
@@ -25,7 +30,7 @@
 //   node scripts/crm-archive.js --deep                 # ignore cursors, re-check all history
 //   node scripts/crm-archive.js --only <slug>          # one contact (or group:<slug>)
 //   node scripts/crm-archive.js --only <slug> --deep   # that contact's FULL history
-// Also exported as runSweep(cdb, sdb, {deep, onlySlug}) so crm-refresh.js / crm-compact.js can
+// Also exported as runSweep(cdb, sdb, {deep, onlySlug}) so crm-refresh.js / crm-timeline.js can
 // sweep inline at the start of a daily run (no dependency on the hourly task
 // having fired recently).
 'use strict';
@@ -85,7 +90,7 @@ const OVERLAP_HOURS = Number(process.env.CRM_ARCHIVE_OVERLAP_HOURS) || 36;
 // no profile changes.
 // CLI flags (--deep, --only <slug>) are parsed and validated at the bottom of
 // this file, INSIDE the `require.main === module` guard — never here at module
-// top level. crm-refresh.js / crm-compact.js require this module for runSweep(),
+// top level. crm-refresh.js / crm-timeline.js require this module for runSweep(),
 // and parsing the PARENT process's argv on import would exit on a flag that is
 // meaningful to the parent but unknown to the sweep — e.g. `crm-daily.js
 // --dry-run` was crashing here before it ever reached the daily pipeline.
@@ -306,7 +311,7 @@ function backfillMeta(cdb, sdb) {
   return n;
 }
 
-// The whole sweep. Safe to call from other scripts (refresh/compact) before
+// The whole sweep. Safe to call from other scripts (refresh/timeline) before
 // they read the archive. Returns { seen, backfilledMeta }.
 // opts: { deep, onlySlug }. onlySlug narrows to one contact, or to one group when
 // prefixed `group:`; an unknown slug is an error rather than a silent no-op,
@@ -438,14 +443,26 @@ if (require.main === module) {
   const argv = process.argv.slice(2);
   // A misspelled --deepp silently performs the narrow sweep you did not ask for,
   // so an unknown flag aborts rather than falling through to a default.
-  const known = new Set(['--deep', '--only']);
+  const known = new Set(['--deep', '--only', '--force']);
   for (let i = 0; i < argv.length; i += 1) {
     if (!argv[i].startsWith('--')) continue;
     if (argv[i] === '--only') { i += 1; continue; }
     if (!known.has(argv[i])) {
-      console.error(`crm-archive: unknown flag '${argv[i]}'\nknown: --deep, --only <slug>`);
+      console.error(`crm-archive: unknown flag '${argv[i]}'\nknown: --deep, --only <slug>, --force`);
       process.exit(2);
     }
+  }
+  // RUN-TOGGLE PAUSE (lib/run-toggles). This script backs two jobs; --deep is the
+  // deep-sweep job, otherwise it is the sweep job. An automatic run (no --force)
+  // whose flag is off is skipped before any work. A hand-started UI run passes
+  // --force and always proceeds. Pausing a sweep stops archiving — including
+  // disappearing messages before they vanish — so both flags default on.
+  const deep = argv.includes('--deep');
+  const jobId = deep ? 'deep-sweep' : 'sweep';
+  const RT = require('../lib/run-toggles');
+  if (RT.paused(jobId, { dryRun: false, force: argv.includes('--force') })) {
+    console.log(RT.pauseMessage(jobId));
+    process.exit(0);
   }
   // --only <slug>: sweep ONE contact (or one group, as `group:<slug>`) — the
   // dashboard's per-person archive button and targeted "pull his whole history
@@ -461,7 +478,7 @@ if (require.main === module) {
   // scheduled loser exits 0 so Task Scheduler does not flag a failure.
   const lock = require('../lib/pipeline-lock').acquire('archive');
   if (!lock.ok) { console.log(`crm-archive: skipped, run in progress (${lock.holderDesc}).`); process.exit(0); }
-  try { main({ deep: argv.includes('--deep'), only }); }
+  try { main({ deep, only }); }
   finally { lock.release(); }
 }
 module.exports = { runSweep };

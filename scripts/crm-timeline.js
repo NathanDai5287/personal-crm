@@ -1,4 +1,7 @@
-// crm-compact.js — tiered "resolution gradient" memory for tracked CRM contacts AND groups.
+// crm-timeline.js — INGEST'S TIMELINE STEP: tiered "resolution gradient" memory for
+// tracked CRM contacts AND groups. This is not a job of its own — it is the second
+// half of ingest (see lib/jobs.js). crm-daily.js drives it once per ingest run
+// (forced); it is also runnable standalone from the CLI for one contact/group.
 //
 // A conversation (a 1:1 DM or a group) keeps its `## Timeline` at decreasing resolution:
 //   ### Recent (raw, last 7 days)   verbatim, rebuilt from the Signal DB each run (capped)
@@ -12,25 +15,27 @@
 // day rolls up into a daily summary, that summary is also folded into each tracked
 // participant's profile, so a person's profile reflects their group activity too.
 //
-// The Signal DB stores every message permanently, so compaction is always recoverable.
+// The Signal DB stores every message permanently, so the Timeline is always recoverable.
 //
-// STANDARD CONTRACT — real by default; --dry-run previews (no writes, no model). Backs up each
+// CONTRACT — real by default; --dry-run previews (no writes, no model). Backs up each
 // file before writing. First run only sets up structure (no re-summarizing history); the
-// gradient builds forward from now. (`--write` is the old spelling of "apply", now the default,
-// accepted as a silent no-op.)
+// gradient builds forward from now. Because Timeline is ingest's step and never a
+// scheduled job, it has NO run-toggle of its own — the ingest switch pauses it.
+// (`--write` is the old spelling of "apply", now the default, accepted as a silent
+// no-op; `--force` is likewise accepted as a no-op, since ingest passes it.)
 //
 // Usage:
-//   node crm-compact.js                       # apply (default), all tracked contacts + groups
-//   node crm-compact.js --dry-run             # preview only, no writes, no model
-//   node crm-compact.js --slug katia-jacoby   # one contact
-//   node crm-compact.js --group third-woman   # one group
-//   node crm-compact.js --no-llm              # structural only, skip summaries
+//   node crm-timeline.js                       # apply (default), all tracked contacts + groups
+//   node crm-timeline.js --dry-run             # preview only, no writes, no model
+//   node crm-timeline.js --slug katia-jacoby   # one contact
+//   node crm-timeline.js --group third-woman   # one group
+//   node crm-timeline.js --no-llm              # structural only, skip summaries
 
 const fs = require("fs");
 const path = require("path");
 const { execFileSync } = require("child_process");
 const { openSignalDb, openCrmDb } = require("../lib/signal-db");
-const { render, loadTemplate } = require("../lib/compact-prompt");
+const { render, loadTemplate } = require("../lib/timeline-prompt");
 const { runSweep } = require("./crm-archive");
 const { resolveSources, groupOthers } = require("../lib/sources");
 const { redact } = require("../lib/redact");
@@ -47,13 +52,13 @@ const {
   CONTACTS_DIR,
   GROUPS_DIR,
   BACKUP_DIR,
-  COMPACT_STATE,
+  TIMELINE_STATE,
   DISPLAY_NAMES,
   MY_SERVICE_ID,
   BOT_SERVICE_ID,
   PI_CLI,
-  COMPACT_MODEL,
-  COMPACT_PROMPT,
+  TIMELINE_MODEL,
+  TIMELINE_PROMPT,
 } = require("../lib/config");
 
 const DAY = 86_400_000;
@@ -69,8 +74,9 @@ const args = process.argv.slice(2);
 const DRY_RUN = args.includes("--dry-run");
 const WRITE = !DRY_RUN;
 const NO_LLM = args.includes("--no-llm");
-// --force bypasses the web-UI run-toggle pause (a hand-started run always proceeds).
-const FORCE = args.includes("--force");
+// --force is accepted as a silent no-op: ingest passes it to its Timeline sub-step
+// (there is no toggle here to bypass — see main()).
+const FORCE = args.includes("--force"); // eslint-disable-line no-unused-vars
 // --backfill: build the Timeline tiers from the WHOLE archived history — one
 // weekly summary per complete week from the conversation's first archived
 // message — instead of only forward from when tiering started. This is what
@@ -87,13 +93,14 @@ const argVal = (flag) => {
 const slugArg = argVal("--slug");
 const groupArg = argVal("--group");
 // Effective model: an explicit --model (crm-daily passes the ingest run's model) >
-// the web-UI 'compact' dropdown > CRM_COMPACT_MODEL env / default.
-const COMPACT_MODEL_EFF = argVal("--model") || require("../lib/run-models").getModel("compact") || COMPACT_MODEL;
+// CRM_TIMELINE_MODEL env / default. Timeline is not a UI job, so there is no
+// separate dropdown here — ingest's model governs it, passed in via --model.
+const TIMELINE_MODEL_EFF = argVal("--model") || TIMELINE_MODEL;
 
 
 // Replaces the original claude.exe call: invoke `pi` headless, prompt via
 // stdin, `pi -p` prints just the response text on stdout. Never throws —
-// compaction must never crash the pipeline on a model error.
+// the Timeline step must never crash the pipeline on a model error.
 // Set once per run (in main) to a throwaway session dir under data/ so each
 // summary's real pi usage is recorded and can be summed for the "actual" cost in
 // the ledger; deleted after the run. null → stay ephemeral (--no-session).
@@ -103,7 +110,7 @@ function piSummarize(prompt, system) {
   if (NO_LLM) return "(summary skipped: --no-llm)";
   try {
     const sessionArgs = SESSION_CAPTURE ? ["--session-dir", SESSION_CAPTURE] : ["--no-session"];
-    const argv = [PI_CLI, "-p", ...sessionArgs, "-nc", "--no-extensions", "--no-skills", "--no-tools", "--model", COMPACT_MODEL_EFF];
+    const argv = [PI_CLI, "-p", ...sessionArgs, "-nc", "--no-extensions", "--no-skills", "--no-tools", "--model", TIMELINE_MODEL_EFF];
     // v1 declares no system prompt — the whole contract sits in the user turn,
     // which was the review's top finding. A variant that declares one gets it
     // on the system channel where models weight it more heavily.
@@ -165,11 +172,11 @@ function isBadSummary(s) {
   return !s || /^\((summary (failed|skipped)|no result)/.test(String(s).trim());
 }
 
-let COMPACT_TEMPLATE = null;
+let TIMELINE_TEMPLATE = null;
 function summarize(who, periodLabel, lines, style) {
   if (lines.length === 0) return null;
-  if (COMPACT_TEMPLATE === null) COMPACT_TEMPLATE = loadTemplate(COMPACT_PROMPT);
-  const { system, user } = buildSummaryPrompt(who, periodLabel, lines, style, COMPACT_TEMPLATE);
+  if (TIMELINE_TEMPLATE === null) TIMELINE_TEMPLATE = loadTemplate(TIMELINE_PROMPT);
+  const { system, user } = buildSummaryPrompt(who, periodLabel, lines, style, TIMELINE_TEMPLATE);
   return piSummarize(user, system);
 }
 
@@ -358,7 +365,7 @@ function buildConvTiers(cdb, convs, who, since, now, t, foldedTo) {
     // A failed or skipped summary must NOT be stored. Storing it is permanent:
     // the `t.daily.has(key)` guard above skips any filled key forever, so one
     // transient model error would leave "(summary failed: …)" in the Timeline
-    // for good — and compaction is the step whose raw lines get dropped, so
+    // for good — and the Timeline step is the one whose raw lines get dropped, so
     // there is nothing to regenerate from later. Leaving the key empty means
     // the next run simply retries the day.
     if (isBadSummary(s)) continue;
@@ -450,9 +457,9 @@ function backupAndWrite(file, next) {
   fs.writeFileSync(file, next);
 }
 
-// ---- contact + group compaction ----------------------------------------------
+// ---- contact + group Timeline builders ----------------------------------------
 
-function compactConversation({ cdb, convs, who, file, stateKey, state, now, includeGroup, foldLines }) {
+function buildConversationTimeline({ cdb, convs, who, file, stateKey, state, now, includeGroup, foldLines }) {
   const ensured = fs.existsSync(file)
     ? fs.readFileSync(file, "utf8")
     : `# ${path.basename(file, ".md")}\n\n## What I know\n\n_(stub)_\n`;
@@ -489,7 +496,7 @@ function compactConversation({ cdb, convs, who, file, stateKey, state, now, incl
   return { changed, summaries, attempts, since: sinceOut, foldedTo: foldedOut, rawCount: rawLines.length, next, newDailies };
 }
 
-function compactContact(cdb, sdb, slug, state, now, foldLines, nicks) {
+function buildContactTimeline(cdb, sdb, slug, state, now, foldLines, nicks) {
   const rel = `data/contacts/${slug}.md`;
   const row = cdb.prepare("SELECT signal_id, name FROM contacts WHERE file_path = ?").get(rel);
   if (!row || !row.signal_id) return { slug, skipped: "no crm row" };
@@ -515,7 +522,7 @@ function compactContact(cdb, sdb, slug, state, now, foldLines, nicks) {
   ];
   if (convs.length === 0) return { slug, skipped: "no conversations" };
 
-  const r = compactConversation({
+  const r = buildConversationTimeline({
     cdb,
     convs,
     who: `between Nathan and ${display}`,
@@ -529,13 +536,13 @@ function compactContact(cdb, sdb, slug, state, now, foldLines, nicks) {
   return { slug, name: display, ...r };
 }
 
-function compactGroup(cdb, sdb, group, state, now) {
+function buildGroupTimeline(cdb, sdb, group, state, now) {
   const conv = sdb.prepare("SELECT id, members FROM conversations WHERE groupId = ? LIMIT 1").get([group.groupId]);
   if (!conv) return { slug: group.slug, skipped: "no group conversation" };
   // Speaker labels (incl. 'Janet' for the old bot) come from the archive's
   // sender column, attributed by the sweep with the full group name map.
   const convSpec = { convId: conv.id, prefix: "", conversation: group.name };
-  const r = compactConversation({
+  const r = buildConversationTimeline({
     cdb,
     convs: [convSpec],
     who: `in the group "${group.name}"`,
@@ -546,7 +553,7 @@ function compactGroup(cdb, sdb, group, state, now) {
     includeGroup: false,
   });
   // Bi-groups (only other party besides me/bot is one person) are already
-  // covered IN that person's own timeline via compactContact's sources — do
+  // covered IN that person's own timeline via buildContactTimeline's sources — do
   // not also fold their day-summaries into the profile, or everything would
   // appear twice.
   if (groupOthers(conv.members).length <= 1) {
@@ -571,19 +578,13 @@ function compactGroup(cdb, sdb, group, state, now) {
 
 function main() {
   const now = Date.now();
-  // RUN-TOGGLE PAUSE — the ONE shared gate (lib/run-toggles.paused): a real
-  // (non-dry-run) automatic run whose toggle is off is skipped; --dry-run and
-  // --force fall through. Cursors/state are untouched, so it resumes when
-  // switched back on. Ingest's internal Timeline call passes --force, so this
-  // gate governs only the standalone weekly compact — not ingest's sub-step.
-  const RT = require("../lib/run-toggles");
-  if (RT.paused("compact", { dryRun: DRY_RUN, force: FORCE })) {
-    console.log(RT.pauseMessage("compact"));
-    return;
-  }
+  // NO RUN-TOGGLE GATE HERE. Timeline is not a job (see lib/jobs.js) — it is
+  // ingest's second half. Ingest's own switch (checked in crm-daily.js) already
+  // decides whether the weekly run happens; a standalone `node crm-timeline.js`
+  // is always a deliberate CLI invocation. So there is nothing to pause here.
   let state = {};
   try {
-    state = JSON.parse(fs.readFileSync(COMPACT_STATE, "utf8"));
+    state = JSON.parse(fs.readFileSync(TIMELINE_STATE, "utf8"));
   } catch {}
   const nicks = (() => {
     try {
@@ -608,7 +609,7 @@ function main() {
   const groups = groupArg ? allGroups.filter((g) => g.slug === groupArg) : slugArg ? [] : allGroups;
   const slugs = groupArg ? [] : slugArg ? [slugArg] : JSON.parse(fs.readFileSync(TRACKED, "utf8")).slugs;
 
-  console.log(`crm-compact: ${WRITE ? "WRITE" : "DRY-RUN"}${NO_LLM ? " | --no-llm" : ""}${BACKFILL ? " | BACKFILL (whole history)" : ""} | ${slugs.length} contact(s), ${groups.length} group(s)\n`);
+  console.log(`crm-timeline: ${WRITE ? "WRITE" : "DRY-RUN"}${NO_LLM ? " | --no-llm" : ""}${BACKFILL ? " | BACKFILL (whole history)" : ""} | ${slugs.length} contact(s), ${groups.length} group(s)\n`);
 
   // Tallies for the /admin/runs ledger: how many conversations were processed
   // (not skipped), how many had their profile changed, and total summary lines.
@@ -630,7 +631,7 @@ function main() {
   // Phase 1: groups first, so their new day-summaries can fold into participant profiles.
   const foldByContact = new Map(); // slug -> [ "- YYYY-MM-DD [Group]: summary", ... ]
   for (const g of groups) {
-    const r = compactGroup(cdb, sdb, g, state, now);
+    const r = buildGroupTimeline(cdb, sdb, g, state, now);
     if (r.skipped) {
       console.log(`- group ${g.slug}: skipped (${r.skipped})`);
       continue;
@@ -652,7 +653,7 @@ function main() {
 
   // Phase 2: contacts (with any folded group activity).
   for (const slug of slugs) {
-    const r = compactContact(cdb, sdb, slug, state, now, foldByContact.get(slug) || [], nicks);
+    const r = buildContactTimeline(cdb, sdb, slug, state, now, foldByContact.get(slug) || [], nicks);
     if (r.skipped) {
       console.log(`- ${slug}: skipped (${r.skipped})`);
       continue;
@@ -667,21 +668,21 @@ function main() {
 
   sdb.close();
   cdb.close();
-  if (WRITE) fs.writeFileSync(COMPACT_STATE, JSON.stringify(state, null, 2));
+  if (WRITE) fs.writeFileSync(TIMELINE_STATE, JSON.stringify(state, null, 2));
 
   // Record real (write) passes in the /admin/runs ledger. Dry-runs are
   // inspections, not passes, so they leave no row — matching crm-daily, which
   // also skips the ledger on --dry-run. Non-fatal: a failed record must never
-  // fail the compaction it describes.
+  // fail the Timeline pass it describes.
   if (WRITE) {
     const endedAt = Date.now();
     // Estimated Timeline spend: one model call per summary line written. Estimate
-    // only (see lib/cost.js) — null if COMPACT_MODEL isn't in pi's price catalog.
+    // only (see lib/cost.js) — null if TIMELINE_MODEL isn't in pi's price catalog.
     let costUsd = null;
     let actualCostUsd = null;
     try {
       const cost = require("../lib/cost");
-      const per = cost.compactCallUsd(COMPACT_MODEL_EFF);
+      const per = cost.timelineCallUsd(TIMELINE_MODEL_EFF);
       costUsd = per == null ? null : per * summariesCount;
       // Real billed cost, summed from the session dir every summary wrote into.
       if (SESSION_CAPTURE) {
@@ -691,7 +692,7 @@ function main() {
     } catch { /* pricing is best-effort */ }
     try {
       require("../lib/run-record").writeRunRecord({
-        kind: "compact",
+        kind: "timeline",
         startedAt: now,
         endedAt,
         durationMs: endedAt - now,
@@ -701,10 +702,10 @@ function main() {
         summaries: summariesCount,
         costUsd,
         actualCostUsd,
-        costModel: COMPACT_MODEL_EFF,
+        costModel: TIMELINE_MODEL_EFF,
       });
     } catch (e) {
-      console.log(`crm-compact: run-record not written (non-fatal): ${e.message}`);
+      console.log(`crm-timeline: run-record not written (non-fatal): ${e.message}`);
     }
   }
   // Delete the throwaway capture dir — nothing accumulates outside a single run.
@@ -722,9 +723,9 @@ function printTimeline(next) {
 }
 
 if (require.main === module) {
-  // Cross-process pipeline lock (see lib/pipeline-lock.js). Compaction rewrites
-  // profiles and runs a sweep first, so it must not overlap another run.
-  const lock = require('../lib/pipeline-lock').acquire('compact');
-  if (!lock.ok) { console.log(`crm-compact: skipped, run in progress (${lock.holderDesc}).`); process.exit(0); }
+  // Cross-process pipeline lock (see lib/pipeline-lock.js). The Timeline step
+  // rewrites profiles and runs a sweep first, so it must not overlap another run.
+  const lock = require('../lib/pipeline-lock').acquire('timeline');
+  if (!lock.ok) { console.log(`crm-timeline: skipped, run in progress (${lock.holderDesc}).`); process.exit(0); }
   try { main(); } finally { lock.release(); }
 }

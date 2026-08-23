@@ -1,7 +1,7 @@
 // crm-wipe.js — reset an arbitrary set of contacts to a clean slate.
 //
 // For each named contact (or --all tracked): blank their profile back to a stub,
-// drop their ingest cursor and compact state, and delete their pending refresh
+// drop their ingest cursor and Timeline state, and delete their pending refresh
 // ledger. The message archive (crm.db) is NEVER touched, so a wiped contact can
 // be rebuilt simply by re-ingesting — nothing is lost, only the derived profile.
 //
@@ -32,7 +32,7 @@ const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
 const {
-  ROOT, TRACKED, CONTACTS_DIR, REFRESH_DIR, REFRESH_STATE, COMPACT_STATE, LOGS_DIR,
+  ROOT, TRACKED, CONTACTS_DIR, REFRESH_DIR, REFRESH_STATE, TIMELINE_STATE, LOGS_DIR,
 } = require('../lib/config');
 
 const STUB_BODY = '## What I know\n_Not yet enriched._\n\n## Timeline\n';
@@ -96,7 +96,7 @@ function main() {
 
   const refresh = readJson(REFRESH_STATE, { cursors: {} });
   if (!refresh.cursors || typeof refresh.cursors !== 'object') refresh.cursors = {};
-  const compact = readJson(COMPACT_STATE, {});
+  const timelineState = readJson(TIMELINE_STATE, {});
   const runFiles = runs ? runRecordFiles() : [];
   const hasLastRun = runs && fs.existsSync(LAST_RUN);
 
@@ -106,11 +106,11 @@ function main() {
     + `${runs ? ` | runs ledger (${runFiles.length} record${runFiles.length === 1 ? '' : 's'}${hasLastRun ? ' + last-run.json' : ''})` : ''}`);
   for (const slug of targets) {
     const hadCursor = Object.prototype.hasOwnProperty.call(refresh.cursors, slug);
-    const hadCompact = Object.prototype.hasOwnProperty.call(compact, slug);
+    const hadTimeline = Object.prototype.hasOwnProperty.call(timelineState, slug);
     const hadLedger = fs.existsSync(path.join(REFRESH_DIR, `${slug}.new.txt`));
     const cursorAfter = backfill ? 'set to 0 (full backfill armed)' : (hadCursor ? 'removed' : 'none');
     console.log(`  ${slug}: profile -> stub · cursor ${cursorAfter}`
-      + `${hadCompact ? ' · compact state removed' : ''}${hadLedger ? ' · pending ledger removed' : ''}`);
+      + `${hadTimeline ? ' · timeline state removed' : ''}${hadLedger ? ' · pending ledger removed' : ''}`);
   }
   if (runs) console.log(`  runs: remove ${runFiles.length} record(s) from logs/runs/${hasLastRun ? ' + last-run.json' : ''}`);
 
@@ -140,12 +140,12 @@ function main() {
     fs.writeFileSync(file, stubProfile(fs.readFileSync(file, 'utf8')));
     if (backfill) refresh.cursors[slug] = 0;
     else delete refresh.cursors[slug];
-    delete compact[slug];
+    delete timelineState[slug];
     try { fs.unlinkSync(path.join(REFRESH_DIR, `${slug}.new.txt`)); } catch { /* no pending ledger */ }
   }
   if (targets.length) {
     fs.writeFileSync(REFRESH_STATE, `${JSON.stringify(refresh, null, 2)}\n`);
-    fs.writeFileSync(COMPACT_STATE, `${JSON.stringify(compact, null, 2)}\n`);
+    fs.writeFileSync(TIMELINE_STATE, `${JSON.stringify(timelineState, null, 2)}\n`);
     console.log(`\ncrm-wipe: wiped ${targets.length} contact(s). Rebuild by re-ingesting`
       + ' (Ingest on their card, or node scripts/crm-daily.js --only <slug>).');
     if (backfill) console.log('crm-wipe: cursors set to 0 — the next ingest replays their FULL archived history.');

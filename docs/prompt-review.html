@@ -101,7 +101,7 @@
   <ol>
     <li><a href="#merge">Merge system prompt</a> &mdash; <code>prompts/merge.md</code></li>
     <li><a href="#userturn">Merge user turn</a> &mdash; <code>scripts/crm-merge.js</code></li>
-    <li><a href="#compact">Compaction summary prompt</a> &mdash; <code>scripts/crm-compact.js</code></li>
+    <li><a href="#compact">Timeline summary prompt</a> &mdash; <code>scripts/crm-timeline.js</code></li>
   </ol>
 </nav>
 
@@ -507,7 +507,7 @@ a string swap.</div>
 
 <!-- ============================== SITE 3 ============================== -->
 <section class="site" id="compact">
-<h2>3. Compaction summary prompt <span class="path">scripts/crm-compact.js</span></h2>
+<h2>3. Timeline summary prompt <span class="path">scripts/crm-timeline.js</span></h2>
 <p class="role">One <code>pi --no-tools</code> call per day-bucket or week-bucket per conversation
 &mdash; several hundred calls in a full pass. The returned string is pasted verbatim into a
 profile's Timeline as <code>- &lt;key&gt;: &lt;text&gt;</code>. No validation, no retry, no human
@@ -598,7 +598,7 @@ review. Also the step most likely to be moved to a cheaper model.</p>
 
 // invocation:
 ["-p", "--no-session", "-nc", "--no-extensions", "--no-skills",
- "--no-tools", "--model", COMPACT_MODEL]</pre></div>
+ "--no-tools", "--model", TIMELINE_MODEL]</pre></div>
 
 <div class="panel a"><div class="cap">After</div><pre>const COMPACT_SYSTEM_PROMPT = [
   "You are the compaction step of a personal-CRM pipeline. You",
@@ -705,7 +705,7 @@ function summarize(who, periodLabel, lines, style) {
 ["-p", "--no-session", "-nc", "--no-extensions", "--no-skills",
  "--no-tools",
  "--system-prompt", COMPACT_SYSTEM_PROMPT,
- "--model", COMPACT_MODEL]</pre></div>
+ "--model", TIMELINE_MODEL]</pre></div>
 </div>
 
 <div class="rationale"><strong>Rationale.</strong> A two-channel split: everything invariant (role,

@@ -26,11 +26,11 @@ Ordered roughly by how much they matter, not by effort.
   post-backfill (the archive rebuilds it anytime), but if the self-profile wants
   sections the contact template lacks, deciding that before the backfill is free and
   after it is not. Design agreed 2026-08-04: monthly wide-context pass, single
-  writer, contact merges never touch it; skeleton from compacted tiers, evidence
+  writer, contact merges never touch it; skeleton from Timeline tiers, evidence
   from a raw pull of Nathan's own outgoing messages; big-picture only (goals,
   beliefs, preferences, career direction, cross-cutting relationship patterns).
 
-(Compaction v3, sandbox realism, and provenance ranges all shipped 2026-08-04. The
+(Timeline v3, sandbox realism, and provenance ranges all shipped 2026-08-04. The
 K3 numbers are still upper bounds until the awareness rate is re-measured under the
 realistic sandbox; that re-measure is PAID and is listed under Model / cost strategy
 below.)
@@ -43,18 +43,18 @@ keep working; `/status`, `/runs`, `/actions` move under `/admin/*` with redirect
 
 - [ ] **A run log every runner writes to** — `lib/runlog.js`, monthly JSONL under
   `logs/runs/<YYYY-MM>.jsonl`. Today only `crm-daily` records anything (2 files), so the
-  hourly sweep, compaction and the todo scan are invisible; "a log of historical runs"
+  hourly sweep, Timeline and the todo scan are invisible; "a log of historical runs"
   cannot be built by reading harder. Fields: `id, kind, args, trigger, parentId,
   startedAt, endedAt, exitCode, ok, summary, logPath, recordPath`; `kind` ∈ archive |
-  daily | merge-one | compact | todo-scan | backup; `trigger` ∈ schedule | ui | cli.
+  daily | merge-one | timeline | todo-scan | backup; `trigger` ∈ schedule | ui | cli.
   Written at BEGIN and again at END, so a killed run leaves a row with no `endedAt` —
-  itself the signal. `parentId` because a daily run spawns compact and a sweep.
+  itself the signal. `parentId` because a daily run spawns a Timeline pass and a sweep.
   Quiet hourly sweeps still get a row (hidden behind a toggle): a MISSING row is how you
   learn Task Scheduler stopped firing, which nothing catches today.
 - [ ] **Overview page** — health strip (last sweep + stale flag past 90 min, last daily
-  run, last compaction, last todo scan, backup age, archive rows + span, Signal running)
+  run, last Timeline pass, last todo scan, backup age, archive rows + span, Signal running)
   over the per-contact table, with the triggers ON the row: `Archive` · `Preview`
-  (free — `--only X --dry-run`) · `Merge`. Global row: full / dry / compact / archive
+  (free — `--only X --dry-run`) · `Merge`. Global row: full / dry / timeline / archive
   sweep (deep checkbox).
 - [ ] **Stranded-message check on that page.** For each contact: Signal messages at or
   below the cursor that are absent from the archive. It found 669 on 2026-08-05 and
@@ -103,7 +103,7 @@ keep working; `/status`, `/runs`, `/actions` move under `/admin/*` with redirect
   restore them after, log violations. A prompt rule alone is a request.
 - [ ] Checks `pinned_untouched` and `mine_preserved` (both high severity) + mutants.
 - [ ] **Edit profiles from the dashboard** (textarea + POST). Reject writes to
-  `## Timeline` — compaction owns it.
+  `## Timeline` — the Timeline step owns it.
 
 ## Provenance / history
 
@@ -134,7 +134,7 @@ keep working; `/status`, `/runs`, `/actions` move under `/admin/*` with redirect
 ## Cleanup
 
 - [ ] **Remove group tracking**: `third-woman` from `crm-tracked-groups.json`,
-  `data/groups/`, `compactGroup`, `GROUPS_DIR`.
+  `data/groups/`, `buildGroupTimeline`, `GROUPS_DIR`.
 - [ ] **Voice-note transcription** — 44 notes currently ignored.
 - [ ] Vestigial DB cleanup, subsumed by the facts table if that lands.
 - [ ] Spot-check nigesh chunk 1: 704 messages, zero profile edits. Plausibly correct

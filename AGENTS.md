@@ -19,8 +19,36 @@ ledgers → an LLM merge writes per-person markdown in `data/contacts/<slug>.md`
 
 **Three LLM call sites.** Everything else is deterministic.
 - `scripts/crm-merge.js` → `prompts/merge.md` (read+edit tools)
-- `scripts/crm-compact.js` → `prompts/compact.md` (no tools, stdin)
+- `scripts/crm-timeline.js` → `prompts/compact.md` (no tools, stdin; prompt file keeps its old name)
 - `scripts/crm-tasks.js` → `prompts/tasks.md` (no tools, stdin, JSON out → `tasks` table)
+
+## The four jobs (the mental model)
+
+The system runs exactly **four periodic jobs**, defined once in **`lib/jobs.js`**
+(the single source of truth — `run-toggles`, `run-models`, and the dashboard all
+read from it). Each job runs on its own cycle. **Every period a job checks its
+enable flag (`lib/run-toggles`); if the flag is on, it does its work.** A
+hand-started run from the dashboard passes `--force` and always proceeds; only the
+unattended schedule is paused by the flag.
+
+| Job | Script | Model? | What it does |
+|---|---|---|---|
+| **sweep** | `crm-archive.js` | no | copy new Signal messages into `crm.db` |
+| **deep-sweep** | `crm-archive.js --deep` | no | re-walk ALL history (catch reused row ids) |
+| **ingest** | `crm-daily.js` | yes | read waiting messages into a profile: **merge** then **timeline** |
+| **todo** | `crm-todo-scan.js` | yes | scan for "make sure …" commitments (model only on a match) |
+
+**`ingest` has two halves: MERGE (the prose profile) and TIMELINE (the
+chronology).** They are not separate jobs. `crm-daily.js` runs the merge, then
+invokes `crm-timeline.js` for the same contact(s). The Timeline step therefore has
+**no schedule and no enable flag of its own** — it runs because ingest runs, and
+the ingest switch (and ingest's model choice) govern it.
+
+Do NOT reintroduce a standalone "compact"/"compaction" job. That name is gone: the
+step is **Timeline**, the script is `crm-timeline.js`, and it lives inside ingest.
+(The prompt file `prompts/compact.md`, the on-disk state `data/crm-compact-state.json`
+and backup dir `data/_compact-backup/`, and the `evals/compact-*.js` harness keep
+the old spelling on purpose — renaming them would orphan data or is out of scope.)
 
 ## Vocabulary (use these exact terms)
 
@@ -60,8 +88,9 @@ ledgers → an LLM merge writes per-person markdown in `data/contacts/<slug>.md`
   **cursor** — that term is RETIRED; don't reintroduce it.
 - **Rebuild** — deliberately clear a contact's profile + merge frontier and ingest
   from scratch. The paid op to regenerate profiles (after a prompt change or a move).
-- **Compaction / Timeline** — the separate model step (`crm-compact.js`) that
-  condenses aged-out messages into one-line `## Timeline` entries. NOT a merge.
+- **Timeline** — ingest's second half (`crm-timeline.js`): the model step that
+  condenses aged-out messages into one-line `## Timeline` entries. NOT a merge, and
+  NOT a separate job — it runs inside ingest. (Was called "compaction".)
 
 ## BACKFILL == PLAY-IT-FORWARD (governing design principle)
 
@@ -116,15 +145,16 @@ DST-safe, absolute), never raw UTC.
   main repo because that repo has a GitHub remote; keep it that way.
 - **`data/` holds secrets** (`signal-key.txt`, `web-password.txt`) and 20MB of private
   messages. Never commit it to the main repo.
-- **Compaction is recoverable.** It rewrites a profile's `## Timeline` to lower
-  resolution; it never touches the archive. Backups in `data/_compact-backup/`.
+- **The Timeline step is recoverable.** It rewrites a profile's `## Timeline` to
+  lower resolution; it never touches the archive. Backups in `data/_compact-backup/`.
 - **Eval fixture contamination is real and tagged.** `prompts/past/merge-v5.md` embeds
   examples built from `arshia-nayebnazar` and `charles-wu` messages, which are also
   fixtures. `evals/cases.js` marks those `heldOut: false`. Read the held-out subtotal.
 - **Deterministic merge checks are saturated** (312/312 for two different prompts).
   Ranking prompts now requires `evals/judge.js`.
-- **Deterministic compaction checks reward brevity** and will pick the prompt that
-  drops the most content. Use `evals/compact-judge.js`.
+- **Deterministic Timeline-step checks reward brevity** and will pick the prompt
+  that drops the most content. Use `evals/compact-judge.js` (eval harness keeps the
+  old name).
 
 ## Cost
 

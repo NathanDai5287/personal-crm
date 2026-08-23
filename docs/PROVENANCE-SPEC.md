@@ -176,7 +176,7 @@ exactly as `citations_resolve` skips today when `ctx.resolveIds` is absent.
 - **Ledger lines.** `[2026-07-30 09:17] ⟨m90211⟩ (Nat & Kat 🥾🩷) Katia: …` — the
   `⟨m…⟩` there is a line label, not a citation. `lib/task-trigger.js:77` and
   `CHAT_RE` in `scripts/crm-web.js:~1112` parse it. **Do not widen either regex.**
-- **`## Timeline`.** Single ids only, copied verbatim by `crm-compact.js`. Ranges add
+- **`## Timeline`.** Single ids only, copied verbatim by `crm-timeline.js`. Ranges add
   nothing to a one-line-per-week summary and would break the verbatim-copy contract.
 - **`## Open questions`.** Uncited, enforced by `open_questions_uncited`.
 

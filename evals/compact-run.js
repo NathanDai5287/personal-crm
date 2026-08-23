@@ -8,7 +8,7 @@
 //
 // Same cost guard as evals/run.js: a non-anthropic model is REFUSED unless
 // --allow-paid. Same reason the merge harness drives crm-merge.js rather than
-// reimplementing it, this drives lib/compact-prompt.js + the real pi invocation,
+// reimplementing it, this drives lib/timeline-prompt.js + the real pi invocation,
 // so what is measured is what ships.
 //
 // No sandbox is needed here: compaction has no tools and edits no files. Its
@@ -18,7 +18,7 @@ const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
 const { PI_CLI } = require('../lib/config');
-const { render, loadTemplate } = require('../lib/compact-prompt');
+const { render, loadTemplate } = require('../lib/timeline-prompt');
 const { buildFixtures } = require('./compact-cases');
 const { runChecks } = require('./compact-checks');
 
@@ -28,7 +28,7 @@ const FREE_PREFIX = 'anthropic/';
 const DEFAULT_MODEL = 'anthropic/claude-opus-5';
 const CHARS_PER_TOKEN = 2.4;
 
-// The style strings live in scripts/crm-compact.js in production, but here they
+// The style strings live in scripts/crm-timeline.js in production, but here they
 // are PART OF THE VARIANT: v2 replaces the unfalsifiable "ONE concise line" with
 // a hard word budget and moves "past tense, no preamble" into its system prompt.
 // Sharing one copy would silently apply v2's wording to v1 and destroy the
@@ -77,7 +77,7 @@ function buildPrompt(c, variantKey) {
   });
 }
 
-// Prompt goes on stdin exactly as crm-compact.js sends it — not as argv, which
+// Prompt goes on stdin exactly as crm-timeline.js sends it — not as argv, which
 // would hit the same ~32KB Windows limit that broke the merge judge.
 function callModel(user, system, model) {
   const argv = [PI_CLI, '-p', '--no-session', '-nc', '--no-extensions', '--no-skills', '--no-tools', '--model', model];

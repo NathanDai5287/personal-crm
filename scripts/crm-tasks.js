@@ -6,7 +6,7 @@
 //   node scripts/crm-tasks.js --slug charles-wu --ledger <path>
 //   node scripts/crm-tasks.js --all --write                # every tracked contact
 //
-// This is the third LLM call site (merge, compact, tasks). Like compact it runs with
+// This is the third LLM call site (merge, timeline, tasks). Like the Timeline step it runs with
 // NO TOOLS and reads from stdin; unlike either, it returns JSON and writes to a table
 // rather than to markdown.
 //
@@ -34,12 +34,12 @@ const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
 const { PI_CLI, TRACKED, CONTACTS_DIR, REFRESH_DIR, ROOT } = require('../lib/config');
-const { render, loadTemplate } = require('../lib/compact-prompt');
+const { render, loadTemplate } = require('../lib/timeline-prompt');
 const { openCrmDb } = require('../lib/signal-db');
 const TASKS = require('../lib/tasks');
 const TRIGGER = require('../lib/task-trigger');
 
-// Same template mechanism as compaction, different placeholders.
+// Same template mechanism as the Timeline step, different placeholders.
 const TASK_SLOTS = ['CONTACT_NAME', 'MESSAGES'];
 const PROMPT_FILE = process.env.CRM_TASKS_PROMPT || path.posix.join(ROOT, 'prompts', 'tasks-trigger.md');
 const MODEL = process.env.CRM_TASKS_MODEL || 'anthropic/claude-opus-5';
