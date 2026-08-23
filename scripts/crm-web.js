@@ -29,6 +29,7 @@ const { validateCitations, ensureMessagesTable } = require('../lib/archive');
 const TASKS = require('../lib/tasks');
 const P = require('../lib/nicknames');
 const RUN_TOGGLES = require('../lib/run-toggles');
+const RUN_MODELS = require('../lib/run-models');
 const { STYLE: BINDERY_CSS, FONTS, FONTS_DIR, THEME_INIT, THEME_JS } = require('../lib/view/shell');
 const { render, raw } = require('../lib/view/h');
 const V = require('../lib/view/pages');
@@ -1869,7 +1870,7 @@ function adminData() {
     dial('Ingest', 'weekly · Mon 4am', ingestMs, 7 * DAY, 'ingest', { prevFire: prevMon, nextFire: nextMon }),
     dial('Todo', 'hourly · after sweep', todoMs, HOUR, 'todo', { prevFire: nextHour - HOUR, nextFire: nextHour }),
   ];
-  return { health, roster, dials, toggles: RUN_TOGGLES.getToggles() };
+  return { health, roster, dials, toggles: RUN_TOGGLES.getToggles(), models: RUN_MODELS.getModels(), modelOptions: RUN_MODELS.MODELS };
 }
 
 // Confirm modal for the job buttons. Replaces the browser confirm() with a
@@ -1879,9 +1880,16 @@ function adminData() {
 const JOB_MODAL_JS = `<script>(function(){
   var form=document.querySelector('form[action="/admin/jobs"]');
   if(!form)return;
-  // Model context for the estimate line. ingest is "free" only if BOTH halves
-  // (merge + Timeline) run on subscription auth.
-  var COST={model:${JSON.stringify(MERGE_MODEL.split('/').pop())},free:${isFree(MERGE_MODEL) && isFree(COMPACT_MODEL)}};
+  // The effective model per job, read LIVE from the card's <select> (so a just-
+  // changed selection is reflected without a server restart), falling back to the
+  // pipeline default when "default" is chosen. free = anthropic/* (subscription),
+  // matching lib/cost isFree. ingest's model governs merge AND Timeline.
+  var DEF={ingest:${JSON.stringify(MERGE_MODEL)},todo:"moonshotai/kimi-k3"};
+  function modelFor(kind){
+    var sel=form.querySelector('select[name="model:'+kind+'"]');
+    var id=(sel&&sel.value)||DEF[kind]||'';
+    return {label:id?id.split('/').pop():'?',free:id.indexOf('anthropic/')===0};
+  }
   function fmtUsd(v){if(!(v>0))return '$0';if(v<0.01)return '<$0.01';if(v<10)return '$'+v.toFixed(2);if(v<100)return '$'+v.toFixed(1);return '$'+Math.round(v);}
   function fmtDur(sec){sec=Math.round(sec);if(!(sec>0))return '~0s';if(sec<90)return '~'+sec+'s';var m=Math.round(sec/60);if(m<60)return '~'+m+'m';return '~'+Math.floor(m/60)+'h '+(m%60)+'m';}
   var ov=document.createElement('div');ov.className='modal';ov.hidden=true;
@@ -1909,7 +1917,8 @@ const JOB_MODAL_JS = `<script>(function(){
   function costLine(kind,isSweep,runBoxes){
     var el=document.getElementById('mCost');
     if(isSweep){el.textContent='Est. — free · no model call · seconds';return;}
-    if(kind==='todo'){el.textContent='Est. — $0 unless a "make sure" line matches';return;}
+    if(kind==='todo'){var tm=modelFor('todo');el.textContent='Est. — $0 unless a "make sure" line matches · '+tm.label;return;}
+    var mj=modelFor(kind);
     var sum=0,calls=0,dur=0,unknown=false;
     runBoxes.forEach(function(c){
       var d=c.getAttribute('data-cost'),k=parseInt(c.getAttribute('data-calls')||'0',10);
@@ -1917,7 +1926,7 @@ const JOB_MODAL_JS = `<script>(function(){
       calls+=k;
       if(d===''||d==null){if(k>0)unknown=true;}else{sum+=parseFloat(d);}
     });
-    var money=COST.free?('$0 · '+COST.model+' (sub)'):((unknown?'—':fmtUsd(sum))+' · '+COST.model);
+    var money=mj.free?('$0 · '+mj.label+' (sub)'):((unknown?'—':fmtUsd(sum))+' · '+mj.label);
     el.textContent='Est. '+money+'  ·  '+fmtDur(dur)+'  ·  '+calls+(calls===1?' week':' weeks');
   }
   function open(btn){
@@ -3003,6 +3012,28 @@ function start() {
             res.end();
           } catch {
             try { send(400, page('Bad request', '<p>Bad request.</p>')); } catch { /* sent */ }
+          }
+        });
+        return;
+      }
+      // Pick the model for a paid job (ingest/todo). The card's <select> is named
+      // model:<job> and the submit button carries setmodel=<job>. An empty model
+      // clears the override (back to the pipeline default). setModel validates the
+      // id against the curated list and throws on anything else → 400.
+      if (url.pathname === '/admin/model' && req.method === 'POST') {
+        const sfs = req.headers['sec-fetch-site'];
+        if (sfs && sfs !== 'same-origin' && sfs !== 'none') { send(403, page('Forbidden', '<p>Cross-site request refused.</p>')); return; }
+        readBody(req, (body) => {
+          try {
+            const p = new URLSearchParams(body);
+            const job = p.get('setmodel') || p.get('job') || '';
+            if (!RUN_MODELS.JOBS.includes(job)) { send(400, page('Bad request', '<p>Unknown job.</p>')); return; }
+            const model = p.get(`model:${job}`) || p.get('model') || '';
+            RUN_MODELS.setModel(job, model);
+            res.writeHead(303, { Location: '/admin' });
+            res.end();
+          } catch {
+            try { send(400, page('Bad request', '<p>Unknown model.</p>')); } catch { /* sent */ }
           }
         });
         return;

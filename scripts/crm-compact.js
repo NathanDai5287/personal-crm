@@ -81,6 +81,9 @@ const argVal = (flag) => {
 };
 const slugArg = argVal("--slug");
 const groupArg = argVal("--group");
+// Effective model: an explicit --model (crm-daily passes the ingest run's model) >
+// the web-UI 'compact' dropdown > CRM_COMPACT_MODEL env / default.
+const COMPACT_MODEL_EFF = argVal("--model") || require("../lib/run-models").getModel("compact") || COMPACT_MODEL;
 
 
 // Replaces the original claude.exe call: invoke `pi` headless, prompt via
@@ -95,7 +98,7 @@ function piSummarize(prompt, system) {
   if (NO_LLM) return "(summary skipped: --no-llm)";
   try {
     const sessionArgs = SESSION_CAPTURE ? ["--session-dir", SESSION_CAPTURE] : ["--no-session"];
-    const argv = [PI_CLI, "-p", ...sessionArgs, "-nc", "--no-extensions", "--no-skills", "--no-tools", "--model", COMPACT_MODEL];
+    const argv = [PI_CLI, "-p", ...sessionArgs, "-nc", "--no-extensions", "--no-skills", "--no-tools", "--model", COMPACT_MODEL_EFF];
     // v1 declares no system prompt — the whole contract sits in the user turn,
     // which was the review's top finding. A variant that declares one gets it
     // on the system channel where models weight it more heavily.
@@ -567,7 +570,7 @@ function main() {
   // gated — a dry run (free), --no-llm (free), a free subscription model, or
   // --force (a hand-started UI run) all proceed. Cursors/state are untouched, so
   // it resumes when switched back on.
-  const wouldSpend = WRITE && !NO_LLM && !require("../lib/cost").isFree(COMPACT_MODEL);
+  const wouldSpend = WRITE && !NO_LLM && !require("../lib/cost").isFree(COMPACT_MODEL_EFF);
   if (wouldSpend && !FORCE && !require("../lib/run-toggles").isEnabled("compact")) {
     console.log("crm-compact: Timeline compaction is PAUSED via the web UI toggle — skipping (switch it back on, or pass --force).");
     return;
@@ -672,7 +675,7 @@ function main() {
     let actualCostUsd = null;
     try {
       const cost = require("../lib/cost");
-      const per = cost.compactCallUsd(COMPACT_MODEL);
+      const per = cost.compactCallUsd(COMPACT_MODEL_EFF);
       costUsd = per == null ? null : per * summariesCount;
       // Real billed cost, summed from the session dir every summary wrote into.
       if (SESSION_CAPTURE) {
@@ -692,7 +695,7 @@ function main() {
         summaries: summariesCount,
         costUsd,
         actualCostUsd,
-        costModel: COMPACT_MODEL,
+        costModel: COMPACT_MODEL_EFF,
       });
     } catch (e) {
       console.log(`crm-compact: run-record not written (non-fatal): ${e.message}`);

@@ -89,7 +89,8 @@ function main() {
   }
   const write = argv.includes('--write');
   const force = argv.includes('--force');
-  const model = arg('--model', MODEL);
+  // --model flag > web-UI 'todo' dropdown > CRM_TODO_MODEL env / default.
+  const model = arg('--model', require('../lib/run-models').getModel('todo') || MODEL);
   const sinceOverride = arg('--since', null);
   const onlySlug = arg('--slug', null);
   const startedAt = Date.now();

@@ -238,6 +238,11 @@ button{font:inherit;cursor:pointer}
 .dial.paused .arc{stroke:var(--faint);opacity:.35}
 .dial.paused .num{fill:var(--faint)}
 .dial.paused .dialcap b{color:var(--faint)}
+/* per-card model picker (ingest/todo): a compact select + a no-JS "set" button */
+.dialmodel{display:flex;align-items:center;gap:5px;margin-top:7px}
+.dialmodel .dmsel{font-family:"Courier Prime",monospace;font-size:10.5px;color:var(--ink);
+  background:var(--ground);border:1px solid var(--rule);border-radius:5px;padding:2px 5px;max-width:150px}
+.dialmodel .dmset{padding:2px 8px;font-size:10px;letter-spacing:.06em}
 
 /* ---- circulation ledger (runs / roster tables) -------------------------- */
 .ledger{background:var(--card);border:1px solid var(--rule);box-shadow:var(--shadow)}

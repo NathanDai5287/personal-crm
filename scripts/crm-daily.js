@@ -75,6 +75,12 @@ const { openCrmDb, openSignalDb } = require('../lib/signal-db');
 const DRY_RUN = process.argv.includes('--dry-run');
 // --force bypasses the run-toggle pause (a hand-started UI run always proceeds).
 const FORCE = process.argv.includes('--force');
+// The effective merge model: the web-UI 'ingest' dropdown selection, else the
+// CRM_MERGE_MODEL env / default. It governs the WHOLE run — the merge and the
+// Timeline (compact) step both use it — so a run can't split across a free merge
+// model and a paid Timeline model. Read once per process; a fresh run picks up a
+// UI change.
+const MERGE_MODEL_EFF = require('../lib/run-models').getModel('ingest') || MERGE_MODEL;
 // Step 5 builds Timeline tiers from the whole archived history (one weekly
 // summary per historical week — paid) instead of only forward from now.
 const TIMELINE_BACKFILL = process.argv.includes('--timeline-backfill');
@@ -147,7 +153,7 @@ function provenanceTrailers(runTag) {
   // and only parses trailers in the final paragraph. With a single newline it
   // folds the trailer lines into the subject and %(trailers:key=Model) returns
   // empty — the lines are there, but nothing can read them as trailers.
-  return `\n\n${[`Model: ${MERGE_MODEL}`, `Prompt: ${rel}@${mergePromptSha()}`, `Run: ${runTag}`].join('\n')}`;
+  return `\n\n${[`Model: ${MERGE_MODEL_EFF}`, `Prompt: ${rel}@${mergePromptSha()}`, `Run: ${runTag}`].join('\n')}`;
 }
 
 function runNode(scriptPath, args, { timeout = 120_000 } = {}) {
@@ -420,6 +426,7 @@ function main() {
           const result = mergeContact(p.slug, {
             dryRun: false,
             stream: true,
+            model: MERGE_MODEL_EFF,
             label: `${i + 1}/${total} ${chunk.label} · ${chunk.count} msgs`,
           });
           detail.ms = Date.now() - t0;
@@ -434,13 +441,13 @@ function main() {
             atomicWriteJson(REFRESH_STATE, state);
             detail.ok = true;
             detail.cursorAfter = chunk.ridEnd;
-            const cc = mergeCallUsd(MERGE_MODEL, { ledgerTokens: chunk.tokens });
+            const cc = mergeCallUsd(MERGE_MODEL_EFF, { ledgerTokens: chunk.tokens });
             if (cc == null) mergeCostKnown = false; else mergeCostUsd += cc;
             if (result.costUsd != null) {
               actualCostUsd += result.costUsd; actualCostSeen = true;
               // Feed the real (input base, billed USD) pair to the self-calibrating
               // cost model so future estimates track this model's actual behaviour.
-              recordCostSample(MERGE_MODEL, { ledgerTokens: chunk.tokens, usd: result.costUsd });
+              recordCostSample(MERGE_MODEL_EFF, { ledgerTokens: chunk.tokens, usd: result.costUsd });
             }
             logLines.push(`[4] merge ${p.slug} ${i + 1}/${total} (${chunk.label}, ${chunk.count} msgs): ok, cursor -> ${chunk.ridEnd}`);
 
@@ -511,6 +518,8 @@ function main() {
     // so profile AND timeline regenerate in the same pass. Explicit only; a
     // normal nightly run must never re-walk history.
     const compactArgs = ONLY ? ['--write', '--slug', ONLY] : ['--write'];
+    // Timeline runs on the SAME model as the merge for this run (see MERGE_MODEL_EFF).
+    compactArgs.push('--model', MERGE_MODEL_EFF);
     if (TIMELINE_BACKFILL) compactArgs.push('--backfill');
     const compact = timed('compact', () => runNode(SCRIPTS.compact, compactArgs, { timeout: 1_800_000 }));
     logLines.push(`[5] timeline --write${ONLY ? ` --slug ${ONLY}` : ''}: ${compact.ok ? 'ok' : 'FAILED (non-fatal)'}`);
