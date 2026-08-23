@@ -54,8 +54,12 @@ function contactName(slug) {
   return slug;
 }
 
-function callModel(user, system, model = MODEL) {
-  const argv = [PI_CLI, '-p', '--no-session', '-nc', '--no-extensions', '--no-skills', '--no-tools', '--model', model];
+function callModel(user, system, model = MODEL, sessionDir = null) {
+  // A sessionDir makes pi persist the turn (with real per-turn cost.total) so the
+  // caller can read the ACTUAL billed cost back via sumSessionCostUsd. Default stays
+  // --no-session (evals and dry paths want no side effects).
+  const argv = [PI_CLI, '-p', ...(sessionDir ? ['--session-dir', sessionDir] : ['--no-session']),
+    '-nc', '--no-extensions', '--no-skills', '--no-tools', '--model', model];
   if (system) argv.push('--system-prompt', system);
   return execFileSync(process.execPath, argv, {
     input: user,                       // stdin: a ledger blows the ~32KB argv limit
@@ -123,7 +127,20 @@ function extractFor(slug, ledgerPath, opts = {}) {
     CONTACT_NAME: opts.contactName || contactName(slug),
     MESSAGES: TRIGGER.renderWindows(windows),
   }, TASK_SLOTS);
-  const raw = callModel(user, system, opts.model || MODEL);
+  // opts.captureCost (todo scan) runs the model in a throwaway session dir purely
+  // to read the ACTUAL billed cost back. This cost is tracked on the run record but
+  // is DELIBERATELY kept out of the self-calibrating estimator — extractFor never
+  // calls recordCostSample, and todo's own estimate never reads the fitted model.
+  let sess = null;
+  if (opts.captureCost) {
+    try { sess = fs.mkdtempSync(path.join(require('os').tmpdir(), 'crm-todo-sess-')); } catch { sess = null; }
+  }
+  const raw = callModel(user, system, opts.model || MODEL, sess);
+  let costUsd = null;
+  if (sess) {
+    try { const c = require('../lib/cost').sumSessionCostUsd(sess); if (c) costUsd = c.costUsd; } catch { /* best-effort */ }
+    try { fs.rmSync(sess, { recursive: true, force: true }); } catch { /* gone */ }
+  }
   const arr = extractArray(raw);
   if (!Array.isArray(arr)) return { ok: false, error: `unparseable reply: ${raw.slice(0, 160)}`, tasks: [] };
   // The regex already decided these are tasks, so a short reply means the model dropped
@@ -182,7 +199,7 @@ function extractFor(slug, ledgerPath, opts = {}) {
   for (const d of dropped) {
     rejected.push(`DROPPED a trigger — model returned nothing for ⟨m${d.msgId}⟩: "${d.body.slice(0, 60)}"`);
   }
-  return { ok: true, tasks, rejected, scanned: total, triggers: windows.length, nearMisses };
+  return { ok: true, tasks, rejected, scanned: total, triggers: windows.length, nearMisses, costUsd };
 }
 
 function main() {

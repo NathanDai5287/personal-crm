@@ -217,6 +217,10 @@ function main() {
   // as an additions-only diff (a todo run has no profile to diff, but this is the
   // equivalent record of what it produced).
   const captured = [];
+  // ACTUAL billed cost, summed across the model calls this run made — tracked on the
+  // run record, but NEVER fed to the cost estimator (no recordCostSample here) and
+  // computed independently of the fitted model. null until a paid call is captured.
+  let actualUsd = null;
   try {
     for (const f of found) {
       // extractFor reads a ledger from a path, so the scanned window is staged to a temp
@@ -225,7 +229,7 @@ function main() {
       fs.writeFileSync(tmp, f.ledger);
       let res;
       try {
-        res = extractFor(f.slug, tmp, { promptFile: PROMPT, model });
+        res = extractFor(f.slug, tmp, { promptFile: PROMPT, model, captureCost: true });
       } catch (e) {
         console.log(`${f.slug}: FAILED (${String(e.message).slice(0, 120)}) — cursor NOT advanced`);
         continue;
@@ -233,6 +237,7 @@ function main() {
         try { fs.unlinkSync(tmp); } catch { /* gone */ }
       }
       if (!res.ok) { console.log(`${f.slug}: ${res.error} — cursor NOT advanced`); continue; }
+      if (res.costUsd != null) actualUsd = (actualUsd || 0) + res.costUsd;
 
       for (const r of res.rejected) console.log(`   ! ${f.slug}: ${r}`);
       for (const t of res.tasks) {
@@ -259,16 +264,18 @@ function main() {
     if (cdb) try { cdb.close(); } catch { /* closed */ }
   }
   saveState(state);
-  console.log(`\ninserted ${inserted} task(s)`);
-  if (write) recordTodoRun(startedAt, scanned, slugs.length, total, inserted, model, captured);
+  console.log(`\ninserted ${inserted} task(s)${actualUsd != null ? ` · actual cost $${actualUsd.toFixed(4)}` : ''}`);
+  if (write) recordTodoRun(startedAt, scanned, slugs.length, total, inserted, model, captured, actualUsd);
 }
 
 // Record the scan in the /admin/runs ledger. Like sweeps, a no-op tick (no
 // triggers, nothing inserted) is written but hidden in the UI, so the hourly
 // cadence doesn't bury the runs that mattered. Non-fatal.
-function recordTodoRun(startedAt, scanned, contacts, triggers, inserted, model = MODEL, captured = []) {
+function recordTodoRun(startedAt, scanned, contacts, triggers, inserted, model = MODEL, captured = [], actualCostUsd = null) {
   // One model call per trigger (each "make sure" line is extracted on its own);
-  // a scan with no triggers spends nothing. Estimate only — see lib/cost.js.
+  // a scan with no triggers spends nothing. `costUsd` is an ESTIMATE (lib/cost.js);
+  // `actualCostUsd` is the REAL billed figure read back from the model session
+  // (null when nothing was captured). Neither is ever fed to the fitted estimator.
   let costUsd = null;
   try {
     const per = require('../lib/cost').compactCallUsd(model, { bucketTokens: 2_000 });
@@ -286,6 +293,7 @@ function recordTodoRun(startedAt, scanned, contacts, triggers, inserted, model =
       inserted,
       captured,
       costUsd,
+      actualCostUsd,
       costModel: model,
     });
   } catch (e) {
