@@ -2007,12 +2007,15 @@ function adminData() {
     dial(L('todo'), 'hourly · after sweep', todoMs, HOUR, 'todo', { prevFire: nextHour - HOUR, nextFire: nextHour }),
   ];
   // The model each job falls back to when no override is stored — so the picker can
-  // show the real effective model instead of a "default" placeholder. Mirrors the
-  // client-side DEF map in JOB_MODAL_JS (ingest uses MERGE_MODEL; todo defaults to
-  // kimi-k3). Both currently resolve to kimi-k3.
-  const modelDefaults = { ingest: MERGE_MODEL, todo: 'moonshotai/kimi-k3' };
-  return { health, roster, dials, toggles: RUN_TOGGLES.getToggles(), models: RUN_MODELS.getModels(), modelOptions: RUN_MODELS.MODELS, modelDefaults };
+  // show the real effective model instead of a "default" placeholder. One source of
+  // truth (JOB_DEFAULT_MODEL), shared with the client DEF map in JOB_MODAL_JS.
+  return { health, roster, dials, toggles: RUN_TOGGLES.getToggles(), models: RUN_MODELS.getModels(), modelOptions: RUN_MODELS.MODELS, modelDefaults: JOB_DEFAULT_MODEL };
 }
+
+// The single source of truth for each model-job's DEFAULT model (used when no UI
+// override is stored). Both the server-rendered picker (adminData.modelDefaults) and
+// the client cost estimator (DEF, below) derive from this one map — X3-10.
+const JOB_DEFAULT_MODEL = { ingest: MERGE_MODEL, todo: 'moonshotai/kimi-k3' };
 
 // Confirm modal for the job buttons. Replaces the browser confirm() with a
 // Bindery slip that resolves and LISTS the exact people the run will touch:
@@ -2025,7 +2028,7 @@ const JOB_MODAL_JS = `<script>(function(){
   // changed selection is reflected without a server restart), falling back to the
   // pipeline default when "default" is chosen. free = anthropic/* (subscription),
   // matching lib/cost isFree. ingest's model governs merge AND Timeline.
-  var DEF={ingest:${JSON.stringify(MERGE_MODEL)},todo:"moonshotai/kimi-k3"};
+  var DEF=${JSON.stringify(JOB_DEFAULT_MODEL)};
   function modelFor(kind){
     var sel=form.querySelector('select[name="model:'+kind+'"]');
     var id=(sel&&sel.value)||DEF[kind]||'';
@@ -2806,6 +2809,29 @@ let job = null;
 // long; this only catches a genuine hang. Override with CRM_JOB_TIMEOUT_MS.
 const JOB_STEP_TIMEOUT_MS = Number(process.env.CRM_JOB_TIMEOUT_MS) || 60 * 60 * 1000;
 
+// GRACEFUL SHUTDOWN (P5-1). On SIGTERM (systemctl stop/restart, or a bare `kill`) or
+// SIGINT, don't just die and orphan a running job's children — they'd keep writing
+// crm.db while the respawned server, seeing a now-dead-PID lock, judges it stale and
+// STEALS it → two concurrent writers. Kill the job's whole process GROUP (it runs
+// detached, so -pid targets the tree), release the lock, then exit 0 so systemd's
+// Restart=always brings up a clean instance. The aborted ingest is crash-safe
+// (per-chunk merge frontier), so it simply resumes on the next run.
+let shuttingDown = false;
+function shutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  try {
+    if (job && job.running && job.child && job.child.pid) {
+      try { process.kill(-job.child.pid, 'SIGTERM'); } catch { try { job.child.kill('SIGTERM'); } catch { /* already gone */ } }
+    }
+    if (job && job.lock) { try { job.lock.release(); } catch { /* ok */ } job.lock = null; }
+  } finally {
+    process.exit(0);
+  }
+}
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);
+
 const ARCHIVE_JS = path.join(ROOT, 'scripts', 'crm-archive.js');
 const DAILY_JS = path.join(ROOT, 'scripts', 'crm-daily.js');
 const TODO_JS = path.join(ROOT, 'scripts', 'crm-todo-scan.js');
@@ -2890,6 +2916,7 @@ function startJob(spec) {
 function runQueue(cmds, i) {
   if (i >= cmds.length) {
     job.running = false;
+    job.child = null;
     job.endedAt = Date.now();
     if (job.exit == null) job.exit = 0;
     job.buf += `\n[done — ${cmds.length} step(s), exit ${job.exit}]`;
@@ -2903,6 +2930,7 @@ function runQueue(cmds, i) {
   // `detached` puts the child in its OWN process group so the watchdog can kill the
   // whole tree (crm-daily and the `pi` model calls it spawns), not just the parent.
   const child = spawn(process.execPath, argv, { cwd: ROOT, detached: true });
+  job.child = child; // so the shutdown handler (P5-1) can kill this step's tree
   const append = (d) => {
     job.buf += d.toString();
     if (job.buf.length > 400_000) job.buf = job.buf.slice(-400_000);
@@ -2927,6 +2955,7 @@ function runQueue(cmds, i) {
     if (code || signal) {
       job.exit = code == null ? -1 : code;
       job.running = false;
+      job.child = null;
       job.endedAt = Date.now();
       job.buf += `\n[step ${i + 1}/${cmds.length} ${signal ? `killed by ${signal}` : `exit ${code}`} — stopped]`;
       if (job.lock) { job.lock.release(); job.lock = null; }
@@ -2939,6 +2968,7 @@ function runQueue(cmds, i) {
     clearTimeout(watchdog);
     job.exit = -1;
     job.running = false;
+    job.child = null;
     job.endedAt = Date.now();
     job.buf += `\n[spawn error: ${e.message}]`;
     if (job.lock) { job.lock.release(); job.lock = null; }

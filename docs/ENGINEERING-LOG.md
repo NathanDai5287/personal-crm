@@ -163,9 +163,16 @@ process, so **code changes require a restart** (do it after every pull to be saf
 both leave the exact same schedule intact:
 - No sudo: `kill $(systemctl show -p MainPID --value crm-web)` — `Restart=always` respawns it in
   ~5 s on the new code. This is what the deploy step does over ssh.
-- With sudo: `sudo systemctl restart crm-web`.
+- With sudo: `sudo systemctl restart crm-web` (preferred — cgroup-kills the whole unit).
 The job scripts (sweep etc.) are launched fresh each fire/press, so they pick up new code with no
 restart needed.
+
+**Restart safety (P5-1).** crm-web now handles SIGTERM/SIGINT: before exiting it kills the running
+job's child *process group* (jobs run `detached`, so the whole crm-daily→pi tree dies) and releases
+the pipeline lock. Both restart methods above send SIGTERM, so a restart mid-ingest no longer
+orphans children that keep writing crm.db while the respawned server — seeing a now-dead-PID lock —
+judges it stale and STEALS it (two concurrent writers). The aborted ingest is crash-safe (per-chunk
+merge frontier) and resumes next run.
 
 ### SURPRISE — a duplicate user `crm-web.service` crash-looped the new system service
 Installing the system `crm-web.service` (2026-08-23) collided with a **pre-existing user-level
