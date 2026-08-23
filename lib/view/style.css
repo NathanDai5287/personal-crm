@@ -238,11 +238,15 @@ button{font:inherit;cursor:pointer}
 .dial.paused .arc{stroke:var(--faint);opacity:.35}
 .dial.paused .num{fill:var(--faint)}
 .dial.paused .dialcap b{color:var(--faint)}
-/* per-card model picker (ingest/todo): a compact select + a no-JS "set" button */
-.dialmodel{display:flex;align-items:center;gap:5px;margin-top:7px}
-.dialmodel .dmsel{font-family:"Courier Prime",monospace;font-size:10.5px;color:var(--ink);
-  background:var(--ground);border:1px solid var(--rule);border-radius:5px;padding:2px 5px;max-width:150px}
-.dialmodel .dmset{padding:2px 8px;font-size:10px;letter-spacing:.06em}
+/* per-card model picker (ingest/todo): one tiny select that auto-submits on
+   change. The submit button is display:none (clicked by the select's onchange),
+   so nothing but the select shows and the card never reflows. The select is a
+   fixed width so swapping the chosen model can't shift the run button beside it. */
+.dialmodel{margin-top:6px}
+.dialmodel .dmsel{font-family:"Courier Prime",monospace;font-size:9.5px;color:var(--soft);
+  background:var(--ground);border:1px solid var(--rule);border-radius:4px;padding:1px 4px;
+  width:104px;height:18px;line-height:16px}
+.dialmodel .dmset{display:none}
 
 /* ---- circulation ledger (runs / roster tables) -------------------------- */
 .ledger{background:var(--card);border:1px solid var(--rule);box-shadow:var(--shadow)}
