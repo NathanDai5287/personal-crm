@@ -603,6 +603,12 @@ function nickCites(cites, dates, now) {
   });
 }
 
+// Nathan is not a tracked contact (no profile is written ABOUT him), but people
+// address him by nicknames and the /me page lets him keep them. His nickname rows
+// live under this slug in the same store; the routes below special-case it so it
+// doesn't need a data/contacts/<slug>.md file.
+const OWNER_SLUG = 'nathan';
+
 // Render a contact's nicknames to the `.nn` block HTML the profile shows and the
 // endpoints swap in. One msgDates() resolver per call; closed before returning.
 function renderNicks(slug) {
@@ -626,8 +632,11 @@ const NICKNAME_MAX = 40;
 // another contact no-ops and is reported as a 404. Returns { ok:true } or
 // { ok:false, status, error }; the caller re-renders the block.
 function applyNickEdit(slug, action, payload) {
-  const file = path.posix.join(CONTACTS_DIR, `${slug}.md`);
-  try { fs.readFileSync(file, 'utf8'); } catch { return { ok: false, status: 404, error: 'no such contact' }; }
+  // The owner (/me) has no contact file; every other slug must be a real contact.
+  if (slug !== OWNER_SLUG) {
+    const file = path.posix.join(CONTACTS_DIR, `${slug}.md`);
+    try { fs.readFileSync(file, 'utf8'); } catch { return { ok: false, status: 404, error: 'no such contact' }; }
+  }
   const nickId = () => {
     const id = Number(payload.id);
     return Number.isInteger(id) ? id : null;
@@ -1093,6 +1102,22 @@ function profilePage(slug) {
   } finally {
     dates.close();
   }
+}
+
+// GET /me — the owner's own page. Just the nickname block for OWNER_SLUG, reusing
+// the same NN_JS/.nn machinery as a contact profile (SLUG comes from __EDIT_CFG).
+function mePage() {
+  const dates = msgDates();
+  let nicks;
+  try {
+    const now = Date.now();
+    nicks = P.listNicknames(OWNER_SLUG).map((n) => ({ ...n, cites: nickCites(n.cites, dates, now) }));
+  } finally {
+    dates.close();
+  }
+  const v = V.me(nicks);
+  const cfgJs = `<script>window.__EDIT_CFG=${JSON.stringify({ slug: OWNER_SLUG }).replace(/</g, '\\u003c')}</script>`;
+  return page(v.title, render(v.body) + cfgJs + NN_JS, '/me');
 }
 
 // The whole edit state machine, in page. Mirrors the server exactly where it
@@ -2935,6 +2960,8 @@ function start() {
       }
 
       if (url.pathname === '/') { send(200, indexPage()); return; }
+
+      if (url.pathname === '/me') { send(200, mePage()); return; }
 
       if (url.pathname === '/tasks') { send(200, tasksPage()); return; }
       // Live due-date translation for the To do form: "monday" -> "2026-08-10".

@@ -50,6 +50,7 @@ const { runSweep } = require('./crm-archive');
 const { resolveSources, buildArchiveQuery } = require('../lib/sources');
 const { fmtLocal, planChunks, lastCompleteWeekStart, gateBuckets } = require('../lib/weeks');
 const { redact } = require('../lib/redact');
+const { confirmedNicknames } = require('../lib/nicknames');
 const {
   TRACKED, DISPLAY_NAMES, REFRESH_DIR, BOT_SERVICE_ID,
   INGEST_N, INGEST_FLOOR_DAYS, INGEST_CEILING_DAYS,
@@ -207,11 +208,24 @@ function writeChunkLedger(plan, chunk, chunkIndex, chunkTotal, dir = REFRESH_DIR
     if (chunk.msgs.some((m) => m.cid === cid)) srcBits.push(`group "${plan.sources.labels[cid]}"`);
   }
 
+  // KNOWN NICKNAMES (feature 1): give the model the confirmed nicknames of the
+  // people it will read about, so a message that addresses someone as "Kat" or
+  // "Wayne" resolves to the right person. This is context in the ledger DATA, not a
+  // prompt change. Confirmed-only (see lib/nicknames.confirmedNicknames). The subject
+  // and Nathan are always relevant; Nathan's are the big win — otherwise the model
+  // has no way to know a third party's "Wayne" means Nathan.
+  const nickBits = [];
+  for (const [who, s] of [[plan.name, plan.slug], ['Nathan', 'nathan']]) {
+    const names = confirmedNicknames(s);
+    if (names.length) nickBits.push(`${who} is also called ${names.map((n) => `"${n}"`).join(', ')}`);
+  }
+
   const header = [
     `# Messages with ${plan.name} — ${chunk.label} (Pacific)`,
     `# chunk ${chunkIndex} of ${chunkTotal} · ${chunk.count} messages · ids m${chunk.ridStart}–m${chunk.ridEnd}`,
     `# window: ${fmtLocal(chunk.startMs)} to ${fmtLocal(chunk.endMs)}${chunk.partial ? ' (partial week — oversized week split by day)' : ''}`,
     `# sources: ${srcBits.join(', ') || 'DM'}`,
+    ...(nickBits.length ? [`# known nicknames: ${nickBits.join('; ')}`] : []),
   ].join('\n');
 
   fs.writeFileSync(file, `${header}\n\n${lines.join('\n')}\n`);
