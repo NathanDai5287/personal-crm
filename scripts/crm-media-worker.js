@@ -114,6 +114,7 @@ function main() {
     console.log(`enqueue-existing: ${r.added} new of ${r.scanned} downloaded image/audio attachments`);
   }
 
+  if (has('--retry-errors')) { const n = M.requeueErrors(cdb); console.log(`re-queued ${n} error row(s)`); }
   const requeued = M.requeueStale(cdb);
   if (requeued) console.log(`requeued ${requeued} stale 'processing' row(s)`);
 
