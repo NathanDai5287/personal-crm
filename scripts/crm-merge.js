@@ -267,18 +267,29 @@ function mergeContact(slug, opts = {}) {
         // attempts' sessions land in the same dir, so this is the true total spend).
         let costUsd = null;
         if (sessionDir) { const c = sumSessionCostUsd(sessionDir); if (c) costUsd = c.costUsd; }
-        // NICKNAMES. The model emits nicknames as a [[NICKNAMES]] block in its REPLY
-        // (never in the profile — the merge prompt forbids that), so read the reply
-        // back from the session transcript and store each proposal. The store dedups
-        // and filters against the per-contact denylist, so re-storing across a retry
-        // is free. Best-effort: a parse/store failure must never fail a merge.
-        let nicksStored = 0;
-        if (sessionDir) {
-          try {
-            const reply = sessionAssistantText(sessionDir);
-            if (reply) nicksStored = storeNicknameProposals(slug, reply);
-          } catch { /* nickname store is non-fatal telemetry */ }
+        // Read the model's reply once (from the session transcript) — used for both
+        // the acknowledgment check and nicknames.
+        let reply = '';
+        if (sessionDir) { try { reply = sessionAssistantText(sessionDir) || ''; } catch { /* no transcript */ } }
+
+        // ACKNOWLEDGMENT CHECK (P3-5). A genuine no-op and a SILENT no-edit failure
+        // both exit 0 — a turn-limit cutoff, a refusal, or a silently-failed edit tool
+        // all look like success. The prompt's contract is a `DONE …` or `NO-OP` line;
+        // its ABSENCE means the merge did not actually happen. Treat that as a failure
+        // so crm-daily does NOT mark these messages merged (which would lose them from
+        // the profile forever). Conservative: only fails when we HAVE reply text that
+        // lacks the ack — an unreadable transcript falls through to success as before,
+        // and a false negative merely re-merges next run (never loses data).
+        if (reply && !/(^|\n)\s*(DONE\b|NO-?OP\b)/i.test(reply)) {
+          return { ok: false, error: 'merge produced no DONE/NO-OP acknowledgment — treated as a failed merge (messages NOT marked merged)', errorClass: 'no_ack', attempts: attempt };
         }
+
+        // NICKNAMES. The model emits nicknames as a [[NICKNAMES]] block in its REPLY
+        // (never in the profile — the merge prompt forbids that). The store dedups and
+        // filters against the per-contact denylist, so re-storing across a retry is
+        // free. Best-effort: a parse/store failure must never fail a merge.
+        let nicksStored = 0;
+        if (reply) { try { nicksStored = storeNicknameProposals(slug, reply); } catch { /* non-fatal telemetry */ } }
         console.log(`crm-merge: ${slug}: ok${costUsd != null ? ` ($${costUsd.toFixed(4)})` : ''}${nicksStored ? ` (+${nicksStored} nickname${nicksStored === 1 ? '' : 's'})` : ''}${attempt > 1 ? ` (attempt ${attempt})` : ''}`);
         return { ok: true, output, costUsd, attempts: attempt, nicksStored, lastContactFixed: fixed || undefined };
       } catch (e) {

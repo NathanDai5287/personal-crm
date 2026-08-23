@@ -217,6 +217,31 @@ function loadRefreshState() {
   return { cursors: {}, ranAt: null };
 }
 
+// Set early in main(); read by the entry-point catch to write a fatal run record if
+// main() throws before it writes its own (P3-4 — full observability on failure).
+let EMERGENCY = null;
+function writeEmergencyRecord(err) {
+  if (DRY_RUN || !EMERGENCY) return;
+  const { startedAt, runTag, logLines, warnings } = EMERGENCY;
+  const stack = String((err && err.stack) || err).slice(0, 8000);
+  logLines.push(`\n[FATAL] the run threw before completing:\n${stack}`);
+  warnings.push(`FATAL: ${String((err && err.message) || err).slice(0, 300)}`);
+  const endedAt = Date.now();
+  try {
+    const runsDir = path.join(LOGS_DIR, 'runs');
+    fs.mkdirSync(runsDir, { recursive: true });
+    const rec = {
+      id: runTag, kind: 'ingest', startedAt, endedAt, durationMs: endedAt - startedAt,
+      fatal: true, error: stack, mergeFailures: [], warnings, steps: [], chunks: [],
+    };
+    atomicWriteJson(path.join(runsDir, `${runTag}.json`), rec);
+    atomicWriteJson(path.join(LOGS_DIR, 'last-run.json'), rec);
+    fs.writeFileSync(path.join(runsDir, `${runTag}.log`), logLines.join('\n'));
+    fs.appendFileSync(path.join(LOGS_DIR, 'daily.log'), `${nowIso()} FATAL run threw\n${logLines.join('\n')}\n`);
+  } catch { /* last-ditch record is itself best-effort */ }
+  try { tryNotify('personal-crm: daily run FAILED', String((err && err.message) || err).slice(0, 200)); } catch { /* non-fatal */ }
+}
+
 function main() {
   const startedAt = Date.now();
   // RUN-TOGGLE PAUSE — the ONE shared gate (lib/run-toggles.paused): a real
@@ -234,6 +259,9 @@ function main() {
   const warnings = [];
   let fatal = false;
   const logLines = [`\n===== crm-daily ${DRY_RUN ? '[DRY-RUN] ' : ''}${ONLY ? `[ONLY ${ONLY}] ` : ''}run @ ${nowIso()} =====`];
+  // Expose enough state that the entry-point catch can still write a run record if
+  // main() throws before step 7 (P3-4: a run must ALWAYS leave a record + logs).
+  EMERGENCY = { startedAt, runTag, logLines, warnings };
 
   // Structured run record for the web UI's /runs page. `steps` mirrors the
   // numbered pipeline stages; `contactDetails` carries per-contact merge info.
@@ -326,8 +354,23 @@ function main() {
       if (MAX_CHUNKS) {
         for (const p of plans) {
           if (p.chunks.length > MAX_CHUNKS) {
-            logLines.push(`[3] max-chunks: ${p.slug} capped to first ${MAX_CHUNKS} of ${p.chunks.length} chunk(s); the rest resume next run`);
-            p.chunks = p.chunks.slice(0, MAX_CHUNKS);
+            // Cap on a BUCKET BOUNDARY, not mid-bucket: cutting a gate bucket in half
+            // lets its remainder regroup with later messages next run, so a resumed or
+            // throttled backfill would diverge from an uninterrupted one (P3-1). Take
+            // whole buckets until the next would overflow the cap; always take at least
+            // the first, so a bucket larger than the cap still makes progress.
+            const bucketSizes = [];
+            for (const c of p.chunks) {
+              if (!bucketSizes.length || c.bucketIndex !== bucketSizes[bucketSizes.length - 1].bi) bucketSizes.push({ bi: c.bucketIndex, n: 0 });
+              bucketSizes[bucketSizes.length - 1].n += 1;
+            }
+            let keep = 0;
+            for (const b of bucketSizes) {
+              if (keep > 0 && keep + b.n > MAX_CHUNKS) break;
+              keep += b.n;
+            }
+            logLines.push(`[3] max-chunks: ${p.slug} capped to first ${keep} of ${p.chunks.length} chunk(s) (whole buckets ≤ ${MAX_CHUNKS}); the rest resume next run`);
+            p.chunks = p.chunks.slice(0, keep);
           }
         }
       }
@@ -436,9 +479,22 @@ function main() {
             // merge succeeded — the crash-safe frontier (an interrupted run re-merges
             // this chunk rather than losing it, and never skips the chunks it never
             // reached). Replaces the old rowid cursor; see crm-refresh header.
-            markMerged(mergeDb, p.slug, chunk.msgs.map((m) => m.rid), Date.now());
-            state.ranAt = Date.now();
-            atomicWriteJson(REFRESH_STATE, state);
+            // A frontier/state write failure (disk full, SQLITE_BUSY) must NOT kill the
+            // whole run with no record (P3-4): record it as this chunk's failure and
+            // stop the contact — the run still reaches step 7 and writes its record.
+            try {
+              markMerged(mergeDb, p.slug, chunk.msgs.map((m) => m.rid), Date.now());
+              state.ranAt = Date.now();
+              atomicWriteJson(REFRESH_STATE, state);
+            } catch (e) {
+              contactFailed = true;
+              const err = `frontier write failed after a successful merge: ${e.message}`;
+              mergeFailures.push({ slug: p.slug, chunk: chunk.label, chunkIndex: i + 1, chunkTotal: total, error: err, errorClass: 'frontier_write' });
+              detail.error = err;
+              logLines.push(`[4] merge ${p.slug} ${i + 1}/${total} (${chunk.label}): ${err} — stopping this contact`);
+              contactDetails.push(detail);
+              continue;
+            }
             detail.ok = true;
             detail.cursorAfter = chunk.ridEnd;
             const cc = mergeCallUsd(MERGE_MODEL_EFF, { ledgerTokens: chunk.tokens });
@@ -666,6 +722,16 @@ if (require.main === module) {
   // ingest. Runs the lock as `ingest` (this script's dashboard name).
   const lock = require('../lib/pipeline-lock').acquire('ingest');
   if (!lock.ok) { console.log(`crm-daily: skipped, run in progress (${lock.holderDesc}).`); process.exit(0); }
-  try { main(); } finally { lock.release(); }
+  try {
+    main();
+  } catch (e) {
+    // main() normally process.exit()s; reaching here means it threw. Leave a durable,
+    // logged run record before dying, then exit non-zero (P3-4).
+    writeEmergencyRecord(e);
+    process.exitCode = 1;
+    throw e;
+  } finally {
+    lock.release();
+  }
 }
 module.exports = { main };

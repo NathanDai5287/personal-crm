@@ -178,8 +178,12 @@ function planContact(cdb, sdb, slug, opts) {
   // Each released bucket is token-batched into chunks (whole weeks up to 40k tok /
   // 6 weeks — lib/weeks.js defaults). A small bucket is one chunk = one merge; a
   // large one splits so no single merge digests an unreviewable pile.
+  // Tag each chunk with the GATE BUCKET it came from. A bucket is the atomic unit the
+  // gate released; splitting one across runs (a mid-bucket --max-chunks cut or crash)
+  // can regroup its remainder with later messages and break backfill==play-forward, so
+  // crm-daily uses this to stop only on bucket boundaries.
   const chunks = [];
-  for (const bm of bucketMsgs) for (const ch of planChunks(bm)) chunks.push(ch);
+  bucketMsgs.forEach((bm, bi) => { for (const ch of planChunks(bm)) { ch.bucketIndex = bi; chunks.push(ch); } });
   if (chunks.length === 0) return null;
 
   // Cast of characters: OTHER tracked people these messages refer to (by name or a

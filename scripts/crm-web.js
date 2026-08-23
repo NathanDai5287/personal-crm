@@ -73,6 +73,32 @@ function authOk(header, user, pass) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
+// Per-client auth backoff (P5-4). Basic auth has no lockout of its own, so without
+// this a tunnelled endpoint would accept unlimited password guesses. Keyed by the
+// client — X-Forwarded-For's first hop when fronted by a tunnel, else the socket
+// address. A few misses are free (fat-finger); after that, an exponential lockout
+// capped at 15 min. A success clears the record. In-memory (resets on restart),
+// which is the right lifetime for a brute-force speed bump.
+const AUTH_FAILS = new Map(); // key -> { n, until }
+const AUTH_FREE_TRIES = 3;
+const AUTH_MAX_LOCK_MS = 15 * 60 * 1000;
+function authKey(req) {
+  const xff = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+  return xff || (req.socket && req.socket.remoteAddress) || 'unknown';
+}
+function authBlockedMs(key) {
+  const rec = AUTH_FAILS.get(key);
+  return rec && rec.until > Date.now() ? rec.until - Date.now() : 0;
+}
+function authNoteFailure(key) {
+  const rec = AUTH_FAILS.get(key) || { n: 0, until: 0 };
+  rec.n += 1;
+  if (rec.n > AUTH_FREE_TRIES) rec.until = Date.now() + Math.min(1000 * 2 ** (rec.n - AUTH_FREE_TRIES), AUTH_MAX_LOCK_MS);
+  if (AUTH_FAILS.size > 5000) AUTH_FAILS.clear(); // bound the map against forged-key floods
+  AUTH_FAILS.set(key, rec);
+}
+function authClear(key) { AUTH_FAILS.delete(key); }
+
 // ---------------------------------------------------------------------------
 // Markdown rendering (compact, tuned for the profile format)
 // ---------------------------------------------------------------------------
@@ -2775,6 +2801,11 @@ function diffPage(id, slug, chunkIdx) {
 // stops at the first failure rather than cascading model calls into a broken run.
 let job = null;
 
+// Per-step wall-clock cap for a launched job (P5-6): a hung child can't hold the
+// pipeline lock past this. Generous — a big backfill chunk-merge is legitimately
+// long; this only catches a genuine hang. Override with CRM_JOB_TIMEOUT_MS.
+const JOB_STEP_TIMEOUT_MS = Number(process.env.CRM_JOB_TIMEOUT_MS) || 60 * 60 * 1000;
+
 const ARCHIVE_JS = path.join(ROOT, 'scripts', 'crm-archive.js');
 const DAILY_JS = path.join(ROOT, 'scripts', 'crm-daily.js');
 const TODO_JS = path.join(ROOT, 'scripts', 'crm-todo-scan.js');
@@ -2869,17 +2900,30 @@ function runQueue(cmds, i) {
   const argv = cmds[i];
   const pretty = argv.map((a) => (a.startsWith(ROOT) ? path.basename(a) : a)).join(' ');
   job.buf += (job.buf ? '\n\n' : '') + `$ node ${pretty}\n`;
-  const child = spawn(process.execPath, argv, { cwd: ROOT });
+  // `detached` puts the child in its OWN process group so the watchdog can kill the
+  // whole tree (crm-daily and the `pi` model calls it spawns), not just the parent.
+  const child = spawn(process.execPath, argv, { cwd: ROOT, detached: true });
   const append = (d) => {
     job.buf += d.toString();
     if (job.buf.length > 400_000) job.buf = job.buf.slice(-400_000);
   };
   child.stdout.on('data', append);
   child.stderr.on('data', append);
+  // WATCHDOG (P5-6): a per-step wall-clock cap so a hung child can't hold the
+  // pipeline lock indefinitely. Inner steps (pi calls) have their own 10-min
+  // timeouts; this bounds the STEP as a whole. Kill the child's process GROUP so pi
+  // grandchildren die too; the signal death then flows through the failure branch
+  // below (code=null). Generous default — this catches a hang, not a long run.
+  const killTree = (sig) => { try { process.kill(-child.pid, sig); } catch { try { child.kill(sig); } catch { /* gone */ } } };
+  const watchdog = setTimeout(() => {
+    job.buf += `\n[step ${i + 1}/${cmds.length} exceeded ${Math.round(JOB_STEP_TIMEOUT_MS / 60000)}m — killing]`;
+    killTree('SIGKILL');
+  }, JOB_STEP_TIMEOUT_MS);
   child.on('close', (code, signal) => {
-    // A child killed by a signal (OOM SIGKILL, etc.) reports code=null — treat that
-    // as failure, not success, so the queue stops instead of marching on as if the
-    // step had passed.
+    clearTimeout(watchdog);
+    // A child killed by a signal (the watchdog, or OOM SIGKILL) reports code=null —
+    // treat that as failure, not success, so the queue stops instead of marching on
+    // as if the step had passed.
     if (code || signal) {
       job.exit = code == null ? -1 : code;
       job.running = false;
@@ -2892,6 +2936,7 @@ function runQueue(cmds, i) {
     runQueue(cmds, i + 1);
   });
   child.on('error', (e) => {
+    clearTimeout(watchdog);
     job.exit = -1;
     job.running = false;
     job.endedAt = Date.now();
@@ -3003,11 +3048,20 @@ function isSafeRunId(s) { return /^[A-Za-z0-9-]+$/.test(s); }
 function start() {
   const PASSWORD = resolvePassword();
   const server = http.createServer((req, res) => {
+    const akey = authKey(req);
+    const blockedMs = authBlockedMs(akey);
+    if (blockedMs > 0) {
+      res.writeHead(429, { 'Retry-After': String(Math.ceil(blockedMs / 1000)), 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end(`Too many failed attempts — try again in ${Math.ceil(blockedMs / 1000)}s.`);
+      return;
+    }
     if (!authOk(req.headers.authorization, WEB_USER, PASSWORD)) {
+      authNoteFailure(akey);
       res.writeHead(401, { 'WWW-Authenticate': 'Basic realm="Personal CRM", charset="UTF-8"' });
       res.end('Authentication required');
       return;
     }
+    authClear(akey);
     const send = (code, html) => { res.writeHead(code, { 'Content-Type': 'text/html; charset=utf-8' }); res.end(html); };
     const sendJson = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(obj)); };
     // A malformed request must never kill the server: `new URL` throws on
