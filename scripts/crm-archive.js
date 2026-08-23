@@ -38,14 +38,40 @@ const fs = require('fs');
 const { openSignalDb, openCrmDb } = require('../lib/signal-db');
 const { mirrorMessages, ensureMessagesTable, SYNTH_BAND } = require('../lib/archive');
 const { resolveSources, buildMessageQuery } = require('../lib/sources');
+const M = require('../lib/media');
+
+// Downloaded image/audio attachments carry a plaintextHash; they become OCR/STT
+// work. `ocr` for images, `stt` for audio (voice notes).
+const MEDIA_CT = /^(image|audio)\//i;
+const mediaAtts = (list) => (list || []).filter((a) => a.path && a.plaintextHash && MEDIA_CT.test(a.contentType || ''));
+const mediaKind = (ct) => (/^audio\//i.test(ct || '') ? 'stt' : 'ocr');
+function enqueueMedia(cdb, entries) {
+  if (!entries || !entries.length) return;
+  M.ensureMediaTable(cdb);
+  for (const e of entries) M.enqueue(cdb, e);
+}
 const {
   loadAttachments, describeAttachments, composeBody,
   loadPreviews, describePreview, loadQuotes, describeQuote,
 } = require('../lib/attachments');
+const path = require('path');
+const { spawn } = require('child_process');
 const {
   TRACKED, TRACKED_GROUPS, DISPLAY_NAMES, ARCHIVE_STATE, MY_SERVICE_ID, BOT_SERVICE_ID,
-  ARCHIVE_ID_OFFSET,
+  ARCHIVE_ID_OFFSET, ROOT,
 } = require('../lib/config');
+
+// Fire-and-forget the OCR/STT worker as a detached, low-priority side job so it
+// drains the media queue this sweep enqueued without blocking or being tied to the
+// sweep's lifetime. A deep sweep also refills from the whole archive. Best-effort:
+// it renices itself and idle-exits when the queue is empty.
+function kickMediaWorker(deep) {
+  try {
+    const wArgs = [path.join(__dirname, 'crm-media-worker.js')];
+    if (deep) wArgs.push('--enqueue-existing');
+    spawn(process.execPath, wArgs, { cwd: ROOT, env: process.env, detached: true, stdio: 'ignore' }).unref();
+  } catch { /* worker is best-effort */ }
+}
 
 const DAY = 86_400_000;
 // FIRST-SWEEP WINDOW for a source with no cursor yet — 0 means "everything
@@ -214,25 +240,33 @@ function sweepContact(cdb, sdb, slug, cursors, now, ranAt, nicks, deep, nameMap)
   const att = loadAttachments(sdb, msgs.filter((m) => m.hasAttachments).map((m) => m.mid));
   const prev = loadPreviews(sdb, mids);
   const quo = loadQuotes(sdb, mids);
-  const items = msgs.map((m) => ({
-    id: m.rid,
-    convId: m.cid,
-    conversation: sources.labels[m.cid] || `DM with ${display}`,
-    slug,
-    sentAt: m.sent_at,
-    sender: speaker(m),
-    body: composeBody(
-      m.body,
-      describeQuote(quo.get(m.mid), nameFor),
-      describeAttachments(att.get(m.mid)),
-      describePreview(prev.get(m.mid)),
-    ),
-    src: m.src,
-    type: m.type,
-    // Lets the archive upgrade a row stored before these enrichments existed.
-    enriched: Boolean(m.hasAttachments) || prev.has(m.mid) || quo.has(m.mid),
-  }));
+  const mediaEntries = [];
+  const items = msgs.map((m) => {
+    const mAtts = mediaAtts(att.get(m.mid));
+    for (const a of mAtts) mediaEntries.push({ hash: a.plaintextHash, kind: mediaKind(a.contentType), contentType: a.contentType });
+    return {
+      id: m.rid,
+      convId: m.cid,
+      conversation: sources.labels[m.cid] || `DM with ${display}`,
+      slug,
+      sentAt: m.sent_at,
+      sender: speaker(m),
+      body: composeBody(
+        m.body,
+        describeQuote(quo.get(m.mid), nameFor),
+        describeAttachments(att.get(m.mid)),
+        describePreview(prev.get(m.mid)),
+      ),
+      src: m.src,
+      type: m.type,
+      // Lets the archive upgrade a row stored before these enrichments existed.
+      enriched: Boolean(m.hasAttachments) || prev.has(m.mid) || quo.has(m.mid),
+      // Link to OCR/STT (media_text), folded into ledger/Timeline lines at read time.
+      attHashes: mAtts.length ? mAtts.map((a) => a.plaintextHash).join(' ') : null,
+    };
+  });
   const stats = mirrorMessages(cdb, items.concat(calls));
+  enqueueMedia(cdb, mediaEntries);
   let mx = cursors[key] || 0;
   for (const m of msgs) if (m.rid > mx) mx = m.rid;
   for (const c of calls) if (c.id > mx) mx = c.id;
@@ -269,24 +303,31 @@ function sweepGroup(cdb, sdb, group, cursors, now, ranAt, nameMap, deep) {
   const att = loadAttachments(sdb, msgs.filter((m) => m.hasAttachments).map((m) => m.mid));
   const prev = loadPreviews(sdb, mids);
   const quo = loadQuotes(sdb, mids);
-  const items = msgs.map((m) => ({
-    id: m.rid,
-    convId: conv.id,
-    conversation: group.name,
-    slug: null,
-    sentAt: m.sent_at,
-    sender: speaker(m),
-    body: composeBody(
-      m.body,
-      describeQuote(quo.get(m.mid), nameFor),
-      describeAttachments(att.get(m.mid)),
-      describePreview(prev.get(m.mid)),
-    ),
-    src: m.src,
-    type: m.type,
-    enriched: Boolean(m.hasAttachments) || prev.has(m.mid) || quo.has(m.mid),
-  }));
+  const mediaEntries = [];
+  const items = msgs.map((m) => {
+    const mAtts = mediaAtts(att.get(m.mid));
+    for (const a of mAtts) mediaEntries.push({ hash: a.plaintextHash, kind: mediaKind(a.contentType), contentType: a.contentType });
+    return {
+      id: m.rid,
+      convId: conv.id,
+      conversation: group.name,
+      slug: null,
+      sentAt: m.sent_at,
+      sender: speaker(m),
+      body: composeBody(
+        m.body,
+        describeQuote(quo.get(m.mid), nameFor),
+        describeAttachments(att.get(m.mid)),
+        describePreview(prev.get(m.mid)),
+      ),
+      src: m.src,
+      type: m.type,
+      enriched: Boolean(m.hasAttachments) || prev.has(m.mid) || quo.has(m.mid),
+      attHashes: mAtts.length ? mAtts.map((a) => a.plaintextHash).join(' ') : null,
+    };
+  });
   const stats = mirrorMessages(cdb, items.concat(calls));
+  enqueueMedia(cdb, mediaEntries);
   let mx = cursors[key] || 0;
   for (const m of msgs) if (m.rid > mx) mx = m.rid;
   for (const c of calls) if (c.id > mx) mx = c.id;
@@ -435,6 +476,8 @@ function main({ deep, only }) {
     sdb.close();
     cdb.close();
   }
+  // Drain the OCR/STT queue out of band (a full sweep only; --only is a targeted run).
+  if (!only) kickMediaWorker(deep);
   // Record this pass in the /admin/runs ledger. Every sweep is logged, even a
   // 0-new tick; the dashboard hides those (crm-web runsPage) so the hourly
   // cadence doesn't bury the weekly AI runs, but the ledger stays complete.

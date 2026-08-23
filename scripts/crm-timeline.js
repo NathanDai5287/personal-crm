@@ -49,6 +49,7 @@ const { openSignalDb, openCrmDb } = require("../lib/signal-db");
 const { render, loadTemplate } = require("../lib/timeline-prompt");
 const { runSweep } = require("./crm-archive");
 const { resolveSources, groupOthers } = require("../lib/sources");
+const { foldSuffix: mediaFold } = require("../lib/media");
 const { redact } = require("../lib/redact");
 // Pacific, always — see lib/weeks.js header. dateKey/fmtLocal replace this file's old
 // getUTC*()-based dayKey/fmtTs (a message at 23:30 Pacific landed on the next UTC day),
@@ -318,7 +319,7 @@ function renderTimeline(t, { includeGroup }) {
 function messagesBetween(cdb, convs, fromMs, toMs) {
   const rows = [];
   for (const c of convs) {
-    let sql = `SELECT id AS rid, body, sent_at, type, src AS sourceServiceId, sender FROM messages
+    let sql = `SELECT id AS rid, body, sent_at, type, src AS sourceServiceId, sender, att_hashes FROM messages
        WHERE conv_id = ? AND sent_at >= ? AND sent_at < ?`;
     const params = [c.convId, fromMs, toMs];
     if (c.srcFilter && c.srcFilter.length) {
@@ -333,7 +334,7 @@ function messagesBetween(cdb, convs, fromMs, toMs) {
   }
   rows.sort((a, b) => a.sent_at - b.sent_at || a.rid - b.rid);
   return {
-    lines: rows.map((m) => `[${fmtLocal(m.sent_at)}] ⟨m${m.rid}⟩ ${m._c.prefix || ""}${m.sender}: ${redact((m.body || "").replace(/\s+/g, " ").trim())}`),
+    lines: rows.map((m) => `[${fmtLocal(m.sent_at)}] ⟨m${m.rid}⟩ ${m._c.prefix || ""}${m.sender}: ${redact((m.body || "").replace(/\s+/g, " ").trim())}${mediaFold(cdb, m.att_hashes)}`),
     senders: new Set(rows.map((r) => r.sourceServiceId).filter(Boolean)),
   };
 }

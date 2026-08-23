@@ -22,6 +22,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 const { openCrmDb, openSignalDb } = require('../lib/signal-db');
+const { TESSERACT_BIN, FFMPEG_BIN, WHISPER_CLI, WHISPER_MODEL } = require('../lib/config');
 const { decryptableByHash, decryptRow } = require('../lib/signal-attachments');
 const M = require('../lib/media');
 
@@ -31,10 +32,8 @@ const argVal = (f, d) => { const i = args.indexOf(f); return i !== -1 && args[i 
 
 try { os.setPriority(19); } catch { /* best-effort renice to the floor */ }
 
-const TESSERACT = process.env.CRM_TESSERACT || 'tesseract';
-const WHISPER_CLI = process.env.CRM_WHISPER_CLI || '';
-const WHISPER_MODEL = process.env.CRM_WHISPER_MODEL || '';
-const FFMPEG = process.env.CRM_FFMPEG || 'ffmpeg';
+const TESSERACT = TESSERACT_BIN;
+const FFMPEG = FFMPEG_BIN;
 
 function have(cmd, probe) {
   try { execFileSync(cmd, probe, { stdio: 'ignore', timeout: 15_000 }); return true; } catch { return false; }

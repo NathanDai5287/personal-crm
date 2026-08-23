@@ -51,10 +51,48 @@ const { resolveSources, buildArchiveQuery } = require('../lib/sources');
 const { fmtLocal, planChunks, lastCompleteWeekStart, gateBuckets } = require('../lib/weeks');
 const { redact } = require('../lib/redact');
 const { confirmedNicknames } = require('../lib/nicknames');
+const { foldSuffix } = require('../lib/media');
+const { buildResolver } = require('../lib/people-resolve');
 const {
-  TRACKED, DISPLAY_NAMES, REFRESH_DIR, BOT_SERVICE_ID,
+  TRACKED, DISPLAY_NAMES, REFRESH_DIR, CONTACTS_DIR, BOT_SERVICE_ID,
   INGEST_N, INGEST_FLOOR_DAYS, INGEST_CEILING_DAYS,
 } = require('../lib/config');
+
+// CAST OF CHARACTERS: the other tracked people a conversation refers to. So the merge
+// model, reading A's ledger, knows WHO "B"/"bee" is — a real person object with
+// attributes, not a bare name. Resolver is built once per process from the contacts
+// table (contacts are static within a run).
+let _resolver = null;
+function getResolver(cdb) {
+  if (_resolver) return _resolver;
+  const contacts = cdb.prepare('SELECT file_path, name FROM contacts').all()
+    .map((r) => ({ slug: r.file_path ? r.file_path.replace('data/contacts/', '').replace(/\.md$/, '') : null, name: r.name }))
+    .filter((c) => c.slug);
+  _resolver = buildResolver(contacts);
+  return _resolver;
+}
+
+// A compact one-line digest of a referenced person's profile — relationship, birthday,
+// and their first "What I know" fact (citations stripped). Enough for the model to
+// place them; deliberately NOT the whole profile, which would bloat every ledger.
+function personDigest(slug, name) {
+  let md;
+  try { md = fs.readFileSync(path.posix.join(CONTACTS_DIR, `${slug}.md`), 'utf8'); } catch { return null; }
+  const field = (label) => {
+    const m = md.match(new RegExp(`^\\s*[-*]?\\s*\\*{0,2}${label}:?\\*{0,2}\\s*(.+)$`, 'mi'));
+    return m ? m[1].replace(/[*_]/g, '').trim() : null;
+  };
+  const clean = (v) => (v && !/^_?(unknown|tbd)_?$/i.test(v) ? v : null);
+  const rel = clean(field('Relationship'));
+  const bday = clean(field('Birthday'));
+  const knowSec = (md.split(/^##\s+What I know/mi)[1] || '').split(/^##\s+/m)[0];
+  const firstBullet = (knowSec.match(/^[-*]\s+(.+)$/m) || [])[1];
+  const bits = [];
+  if (rel) bits.push(rel);
+  if (bday) bits.push(`b. ${bday}`);
+  if (firstBullet) bits.push(firstBullet.replace(/⟨[^⟩]*⟩/g, '').replace(/\s+/g, ' ').trim().slice(0, 140));
+  return bits.length ? `${name}: ${bits.join('; ')}` : name;
+}
 
 const DAY = 86_400_000;
 // INGEST == BACKFILL. Ingest processes everything NOT YET MERGED for a contact,
@@ -111,6 +149,10 @@ function planContact(cdb, sdb, slug, opts) {
   if (!q) return null;
   const msgs = cdb.prepare(q.sql).all(...q.params);
   if (msgs.length === 0) return null;
+  // Fold any OCR/transcript for a message's attachments onto its line (read time),
+  // so the merge model reads what a photo said or a voice note contained. Attached
+  // now so it rides into every chunk; a no-media message costs nothing.
+  for (const m of msgs) m.fold = foldSuffix(cdb, m.att_hashes);
 
   const display = (nicks[row.signal_id] && nicks[row.signal_id].name) || row.name;
   const cutoff = lastCompleteWeekStart(now);
@@ -140,6 +182,22 @@ function planContact(cdb, sdb, slug, opts) {
   for (const bm of bucketMsgs) for (const ch of planChunks(bm)) chunks.push(ch);
   if (chunks.length === 0) return null;
 
+  // Cast of characters: OTHER tracked people these messages refer to (by name or a
+  // confirmed nickname), each as a compact profile digest for the ledger header.
+  // Excludes the subject (the profile is about them) and Nathan (the reader).
+  const cast = [];
+  try {
+    const resolver = getResolver(cdb);
+    const mentioned = new Set();
+    for (const bm of bucketMsgs) for (const m of bm) for (const s of resolver.mentionsIn(m.body || '')) mentioned.add(s);
+    mentioned.delete(slug);
+    mentioned.delete('nathan');
+    for (const s of mentioned) {
+      const d = personDigest(s, resolver.nameBySlug.get(s) || s);
+      if (d) cast.push(d);
+    }
+  } catch { /* cast is best-effort context */ }
+
   return {
     slug,
     name: display,
@@ -147,6 +205,7 @@ function planContact(cdb, sdb, slug, opts) {
     sources,
     total: chunks.reduce((n, c) => n + c.count, 0),
     chunks,
+    cast,
   };
 }
 
@@ -199,7 +258,7 @@ function writeChunkLedger(plan, chunk, chunkIndex, chunkTotal, dir = REFRESH_DIR
     const ctx = label ? `(${label}) ` : '';
     // Tag the old bot so the merge reads its lines as automated, not a person.
     const sender = m.src === BOT_SERVICE_ID ? `${m.sender} (bot)` : m.sender;
-    return `[${fmtLocal(m.sent_at)}] ⟨m${m.rid}⟩ ${ctx}${sender}: ${redact(m.body)}`;
+    return `[${fmtLocal(m.sent_at)}] ⟨m${m.rid}⟩ ${ctx}${sender}: ${redact(m.body)}${m.fold || ''}`;
   });
 
   const srcBits = [];
@@ -220,12 +279,21 @@ function writeChunkLedger(plan, chunk, chunkIndex, chunkTotal, dir = REFRESH_DIR
     if (names.length) nickBits.push(`${who} is also called ${names.map((n) => `"${n}"`).join(', ')}`);
   }
 
+  // CAST OF CHARACTERS: the other tracked people these messages refer to, each a
+  // compact profile digest — so a mention of "B"/"bee" is a real person the model
+  // knows (relationship, age, a fact), not a bare name. Context only; the subject is
+  // still the one profile being edited.
+  const castLines = (plan.cast && plan.cast.length)
+    ? ['# people referenced (context — NOT the subject of this profile):', ...plan.cast.map((d) => `#   ${d}`)]
+    : [];
+
   const header = [
     `# Messages with ${plan.name} — ${chunk.label} (Pacific)`,
     `# chunk ${chunkIndex} of ${chunkTotal} · ${chunk.count} messages · ids m${chunk.ridStart}–m${chunk.ridEnd}`,
     `# window: ${fmtLocal(chunk.startMs)} to ${fmtLocal(chunk.endMs)}${chunk.partial ? ' (partial week — oversized week split by day)' : ''}`,
     `# sources: ${srcBits.join(', ') || 'DM'}`,
     ...(nickBits.length ? [`# known nicknames: ${nickBits.join('; ')}`] : []),
+    ...castLines,
   ].join('\n');
 
   fs.writeFileSync(file, `${header}\n\n${lines.join('\n')}\n`);
