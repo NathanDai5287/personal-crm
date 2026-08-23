@@ -723,6 +723,17 @@ table.dtab{width:100%;border-collapse:collapse;font-family:"Courier Prime",monos
 .dtab td.dgap{background:var(--card2)}
 .dtab tr.dhunk td{background:var(--card2);color:var(--soft);padding:4px 8px;font-size:11px}
 .dtab.split td.dc{width:50%}
+/* Run diff viewer (/runs/<id>/diff/<slug>): unified/side-by-side toggle, a
+   collapsed-context stub with expanders, and a Timeline section divider. Reuses
+   the .dtab add/del/gutter styling above. */
+.difftools{display:flex;gap:6px;align-items:center;margin:12px 0 6px}
+.difftools .difftlab{font-family:"Courier Prime",monospace;font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--soft);margin-right:2px}
+.difftools .dtbtn{font-family:"Courier Prime",monospace;font-size:11px;padding:3px 11px;border:1px solid var(--rule);background:var(--card);color:var(--soft);border-radius:6px;cursor:pointer}
+.difftools .dtbtn.on{background:var(--stamp);color:#fff;border-color:var(--stamp)}
+.diffview{border:1px solid var(--rule);border-radius:8px;overflow-x:auto;background:var(--paper)}
+.dtab tr.dstub td{background:var(--card2);color:var(--soft);text-align:center;padding:3px 8px}
+.dtab tr.dstub button.dxp{font-family:"Courier Prime",monospace;font-size:11px;border:1px solid var(--rule);background:var(--card);color:var(--stamp);border-radius:5px;padding:1px 9px;cursor:pointer;margin:0 3px}
+.dtab tr.dtl td{background:color-mix(in srgb,var(--stamp) 12%,transparent);color:var(--stamp);font-weight:600;padding:4px 8px;font-size:11px;letter-spacing:.08em;text-transform:uppercase}
 
 /* ---- nicknames (profile identity block) ---------------------------------- */
 /* Nicknames the model proposed from the chats. A suggestion is amber with a dotted

@@ -2469,6 +2469,74 @@ function historyPage(slug) {
   return page(`${slug} — history`, body);
 }
 
+// The client-side diff viewer: computes the line diff from the full pre/post
+// images, renders it GitLab-style (unified OR side-by-side, remembered per
+// browser), collapses long unchanged runs behind expandable stubs, and marks
+// where the `## Timeline` section begins. No backticks / ${…} / real newlines in
+// here — it is embedded in a template literal, so it uses '+' concatenation and
+// single quotes only (mirrors PROFILE_EDIT_JS).
+const DIFF_VIEW_JS = `
+(function(){
+  var D=__DIFF_DATA__;
+  var mount=document.getElementById('diffmount');
+  if(!mount)return;
+  var A=D.A||[],B=D.B||[],tl=(D.timelineB==null?-1:D.timelineB);
+  var CTX=3,STEP=20;
+  function escH(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+  // LCS line diff (common prefix/suffix trim), same shape as the edit viewer.
+  function diffLines(a,b){
+    var s=0;while(s<a.length&&s<b.length&&a[s]===b[s])s++;
+    var e=0;while(e<a.length-s&&e<b.length-s&&a[a.length-1-e]===b[b.length-1-e])e++;
+    var ac=a.slice(s,a.length-e),bc=b.slice(s,b.length-e),n=ac.length,m=bc.length;
+    var dp=new Uint32Array((n+1)*(m+1)),W=m+1;
+    for(var i=n-1;i>=0;i--)for(var j=m-1;j>=0;j--)
+      dp[i*W+j]=ac[i]===bc[j]?dp[(i+1)*W+j+1]+1:Math.max(dp[(i+1)*W+j],dp[i*W+j+1]);
+    var ops=[],x=0,y=0;
+    for(var p=0;p<s;p++)ops.push({t:'=',a:p,b:p});
+    while(x<n&&y<m){
+      if(ac[x]===bc[y]){ops.push({t:'=',a:s+x,b:s+y});x++;y++;}
+      else if(dp[(x+1)*W+y]>=dp[x*W+y+1]){ops.push({t:'-',a:s+x});x++;}
+      else{ops.push({t:'+',b:s+y});y++;}
+    }
+    while(x<n){ops.push({t:'-',a:s+x});x++;}
+    while(y<m){ops.push({t:'+',b:s+y});y++;}
+    for(var z=0;z<e;z++)ops.push({t:'=',a:a.length-e+z,b:b.length-e+z});
+    return ops;
+  }
+  var ops=diffLines(A,B);
+  // Segment into alternating change / unchanged-gap runs.
+  var SEGS=[];{var cur=null;for(var i=0;i<ops.length;i++){var g=ops[i].t==='=';if(!cur||cur.gap!==g){cur={gap:g,ops:[]};SEGS.push(cur);}cur.ops.push(ops[i]);}}
+  SEGS.forEach(function(sg,i){sg.id='g'+i;sg.isFirst=(i===0);sg.isLast=(i===SEGS.length-1);});
+  var exp={};
+  var mode='unified';try{var mm=localStorage.getItem('crm.diffmode');if(mm==='split'||mm==='unified')mode=mm;}catch(e){}
+  function tlBar(cols,op){return (tl>=0&&op&&op.b===tl)?('<tr class="dtl"><td colspan="'+cols+'">Timeline &darr;</td></tr>'):'';}
+  // ---- unified rows ----
+  function ctxU(op){return tlBar(4,op)+'<tr><td class="dn">'+(op.a+1)+'</td><td class="dn">'+(op.b+1)+'</td><td class="dsign"> </td><td class="dc">'+escH(A[op.a])+'</td></tr>';}
+  function chgU(sg){var r=[];sg.ops.forEach(function(op){if(op.t==='-')r.push('<tr class="ddel"><td class="dn">'+(op.a+1)+'</td><td class="dn"></td><td class="dsign">-</td><td class="dc">'+escH(A[op.a])+'</td></tr>');else r.push(tlBar(4,op)+'<tr class="dadd"><td class="dn"></td><td class="dn">'+(op.b+1)+'</td><td class="dsign">+</td><td class="dc">'+escH(B[op.b])+'</td></tr>');});return r.join('');}
+  // ---- split rows ----
+  function ctxS(op){return tlBar(4,op)+'<tr><td class="dn">'+(op.a+1)+'</td><td class="dc">'+escH(A[op.a])+'</td><td class="dn">'+(op.b+1)+'</td><td class="dc">'+escH(B[op.b])+'</td></tr>';}
+  function chgS(sg){var r=[],i=0,o=sg.ops;while(i<o.length){var del=[],add=[];while(i<o.length&&o[i].t==='-'){del.push(o[i]);i++;}while(i<o.length&&o[i].t==='+'){add.push(o[i]);i++;}for(var k=0;k<Math.max(del.length,add.length);k++){var L=del[k],R=add[k];r.push((R?tlBar(4,R):'')+'<tr>'+(L?'<td class="dn ddel">'+(L.a+1)+'</td><td class="dc ddel">'+escH(A[L.a])+'</td>':'<td class="dn"></td><td class="dc dgap"></td>')+(R?'<td class="dn dadd">'+(R.b+1)+'</td><td class="dc dadd">'+escH(B[R.b])+'</td>':'<td class="dn"></td><td class="dc dgap"></td>')+'</tr>');}}return r.join('');}
+  function stub(sg,hidden){var b='';if(!sg.isFirst)b+='<button class="dxp" data-gap="'+sg.id+'" data-act="top" aria-label="show more below the previous change">&darr; '+STEP+'</button>';b+='<button class="dxp" data-gap="'+sg.id+'" data-act="all">&#8597; '+hidden+' unchanged lines</button>';if(!sg.isLast)b+='<button class="dxp" data-gap="'+sg.id+'" data-act="bottom" aria-label="show more above the next change">&uarr; '+STEP+'</button>';return '<tr class="dstub"><td colspan="4">'+b+'</td></tr>';}
+  function gap(sg,ctx){var L=sg.ops.length,st=exp[sg.id]||{};var top=sg.isFirst?0:CTX,bot=sg.isLast?0:CTX;if(st.all){return sg.ops.map(ctx).join('');}top+=(st.top||0);bot+=(st.bottom||0);if(top+bot>=L)return sg.ops.map(ctx).join('');var r=[],j;for(j=0;j<top;j++)r.push(ctx(sg.ops[j]));r.push(stub(sg,L-top-bot));for(j=L-bot;j<L;j++)r.push(ctx(sg.ops[j]));return r.join('');}
+  function render(){
+    var split=mode==='split';var ctxFn=split?ctxS:ctxU;
+    var rows=SEGS.map(function(sg){return sg.gap?gap(sg,ctxFn):(split?chgS(sg):chgU(sg));}).join('');
+    mount.innerHTML='<div class="diffview"><table class="dtab'+(split?' split':'')+'">'+rows+'</table></div>';
+    var u=document.getElementById('dmUni'),s=document.getElementById('dmSplit');
+    if(u)u.classList.toggle('on',!split);if(s)s.classList.toggle('on',split);
+  }
+  mount.addEventListener('click',function(e){
+    var b=e.target.closest&&e.target.closest('button.dxp');if(!b)return;
+    var id=b.getAttribute('data-gap'),act=b.getAttribute('data-act');var st=exp[id]||(exp[id]={});
+    if(act==='all')st.all=true;else if(act==='top')st.top=(st.top||0)+STEP;else st.bottom=(st.bottom||0)+STEP;
+    render();
+  });
+  var tb=document.getElementById('difftools');
+  if(tb)tb.addEventListener('click',function(e){var b=e.target.closest&&e.target.closest('button[data-mode]');if(!b)return;mode=b.getAttribute('data-mode');try{localStorage.setItem('crm.diffmode',mode);}catch(x){}render();});
+  render();
+})();
+`;
+
 function diffPage(id, slug, chunkIdx) {
   let run;
   try { run = JSON.parse(fs.readFileSync(path.join(RUNS_DIR, `${id}.json`), 'utf8')); } catch { return null; }
@@ -2479,53 +2547,61 @@ function diffPage(id, slug, chunkIdx) {
   const post = (chunk && chunk.postSha) || run.postSha;
   if (!pre || !post) return null;
   const rel = `data/contacts/${slug}.md`;
-  let diff;
-  try {
-    diff = execFileSync('git', ['--git-dir', GITDIR, 'diff', `${pre}..${post}`, '--', rel],
-      { cwd: ROOT, encoding: 'utf8', timeout: 15_000, maxBuffer: 8 * 1024 * 1024 });
-  } catch (e) {
-    diff = null;
-  }
-  // The profile .md holds both the merge-written prose AND the `## Timeline`
-  // section (owned by compaction), so one diff can carry both. Find the Timeline
-  // heading's line in the POST image and file each hunk by which side it lands on:
-  // a hunk whose post-image start is at/after the heading is a Timeline change,
-  // everything else is Profile. (A single chunk's merge diff never touches the
-  // Timeline, so its Timeline pane is simply empty — accurate, not a bug.)
-  let timelineLine = Infinity;
-  try {
-    const postText = execFileSync('git', ['--git-dir', GITDIR, 'show', `${post}:${rel}`],
-      { cwd: ROOT, encoding: 'utf8', timeout: 15_000, maxBuffer: 8 * 1024 * 1024 });
-    const idx = postText.split('\n').findIndex((l) => /^##\s+Timeline\b/.test(l));
-    if (idx !== -1) timelineLine = idx + 1; // 1-based, to compare against @@ +c
-  } catch { /* no Timeline section → everything files as Profile */ }
-  const styleLine = (l) => {
-    const e = esc(l);
-    if (l.startsWith('@@')) return `<span class="hunk">${e}</span>`;
-    if (l.startsWith('+')) return `<span class="add">${e}</span>`;
-    if (l.startsWith('-')) return `<span class="del">${e}</span>`;
-    return `<span class="ctx">${e}</span>`;
+  const showFile = (sha) => {
+    try {
+      return execFileSync('git', ['--git-dir', GITDIR, 'show', `${sha}:${rel}`],
+        { cwd: ROOT, encoding: 'utf8', timeout: 15_000, maxBuffer: 8 * 1024 * 1024 });
+    } catch { return null; } // file absent at this revision (e.g. profile created this run)
   };
-  const profile = [];
-  const timeline = [];
-  let bucket = null; // skip the file header (diff --git / index / --- / +++) until the first hunk
-  if (diff && diff.trim()) {
-    for (const l of diff.split('\n')) {
-      const m = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(l);
-      if (m) bucket = Number(m[1]) >= timelineLine ? timeline : profile;
-      if (bucket) bucket.push(styleLine(l));
-    }
+  const preText = showFile(pre);
+  const postText = showFile(post);
+  const splitLines = (t) => (t == null ? [] : t.replace(/\n$/, '').split('\n'));
+  const A = splitLines(preText);
+  const B = splitLines(postText);
+  // The profile .md holds both the merge-written prose AND the `## Timeline`
+  // section (owned by compaction). One divider row marks where Timeline starts.
+  const timelineB = B.findIndex((l) => /^##\s+Timeline\b/.test(l));
+
+  const backHeader = `<div class="back"><a href="/runs/${encodeURIComponent(id)}">&larr; back to run</a></div>` +
+    `<header class="top"><h1>${esc(slug)} — changes</h1><span class="sub">run ${esc(fmtWhen(run.startedAt))}</span></header>`;
+
+  if (preText == null && postText == null) {
+    return page(`diff ${slug}`, backHeader + '<pre class="diff"><span class="ctx">(could not read this profile at either revision)</span></pre>', '/runs');
   }
-  const pane = (title, lines) =>
-    `<div class="difflabel">${esc(title)}</div><pre class="diff">` +
-    (lines.length ? lines.join('\n') : '<span class="ctx">(no changes)</span>') + '</pre>';
-  const bodyDiff = diff && diff.trim()
-    ? pane('Profile', profile) + pane('Timeline', timeline)
-    : '<pre class="diff"><span class="ctx">(no changes to this profile in this run)</span></pre>';
-  const body = `<div class="back"><a href="/runs/${encodeURIComponent(id)}">&larr; back to run</a></div>` +
-    `<header class="top"><h1>${esc(slug)} — changes</h1><span class="sub">run ${esc(fmtWhen(run.startedAt))}</span></header>` +
-    bodyDiff;
-  return page(`diff ${slug}`, body, '/runs');
+  if (preText != null && postText != null && preText === postText) {
+    return page(`diff ${slug}`, backHeader + '<pre class="diff"><span class="ctx">(no changes to this profile in this run)</span></pre>', '/runs');
+  }
+
+  // CAP. The interactive viewer diffs the whole file client-side (O(n·m)); above
+  // this it falls back to a classic fixed-context unified diff so a pathological
+  // profile can't hang the browser. Real profiles are a few hundred lines.
+  const MAXLINES = 6000;
+  if (A.length + B.length > MAXLINES) {
+    let diff = '';
+    try {
+      diff = execFileSync('git', ['--git-dir', GITDIR, 'diff', `${pre}..${post}`, '--', rel],
+        { cwd: ROOT, encoding: 'utf8', timeout: 15_000, maxBuffer: 8 * 1024 * 1024 });
+    } catch { /* leave empty */ }
+    const styled = diff.split('\n').map((l) => {
+      const e = esc(l);
+      if (l.startsWith('@@')) return `<span class="hunk">${e}</span>`;
+      if (l.startsWith('+')) return `<span class="add">${e}</span>`;
+      if (l.startsWith('-')) return `<span class="del">${e}</span>`;
+      return `<span class="ctx">${e}</span>`;
+    }).join('\n');
+    return page(`diff ${slug}`,
+      backHeader + `<p class="sub">Large profile (${A.length + B.length} lines) — showing a plain unified diff.</p><pre class="diff">${styled}</pre>`,
+      '/runs');
+  }
+
+  const payload = JSON.stringify({ A, B, timelineB: timelineB === -1 ? null : timelineB })
+    .replace(/</g, '\u003c');
+  const tools = '<div class="difftools" id="difftools">' +
+    '<span class="difftlab">view</span>' +
+    '<button type="button" class="dtbtn on" id="dmUni" data-mode="unified">unified</button>' +
+    '<button type="button" class="dtbtn" id="dmSplit" data-mode="split">side by side</button></div>';
+  const script = `<script>${DIFF_VIEW_JS.replace('__DIFF_DATA__', payload)}</script>`;
+  return page(`diff ${slug}`, backHeader + tools + '<div id="diffmount"></div>' + script, '/runs');
 }
 
 // ---------------------------------------------------------------------------
