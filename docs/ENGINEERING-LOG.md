@@ -15,6 +15,45 @@ Newest first.
 
 ## 2026-08-23
 
+### DECISION — Pacific time is the master time, everywhere, always
+**America/Los_Angeles is the one and only clock for this project.** There is no second
+time zone anywhere — not UTC, not the machine's local time, not the viewer's. Every date and
+time the pipeline computes, stores, displays, or schedules is Pacific:
+- **App logic** already routes all date math through `lib/weeks.js` (Pacific helpers). Never
+  reach for `Date`/`toISOString`/system-local time directly — go through those helpers.
+- **The host clock** is set to it: minmus `timedatectl` → `America/Los_Angeles`. This is a
+  requirement, not a coincidence — the systemd timers below inherit it.
+- **systemd `OnCalendar=`** is evaluated in the host time zone, so every timer time
+  (`Mon 04:00`, `03:30`, `*:10`) is Pacific *because the host is Pacific*. If the host TZ ever
+  changed, every schedule would silently shift — so the host must stay on Pacific.
+If you add anything that touches time — a script, a timer, a display field — it is Pacific.
+No exceptions, no conversions, no "just this once in UTC."
+
+### REFERENCE — all periodic jobs are now scheduled (minmus user timers)
+As of today every pipeline job has a `--user` systemd timer next to `crm-sweep.timer`
+(`~/.config/systemd/user/`, enabled, `Persistent=true`). Times are Pacific (see above):
+
+| Timer | OnCalendar (PT) | Service runs | Model? | Ships |
+|---|---|---|---|---|
+| `crm-sweep` | `hourly` (:00) | `crm-archive.js` | no | on |
+| `crm-todo` | `*:10:00` (hourly, after sweep) | `crm-todo-scan.js --write` | on a match | **off** |
+| `crm-sweep-deep` | `03:30:00` daily | `crm-archive.js --deep` | no | on |
+| `crm-ingest` | `Mon 04:00:00` weekly | `crm-daily.js` | yes | **off** |
+| `crm-compact` | `Mon 06:00:00` weekly (after ingest) | `crm-compact.js --write` | yes | **off** |
+
+The three model jobs (`ingest`, `todo`, `compact`) ship with their **UI toggle off**
+(`data/crm-run-toggles.json` = all `false`), so the timers fire but each run self-pauses at
+startup and spends nothing until Nathan flips it on. Verified functionally: ingest and compact
+print "PAUSED"; todo holds triggers with "no model call". Enabling a job is a UI toggle — no
+timer edit needed.
+
+**GOTCHA that bit here — `crm-todo-scan.js` and `crm-compact.js` are dry-run by default, and
+their toggle-pause gate only trips under `--write`.** A timer running them with no flag would
+dry-run forever (no work, no pause) — so both `ExecStart` lines carry `--write`. `crm-daily.js`
+is the opposite: it writes by default (its gate is `!DRY_RUN && !FORCE && !isEnabled`), so its
+timer takes no flag. When adding a job timer, check whether its script writes by default before
+copying an ExecStart.
+
 ### REFERENCE — the minmus systemd layout (what runs, where, and how to update it)
 crm.cal.taxi now serves from minmus. The pieces are split across **two** systemd managers,
 which is the thing to internalise before touching any of it:
@@ -32,12 +71,12 @@ which is the thing to internalise before touching any of it:
 - Managed with `systemctl --user` (no sudo). `Linger=yes` is set for natha
   (`loginctl show-user natha -p Linger`), so the user manager — and these units — run at boot
   even with nobody logged in.
-- Only one job is scheduled: **`crm-sweep.timer`** (`OnCalendar=hourly`, `Persistent=true`) →
-  **`crm-sweep.service`** (`Type=oneshot`, `ExecStart=/usr/bin/node scripts/crm-archive.js`).
-  The hourly sweep is the sole automatic job on minmus.
-- There is **no timer for ingest / todo / compact / deep-sweep**. They only run when you press
-  their ▸ run button in the UI. (The archive sweep never backs up crm.db — the backup runs only
-  inside an ingest, `crm-daily.js` step 0 — which is why minmus's backup is stale: 0 ingests.)
+- `crm-sweep.timer` (`OnCalendar=hourly`, `Persistent=true`) → `crm-sweep.service`
+  (`Type=oneshot`, `ExecStart=/usr/bin/node scripts/crm-archive.js`) is the original example.
+  **SUPERSEDED same day:** timers for todo / ingest / compact / deep-sweep were added too — see
+  the "all periodic jobs are now scheduled" REFERENCE above for the full set.
+- (The archive sweep never backs up crm.db — the backup runs only inside an ingest,
+  `crm-daily.js` step 0 — which is why minmus's backup is stale: 0 ingests so far.)
 
 **The UI toggle is not a scheduler.** The pause switch and model dropdown on each cadence card
 write flags to `data/crm-run-toggles.json` / `data/crm-run-models.json` that a run *reads at
