@@ -53,7 +53,9 @@ function resolvePassword() {
   } catch { /* not created yet */ }
   const generated = crypto.randomBytes(12).toString('base64url');
   fs.writeFileSync(WEB_PASSWORD_FILE, generated + '\n', { mode: 0o600 });
-  console.log(`\n  No password set — generated one and saved it to:\n    ${WEB_PASSWORD_FILE}\n  Username: ${WEB_USER}\n  Password: ${generated}\n`);
+  // Don't echo the secret to the journal — it's already persisted 0600 in the
+  // file. Print only where to read it, so `journalctl` can't leak the password.
+  console.log(`\n  No password set — generated one and saved it (0600) to:\n    ${WEB_PASSWORD_FILE}\n  Username: ${WEB_USER}\n  (read the file for the password)\n`);
   return generated;
 }
 
@@ -1502,25 +1504,36 @@ function renamePage(slug) {
 
 function renameContact(slug, newName) {
   const file = path.posix.join(CONTACTS_DIR, `${slug}.md`);
-  let md;
-  try { md = fs.readFileSync(file, 'utf8'); } catch { return { ok: false, error: 'no such contact' }; }
-  const lines = md.split(/\r?\n/);
-  const idx = lines.findIndex((l) => l.startsWith('# '));
-  if (idx === -1) lines.unshift(`# ${newName}`, '');
-  else lines[idx] = `# ${newName}`;
-  fs.writeFileSync(file, lines.join('\n'));
-  // Best-effort commit to the isolated history, so the rename is attributed and
-  // future diffs stay clean. Non-fatal: the file is already written and served,
-  // and the next pipeline run snapshots it regardless.
-  const relPath = `data/contacts/${slug}.md`;
+  // A rename is a read-modify-write of the same profile a merge/sweep may be
+  // rewriting — same hazard applyManualEdit guards. Refuse while THIS process runs
+  // a job (its own lock would hand back an inherited no-op), then take the
+  // cross-process pipeline lock so a scheduled run can't clobber the rename.
+  if (job && job.running) return { ok: false, error: 'a job is running — rename again when it finishes' };
+  const lock = require('../lib/pipeline-lock').acquire('manual-rename');
+  if (!lock.ok) return { ok: false, error: `a run is in progress (${lock.holderDesc}) — rename again when it finishes` };
   try {
-    // -f: data/ is ignored by the MAIN repo's .gitignore, which this shared
-    // work-tree applies — a bare `add` refuses the path (memory-commit.js
-    // force-adds for the same reason).
-    execFileSync('git', ['--git-dir', GITDIR, '--work-tree', ROOT, 'add', '-f', '--', relPath], { cwd: ROOT, timeout: 15_000 });
-    execFileSync('git', ['--git-dir', GITDIR, '--work-tree', ROOT, 'commit', '-m', `rename ${slug} → ${newName}`], { cwd: ROOT, timeout: 15_000 });
-  } catch { /* uncommitted rename still shows */ }
-  return { ok: true };
+    let md;
+    try { md = fs.readFileSync(file, 'utf8'); } catch { return { ok: false, error: 'no such contact' }; }
+    const lines = md.split(/\r?\n/);
+    const idx = lines.findIndex((l) => l.startsWith('# '));
+    if (idx === -1) lines.unshift(`# ${newName}`, '');
+    else lines[idx] = `# ${newName}`;
+    fs.writeFileSync(file, lines.join('\n'));
+    // Best-effort commit to the isolated history, so the rename is attributed and
+    // future diffs stay clean. Non-fatal: the file is already written and served,
+    // and the next pipeline run snapshots it regardless.
+    const relPath = `data/contacts/${slug}.md`;
+    try {
+      // -f: data/ is ignored by the MAIN repo's .gitignore, which this shared
+      // work-tree applies — a bare `add` refuses the path (memory-commit.js
+      // force-adds for the same reason).
+      execFileSync('git', ['--git-dir', GITDIR, '--work-tree', ROOT, 'add', '-f', '--', relPath], { cwd: ROOT, timeout: 15_000 });
+      execFileSync('git', ['--git-dir', GITDIR, '--work-tree', ROOT, 'commit', '-m', `rename ${slug} → ${newName}`], { cwd: ROOT, timeout: 15_000 });
+    } catch { /* uncommitted rename still shows */ }
+    return { ok: true };
+  } finally {
+    lock.release();
+  }
 }
 
 // ---- manual edit: apply a save from the profile page -------------------------
@@ -2722,9 +2735,11 @@ function jobCommands({ kind, slugs, deep, plan }) {
 
 function startJob(spec) {
   if (job && job.running) return { ok: false, error: 'a run is already in progress' };
-  // deep-sweep is unfolded to kind 'sweep' (+deep) before it reaches here, so the
-  // launchable kinds are sweep / ingest / todo. Timeline is not a job.
-  if (!['sweep', 'ingest', 'todo'].includes(spec.kind)) return { ok: false, error: 'bad job kind' };
+  // Derive the allow-list from the jobs.js SSOT (isJob) so a new job added there is
+  // launchable without editing this guard. deep-sweep is unfolded to kind 'sweep'
+  // (+deep) before it reaches here, so it is excluded — it is a flag, not a
+  // launchable kind. Timeline is not a job.
+  if (!JOBS_DEF.isJob(spec.kind) || spec.kind === 'deep-sweep') return { ok: false, error: 'bad job kind' };
   const cmds = jobCommands(spec);
   if (!cmds || !cmds.length) return { ok: false, error: 'nothing to run (no such people?)' };
   // Cross-process lock: refuse if a scheduled sweep or a CLI run is mid-flight,
@@ -2768,12 +2783,15 @@ function runQueue(cmds, i) {
   };
   child.stdout.on('data', append);
   child.stderr.on('data', append);
-  child.on('close', (code) => {
-    if (code) {
-      job.exit = code;
+  child.on('close', (code, signal) => {
+    // A child killed by a signal (OOM SIGKILL, etc.) reports code=null — treat that
+    // as failure, not success, so the queue stops instead of marching on as if the
+    // step had passed.
+    if (code || signal) {
+      job.exit = code == null ? -1 : code;
       job.running = false;
       job.endedAt = Date.now();
-      job.buf += `\n[step ${i + 1}/${cmds.length} exit ${code} — stopped]`;
+      job.buf += `\n[step ${i + 1}/${cmds.length} ${signal ? `killed by ${signal}` : `exit ${code}`} — stopped]`;
       if (job.lock) { job.lock.release(); job.lock = null; }
       return;
     }

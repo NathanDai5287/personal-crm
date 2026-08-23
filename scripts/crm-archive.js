@@ -180,9 +180,7 @@ function sweepContact(cdb, sdb, slug, cursors, now, ranAt, nicks, deep, nameMap)
   const key = `contact:${slug}`;
   const bound = sweepBound(cursors, key, now, ranAt, deep);
   const q = buildMessageQuery(sources, row.signal_id, bound);
-  if (!q) return NOTHING;
-  const msgs = sdb.prepare(q.sql).all(q.params);
-  if (msgs.length === 0) return NOTHING;
+  if (!q) return NOTHING; // no message sources at all (so no call sources either)
 
   const display = (nicks[row.signal_id] && nicks[row.signal_id].name) || row.name;
   const first = display.split(' ')[0];
@@ -195,6 +193,20 @@ function sweepContact(cdb, sdb, slug, cursors, now, ranAt, nicks, deep, nameMap)
     // people's words under the contact in the archive). 'Someone' only if unknown.
     return (m.src && nameMap.get(m.src)) || 'Someone';
   };
+  const nameFor = (sid) => (sid === MY_SERVICE_ID ? 'Nathan' : (sid === BOT_SERVICE_ID ? 'Janet' : (sid === row.signal_id ? first : (nameMap.get(sid) || null))));
+
+  // Call events, computed BEFORE the empty-text guard: a sweep window can hold a
+  // call and NO text messages (a thread that went quiet precisely because you moved
+  // to a call), and those calls must still be archived — gating them on text
+  // message count dropped them permanently for a call-only window.
+  const convIds = [...sources.dmConvIds, ...sources.biGroupConvIds, ...sources.multiGroupConvIds];
+  const calls = callItems(sdb, convIds, bound, nameFor).map((it) => ({
+    ...it, slug, conversation: sources.labels[it.convId] || `DM with ${display}`,
+  }));
+
+  const msgs = sdb.prepare(q.sql).all(q.params);
+  if (msgs.length === 0 && calls.length === 0) return NOTHING;
+
   // ENRICHMENT happens once, HERE. Everything downstream reads the archive, so
   // a photo becomes "[photo]", a reply carries what it answers, and a bare URL
   // carries its page title — for the ledger, the merge and the Timeline alike.
@@ -202,7 +214,6 @@ function sweepContact(cdb, sdb, slug, cursors, now, ranAt, nicks, deep, nameMap)
   const att = loadAttachments(sdb, msgs.filter((m) => m.hasAttachments).map((m) => m.mid));
   const prev = loadPreviews(sdb, mids);
   const quo = loadQuotes(sdb, mids);
-  const nameFor = (sid) => (sid === MY_SERVICE_ID ? 'Nathan' : (sid === BOT_SERVICE_ID ? 'Janet' : (sid === row.signal_id ? first : (nameMap.get(sid) || null))));
   const items = msgs.map((m) => ({
     id: m.rid,
     convId: m.cid,
@@ -220,11 +231,6 @@ function sweepContact(cdb, sdb, slug, cursors, now, ranAt, nicks, deep, nameMap)
     type: m.type,
     // Lets the archive upgrade a row stored before these enrichments existed.
     enriched: Boolean(m.hasAttachments) || prev.has(m.mid) || quo.has(m.mid),
-  }));
-  // Call events across all this contact's conversations (DM + groups).
-  const convIds = [...sources.dmConvIds, ...sources.biGroupConvIds, ...sources.multiGroupConvIds];
-  const calls = callItems(sdb, convIds, bound, nameFor).map((it) => ({
-    ...it, slug, conversation: sources.labels[it.convId] || `DM with ${display}`,
   }));
   const stats = mirrorMessages(cdb, items.concat(calls));
   let mx = cursors[key] || 0;
@@ -247,19 +253,22 @@ function sweepGroup(cdb, sdb, group, cursors, now, ranAt, nameMap, deep) {
       AND type IN ('incoming','outgoing')
       AND ${bound.clause}
     ORDER BY rowid ASC`).all([conv.id, ...bound.params]);
-  if (msgs.length === 0) return NOTHING;
 
   const speaker = (m) => {
     if (m.type === 'outgoing' || m.src === MY_SERVICE_ID) return 'Nathan';
     if (m.src === BOT_SERVICE_ID) return 'Janet';
     return nameMap.get(m.src) || 'Someone';
   };
+  // In a group the quoted author can be anyone, so resolve against the full map.
+  const nameFor = (sid) => (sid === MY_SERVICE_ID ? 'Nathan' : nameMap.get(sid) || null);
+  // Calls first (see sweepContact): a call-only window must still be archived.
+  const calls = callItems(sdb, [conv.id], bound, nameFor).map((it) => ({ ...it, slug: null, conversation: group.name }));
+  if (msgs.length === 0 && calls.length === 0) return NOTHING;
+
   const mids = msgs.map((m) => m.mid);
   const att = loadAttachments(sdb, msgs.filter((m) => m.hasAttachments).map((m) => m.mid));
   const prev = loadPreviews(sdb, mids);
   const quo = loadQuotes(sdb, mids);
-  // In a group the quoted author can be anyone, so resolve against the full map.
-  const nameFor = (sid) => (sid === MY_SERVICE_ID ? 'Nathan' : nameMap.get(sid) || null);
   const items = msgs.map((m) => ({
     id: m.rid,
     convId: conv.id,
@@ -277,7 +286,6 @@ function sweepGroup(cdb, sdb, group, cursors, now, ranAt, nameMap, deep) {
     type: m.type,
     enriched: Boolean(m.hasAttachments) || prev.has(m.mid) || quo.has(m.mid),
   }));
-  const calls = callItems(sdb, [conv.id], bound, nameFor).map((it) => ({ ...it, slug: null, conversation: group.name }));
   const stats = mirrorMessages(cdb, items.concat(calls));
   let mx = cursors[key] || 0;
   for (const m of msgs) if (m.rid > mx) mx = m.rid;
@@ -369,16 +377,23 @@ function runSweep(cdb, sdb, opts = {}) {
   // survivable. A single-contact sweep still reports it — it is a property of the
   // whole database, not of the contact.
   let reuse = null;
-  try {
-    const a = cdb.prepare('SELECT max(id) m FROM messages').get();
-    const s = sdb.prepare('SELECT max(rowid) m FROM messages').get([]);
-    if (a && s && a.m != null && s.m != null) {
-      // Synthetic ids live in a band far above any real rowid; they are the
-      // RESULT of reuse, not evidence of it, so they must not trip the test.
-      const realMax = cdb.prepare('SELECT max(id) m FROM messages WHERE id < ?').get(SYNTH_BAND).m;
-      if (realMax != null && realMax > s.m) reuse = { archiveMax: realMax, signalMax: s.m };
-    }
-  } catch { /* detector is advisory */ }
+  // Only meaningful on a PRIMARY device, where archive ids ARE the local Signal
+  // rowids. On a secondary device every self-swept id is rowid+ARCHIVE_ID_OFFSET
+  // (100M), always far above the local Signal max rowid, so the test would cry wolf
+  // on every sweep. The offset path has its own (sent_at, type) dedup, so the
+  // archive-id-vs-rowid comparison simply does not apply there.
+  if (!ARCHIVE_ID_OFFSET) {
+    try {
+      const a = cdb.prepare('SELECT max(id) m FROM messages').get();
+      const s = sdb.prepare('SELECT max(rowid) m FROM messages').get([]);
+      if (a && s && a.m != null && s.m != null) {
+        // Synthetic ids live in a band far above any real rowid; they are the
+        // RESULT of reuse, not evidence of it, so they must not trip the test.
+        const realMax = cdb.prepare('SELECT max(id) m FROM messages WHERE id < ?').get(SYNTH_BAND).m;
+        if (realMax != null && realMax > s.m) reuse = { archiveMax: realMax, signalMax: s.m };
+      }
+    } catch { /* detector is advisory */ }
+  }
 
   // A single-contact sweep must not stamp `ranAt`: the overlap floor is derived
   // from it, and moving it forward for everyone after sweeping one person would
