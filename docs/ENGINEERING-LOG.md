@@ -15,6 +15,37 @@ Newest first.
 
 ## 2026-08-23
 
+### DECISION — one uniform CLI contract for every scheduled model job
+After the compact-dry-ran-forever bug (below), standardized the three scheduled model scripts
+(`crm-daily.js`, `crm-todo-scan.js`, `crm-compact.js`) onto one contract so a timer can never
+again mismatch a script's argument quirks:
+
+1. **Real by default; `--dry-run` previews.** No mode flag means "do the real thing." `--dry-run`
+   is the only way to get a no-write, no-model preview. (Chosen over "explicit `--run`"; Nathan's
+   call.) `--write` is kept as a **silent no-op alias** so old invocations/docs don't break —
+   internally each script derives its apply flag as `!DRY_RUN`, so existing `if (write)` bodies
+   were left untouched.
+2. **One shared pause-gate.** `lib/run-toggles.paused(job, {dryRun, force})` and its companion
+   `pauseMessage(job)` are the ONE definition of "does this run pause?": pause iff a real
+   (non-dry-run), non-`--force` run whose UI toggle is off. All three scripts call it identically
+   at the top of `main()`. This kills the old per-script drift where compact's gate keyed off a
+   `wouldSpend` calc and only tripped under `--write`.
+3. **Sub-calls inherit the parent's authorization.** Ingest's internal Timeline step
+   (`crm-daily.js` → `crm-compact.js`) now passes `--force`, so it is gated only by the **ingest**
+   toggle, never re-gated by the **compact** toggle. The compact toggle governs only the
+   standalone weekly compact timer. Rule going forward: **a toggle gates the top-level scheduled
+   entrypoint; internal sub-calls are always forced.**
+4. **Every timer's ExecStart is now flag-free** (`node scripts/<job>.js`), differing only in
+   `OnCalendar` and script name. Adding a job = copy a unit, change two lines.
+
+### SURPRISE — two scheduled scripts were dry-run-by-default, so their timers did nothing
+When wiring the ingest/todo/compact timers, `crm-compact.js` and `crm-todo-scan.js` turned out to
+be **dry-run unless `--write`**, and — worse — their run-toggle pause gate *only fired under
+`--write`*. A timer running them bare would have dry-run forever: no work, no pause, no error, no
+sign anything was wrong. `crm-daily.js` was the opposite (writes by default). The inconsistency
+is the whole reason a timer's args had to be hand-matched per script. Fixed by the uniform
+contract above; verified each job now applies-by-default and pauses through the shared gate.
+
 ### DECISION — Pacific time is the master time, everywhere, always
 **America/Los_Angeles is the one and only clock for this project.** There is no second
 time zone anywhere — not UTC, not the machine's local time, not the viewer's. Every date and

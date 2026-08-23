@@ -37,7 +37,7 @@ button (scoped to the checked roster, or everyone).
 | **Sweep** | `crm-archive.js [--only <slug>]` | top of every hour | no | yes (no-op ticks hidden) |
 | **Deep sweep** | `crm-archive.js --deep` | daily 03:00 | no | yes |
 | **Ingest** | `crm-daily.js --only <slug>` (merge **+** that contact's Timeline) | manual (weekly when the AI task is on) | yes | yes (ingest + timeline rows) |
-| **Todo** | `crm-todo-scan.js --write` | top of every hour (after the sweep) | only when a "make sure" line matches (≈0.2×/mo) | yes (no-op ticks hidden) |
+| **Todo** | `crm-todo-scan.js` | top of every hour (after the sweep) | only when a "make sure" line matches (≈0.2×/mo) | yes (no-op ticks hidden) |
 | _(full run)_ | `crm-daily.js` | Monday 04:00 (task currently unregistered) | yes | yes |
 
 Ingest (`crm-daily --only`) now runs merge **and** that contact's Timeline
@@ -105,14 +105,15 @@ node scripts/crm-merge.js <slug> --dry-run  # print the argv it would run
 ### `crm-compact.js` — build & maintain the Timeline (model) — runs inside Ingest
 Builds each conversation's `## Timeline` and keeps it at decreasing resolution
 (Recent raw / Daily / Weekly / Older). One model call per aged-out day or week.
-Also folds group day-summaries into participant profiles. **Dry-run unless
-`--write`; backs up each file first.**
+Also folds group day-summaries into participant profiles. **Real by default;
+`--dry-run` previews. Backs up each file first.** (STANDARD CONTRACT — same
+shape as ingest/todo; see the engineering log.)
 ```
-node scripts/crm-compact.js                 # dry-run, all tracked contacts + groups
-node scripts/crm-compact.js --slug <slug>   # dry-run, one contact
-node scripts/crm-compact.js --group <slug>  # dry-run, one group
-node scripts/crm-compact.js --write         # apply
-node scripts/crm-compact.js --no-llm        # structural dry-run, skip summaries
+node scripts/crm-compact.js                 # apply (default), all tracked contacts + groups
+node scripts/crm-compact.js --dry-run       # preview only, no writes, no model
+node scripts/crm-compact.js --slug <slug>   # one contact
+node scripts/crm-compact.js --group <slug>  # one group
+node scripts/crm-compact.js --no-llm        # structural only, skip summaries
 ```
 
 ---
@@ -150,13 +151,14 @@ node scripts/crm-autopromote.js --write      # actually promote
 
 ### `crm-todo-scan.js` — cheap commitment capture (model only when regex fires)
 Reads `crm.db` directly and regex-scans for Nathan saying "make sure …"; the
-model is invoked only on a match (≈0.2×/month). Meant to run frequently. **Dry-run
-unless `--write`.** A trigger must be ≥ `CRM_TODO_SETTLE_MIN` minutes old (default 5)
-before it is extracted, so its discharge window can fill first — see the 2026-08-22
+model is invoked only on a match (≈0.2×/month). Meant to run frequently. **Real by
+default; `--dry-run` previews** (STANDARD CONTRACT — same shape as ingest/compact).
+A trigger must be ≥ `CRM_TODO_SETTLE_MIN` minutes old (default 5) before it is
+extracted, so its discharge window can fill first — see the 2026-08-22
 engineering-log entry.
 ```
-node scripts/crm-todo-scan.js               # scan + report, no writes
-node scripts/crm-todo-scan.js --write        # extract + insert, advance cursor
+node scripts/crm-todo-scan.js               # apply (default): extract + insert, advance cursor
+node scripts/crm-todo-scan.js --dry-run      # preview: scan + report only, no writes, no model
 node scripts/crm-todo-scan.js --since <id>   # rescan from an id, ignore the cursor
 ```
 

@@ -1,8 +1,8 @@
 'use strict';
 // crm-todo-scan.js — the frequent, nearly-free half of todo capture.
 //
-//   node scripts/crm-todo-scan.js                 # dry run: scan, report, no writes
-//   node scripts/crm-todo-scan.js --write         # extract + insert, advance cursor
+//   node scripts/crm-todo-scan.js                 # apply (default): extract + insert, advance cursor
+//   node scripts/crm-todo-scan.js --dry-run       # preview: scan + report only, no writes, no model
 //   node scripts/crm-todo-scan.js --since 90000   # rescan from an id, ignore the cursor
 //
 // WHY IT IS SEPARATE FROM crm-daily.js. Nathan: "dont want todo generation to run on a
@@ -82,12 +82,16 @@ function main() {
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (!a.startsWith('--')) continue;
-    if (['--write', '--allow-paid', '--verbose', '--force'].includes(a)) continue;
+    if (['--write', '--dry-run', '--allow-paid', '--verbose', '--force'].includes(a)) continue;
     if (['--since', '--slug', '--model'].includes(a)) { i += 1; continue; }
-    console.error(`unknown flag '${a}'\nknown: --write, --allow-paid, --verbose, --force, --since <id>, --slug <slug>, --model <m>`);
+    console.error(`unknown flag '${a}'\nknown: --dry-run, --allow-paid, --verbose, --force, --since <id>, --slug <slug>, --model <m>`);
     process.exit(2);
   }
-  const write = argv.includes('--write');
+  // STANDARD CONTRACT (see lib/run-toggles.paused): real by default, --dry-run previews.
+  // `--write` is the old spelling of "apply"; it is now the default, so it is accepted as a
+  // silent no-op. `write` is derived as !DRY_RUN so the apply/skip body below is unchanged.
+  const DRY_RUN = argv.includes('--dry-run');
+  const write = !DRY_RUN;
   const force = argv.includes('--force');
   // --model flag > web-UI 'todo' dropdown > CRM_TODO_MODEL env / default.
   const model = arg('--model', require('../lib/run-models').getModel('todo') || MODEL);
@@ -192,8 +196,8 @@ function main() {
   // of the `found` conversations — so they are re-extracted once it is switched
   // back on. A hand-started UI run passes --force and skips this. Dry runs (free)
   // fall through to the plan below.
-  if (write && !force && !require('../lib/run-toggles').isEnabled('todo')) {
-    console.log(`\ntodo capture is PAUSED via the web UI toggle — ${total} trigger(s) held, no model call (switch it back on, or pass --force).`);
+  if (require('../lib/run-toggles').paused('todo', { dryRun: DRY_RUN, force })) {
+    console.log(`\ntodo: PAUSED via the web UI toggle — ${total} trigger(s) held, no model call (enable it in the UI, or pass --force).`);
     saveState(state);
     recordTodoRun(startedAt, scanned, slugs.length, total, 0, model, []);
     return;
@@ -205,8 +209,8 @@ function main() {
     console.error('CRM_ALLOW_PAID=1 in the scheduled task environment.');
     process.exit(2);
   }
-  if (!write) {
-    console.log('\ndry run — re-run with --write to extract and insert');
+  if (DRY_RUN) {
+    console.log('\ndry run — re-run without --dry-run to extract and insert');
     return;
   }
 

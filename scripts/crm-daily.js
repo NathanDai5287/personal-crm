@@ -5,7 +5,7 @@
 //   2. crm-autopromote.js --write                          (non-fatal on failure)
 //   3. crm-refresh.js                                      (fatal if it throws)
 //   4. per-contact merge + CURSOR COMMIT (crash-safe, see below)
-//   5. crm-compact.js --write                               (non-fatal on failure)
+//   5. crm-compact.js --force (apply; forced = ingest's own Timeline sub-step)  (non-fatal)
 //   6. memory-commit.js "daily post-refresh"
 //   7. logs/last-run.json + logs/daily.log
 //   8. health warning if Signal Desktop looks closed
@@ -31,7 +31,7 @@
 //                                          # autopromote, which is inherently all-contact.
 //   node scripts/crm-daily.js --dry-run    # steps 1-3 + merge/cursor PLANNING only;
 //                                          # never invokes pi, never writes REFRESH_STATE,
-//                                          # never runs compact --write or the post-commit.
+//                                          # never applies compact or the post-commit.
 //                                          # DEVIATION: also runs autopromote WITHOUT --write
 //                                          # (its own dry-run) rather than --write, so a
 //                                          # --dry-run of the orchestrator never mutates
@@ -219,13 +219,13 @@ function loadRefreshState() {
 
 function main() {
   const startedAt = Date.now();
-  // RUN-TOGGLE PAUSE. A real (non-dry, non-forced) ingest is skipped when the
-  // web UI has paused it — the whole run spends money, so pausing short-circuits
-  // before the backup even. Cursors are untouched, so it resumes cleanly when
-  // switched back on. Dry-runs (free planning) and --force (a hand-started UI
-  // run) always proceed.
-  if (!DRY_RUN && !FORCE && !require('../lib/run-toggles').isEnabled('ingest')) {
-    console.log('crm-daily: ingest is PAUSED via the web UI toggle — skipping (switch it back on, or pass --force).');
+  // RUN-TOGGLE PAUSE — the ONE shared gate (lib/run-toggles.paused): a real
+  // (non-dry, non-forced) ingest is skipped when the UI has paused it, short-
+  // circuiting before the backup. Cursors are untouched, so it resumes cleanly.
+  // Dry-runs (free planning) and --force (a hand-started UI run) proceed.
+  const RT = require('../lib/run-toggles');
+  if (RT.paused('ingest', { dryRun: DRY_RUN, force: FORCE })) {
+    console.log(RT.pauseMessage('ingest'));
     return;
   }
   // Same formula as the run-log id below, so a chunk commit's `Run:` trailer
@@ -517,7 +517,10 @@ function main() {
     // history (crm-compact --backfill) — the flag for a post-wipe re-backfill,
     // so profile AND timeline regenerate in the same pass. Explicit only; a
     // normal nightly run must never re-walk history.
-    const compactArgs = ONLY ? ['--write', '--slug', ONLY] : ['--write'];
+    // --force: this is ingest's own Timeline sub-step (apply is the default now), not an
+    // independent scheduled compact, so it inherits ingest's authorization and is NOT
+    // re-gated by the compact toggle — that toggle pauses only the standalone weekly compact.
+    const compactArgs = ONLY ? ['--force', '--slug', ONLY] : ['--force'];
     // Timeline runs on the SAME model as the merge for this run (see MERGE_MODEL_EFF).
     compactArgs.push('--model', MERGE_MODEL_EFF);
     if (TIMELINE_BACKFILL) compactArgs.push('--backfill');

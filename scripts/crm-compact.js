@@ -14,15 +14,17 @@
 //
 // The Signal DB stores every message permanently, so compaction is always recoverable.
 //
-// SAFE BY DEFAULT — dry-run unless --write. Backs up each file before writing. First run
-// only sets up structure (no re-summarizing history); the gradient builds forward from now.
+// STANDARD CONTRACT — real by default; --dry-run previews (no writes, no model). Backs up each
+// file before writing. First run only sets up structure (no re-summarizing history); the
+// gradient builds forward from now. (`--write` is the old spelling of "apply", now the default,
+// accepted as a silent no-op.)
 //
 // Usage:
-//   node crm-compact.js                       # dry-run, all tracked contacts + groups
-//   node crm-compact.js --slug katia-jacoby   # dry-run, one contact
-//   node crm-compact.js --group third-woman   # dry-run, one group
-//   node crm-compact.js --write               # apply (backs up first)
-//   node crm-compact.js --no-llm              # structural dry-run, skip summaries
+//   node crm-compact.js                       # apply (default), all tracked contacts + groups
+//   node crm-compact.js --dry-run             # preview only, no writes, no model
+//   node crm-compact.js --slug katia-jacoby   # one contact
+//   node crm-compact.js --group third-woman   # one group
+//   node crm-compact.js --no-llm              # structural only, skip summaries
 
 const fs = require("fs");
 const path = require("path");
@@ -62,7 +64,10 @@ const RAW_MAX_MSGS = 150; // cap on verbatim lines kept in-profile (full history
 const GROUP_ACTIVITY_MAX = 40; // cap on folded group-activity lines per contact
 
 const args = process.argv.slice(2);
-const WRITE = args.includes("--write");
+// STANDARD CONTRACT (see lib/run-toggles.paused): real by default; --dry-run previews.
+// `--write` is the old spelling of "apply" and is now the default, so it is a silent no-op.
+const DRY_RUN = args.includes("--dry-run");
+const WRITE = !DRY_RUN;
 const NO_LLM = args.includes("--no-llm");
 // --force bypasses the web-UI run-toggle pause (a hand-started run always proceeds).
 const FORCE = args.includes("--force");
@@ -566,13 +571,14 @@ function compactGroup(cdb, sdb, group, state, now) {
 
 function main() {
   const now = Date.now();
-  // RUN-TOGGLE PAUSE. Only a WRITE run that would actually call a paid model is
-  // gated — a dry run (free), --no-llm (free), a free subscription model, or
-  // --force (a hand-started UI run) all proceed. Cursors/state are untouched, so
-  // it resumes when switched back on.
-  const wouldSpend = WRITE && !NO_LLM && !require("../lib/cost").isFree(COMPACT_MODEL_EFF);
-  if (wouldSpend && !FORCE && !require("../lib/run-toggles").isEnabled("compact")) {
-    console.log("crm-compact: Timeline compaction is PAUSED via the web UI toggle — skipping (switch it back on, or pass --force).");
+  // RUN-TOGGLE PAUSE — the ONE shared gate (lib/run-toggles.paused): a real
+  // (non-dry-run) automatic run whose toggle is off is skipped; --dry-run and
+  // --force fall through. Cursors/state are untouched, so it resumes when
+  // switched back on. Ingest's internal Timeline call passes --force, so this
+  // gate governs only the standalone weekly compact — not ingest's sub-step.
+  const RT = require("../lib/run-toggles");
+  if (RT.paused("compact", { dryRun: DRY_RUN, force: FORCE })) {
+    console.log(RT.pauseMessage("compact"));
     return;
   }
   let state = {};
