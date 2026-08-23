@@ -2733,6 +2733,7 @@ const TODO_JS = path.join(ROOT, 'scripts', 'crm-todo-scan.js');
 // an Origin whose host matches Host; absent both, allow (a no-JS same-origin form
 // post or a local CLI probe, still gated by basic auth).
 function firstPartyOnly(req) {
+  const sfs = (req.headers['sec-fetch-site'] || '').toLowerCase();
   if (sfs) return sfs === 'same-origin' || sfs === 'same-site';
   const origin = req.headers.origin;
   if (!origin) return true;
