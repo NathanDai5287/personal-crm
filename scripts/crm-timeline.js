@@ -478,9 +478,17 @@ function buildConversationTimeline({ cdb, convs, who, file, stateKey, state, now
     ? Math.min(historyFrom != null ? historyFrom : now, prevSince != null ? prevSince : now)
     : since;
 
-  // Merge folded group-activity lines (newest first, capped).
-  if (includeGroup && foldLines && foldLines.length) {
-    t.group = [...foldLines, ...t.group].slice(0, GROUP_ACTIVITY_MAX);
+  // Merge folded group-activity lines (newest first, capped). When the cap drops
+  // lines, leave a marker so the truncation is visible (the fuller history lives in
+  // each group's own timeline). Strip any prior marker first so it can't accumulate.
+  const GROUP_TRUNC = 'older group-activity lines omitted — see the group’s own timeline';
+  if (includeGroup) {
+    t.group = t.group.filter((l) => !l.includes(GROUP_TRUNC));
+    const combined = foldLines && foldLines.length ? [...foldLines, ...t.group] : t.group;
+    t.group = combined.slice(0, GROUP_ACTIVITY_MAX);
+    if (combined.length > GROUP_ACTIVITY_MAX) {
+      t.group.push(`- _(${combined.length - GROUP_ACTIVITY_MAX} ${GROUP_TRUNC})_`);
+    }
   }
 
   const newTimeline = renderTimeline(rawLines, t, { includeGroup });

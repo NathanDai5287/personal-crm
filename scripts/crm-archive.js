@@ -171,7 +171,7 @@ function callItems(sdb, convIds, bound, nameFor) {
   }
   return items;
 }
-function sweepContact(cdb, sdb, slug, cursors, now, ranAt, nicks, deep) {
+function sweepContact(cdb, sdb, slug, cursors, now, ranAt, nicks, deep, nameMap) {
   const rel = `data/contacts/${slug}.md`;
   const row = cdb.prepare('SELECT signal_id, name FROM contacts WHERE file_path = ?').get(rel);
   if (!row || !row.signal_id) return NOTHING;
@@ -187,10 +187,13 @@ function sweepContact(cdb, sdb, slug, cursors, now, ranAt, nicks, deep) {
   const display = (nicks[row.signal_id] && nicks[row.signal_id].name) || row.name;
   const first = display.split(' ')[0];
   const speaker = (m) => {
-    if (m.src === MY_SERVICE_ID) return 'Nathan';
+    if (m.type === 'outgoing' || m.src === MY_SERVICE_ID) return 'Nathan';
     if (m.src === BOT_SERVICE_ID) return 'Janet';
     if (m.src === row.signal_id) return first;
-    return m.type === 'outgoing' ? 'Nathan' : first;
+    // A THIRD party speaking in one of this contact's multi-groups. Resolve their
+    // real name from the shared map — NOT this contact's name (that froze other
+    // people's words under the contact in the archive). 'Someone' only if unknown.
+    return (m.src && nameMap.get(m.src)) || 'Someone';
   };
   // ENRICHMENT happens once, HERE. Everything downstream reads the archive, so
   // a photo becomes "[photo]", a reply carries what it answers, and a bare URL
@@ -199,7 +202,7 @@ function sweepContact(cdb, sdb, slug, cursors, now, ranAt, nicks, deep) {
   const att = loadAttachments(sdb, msgs.filter((m) => m.hasAttachments).map((m) => m.mid));
   const prev = loadPreviews(sdb, mids);
   const quo = loadQuotes(sdb, mids);
-  const nameFor = (sid) => (sid === MY_SERVICE_ID ? 'Nathan' : (sid === BOT_SERVICE_ID ? 'Janet' : (sid === row.signal_id ? first : null)));
+  const nameFor = (sid) => (sid === MY_SERVICE_ID ? 'Nathan' : (sid === BOT_SERVICE_ID ? 'Janet' : (sid === row.signal_id ? first : (nameMap.get(sid) || null))));
   const items = msgs.map((m) => ({
     id: m.rid,
     convId: m.cid,
@@ -350,9 +353,12 @@ function runSweep(cdb, sdb, opts = {}) {
     }
   }
 
-  for (const slug of slugs) tally(slug, sweepContact(cdb, sdb, slug, cursors, now, ranAt, nicks, deep));
+  // Built once and shared by BOTH sweep paths. The per-contact sweep needs it so a
+  // THIRD party in one of the contact's multi-groups is labeled with their own
+  // name, not the contact's (the group speaker-attribution bug).
+  const nameMap = buildNameMap(sdb, nicks);
+  for (const slug of slugs) tally(slug, sweepContact(cdb, sdb, slug, cursors, now, ranAt, nicks, deep, nameMap));
   if (groups.length) {
-    const nameMap = buildNameMap(sdb, nicks);
     for (const g of groups) tally(`group:${g.slug}`, sweepGroup(cdb, sdb, g, cursors, now, ranAt, nameMap, deep));
   }
 
