@@ -44,7 +44,7 @@ const { redact } = require("../lib/redact");
 // and weekStart/nextWeekStart replace isoWeekKey's UTC-ISO week with the pipeline's own
 // Monday-04:00-Pacific week boundary, so the Timeline's tiers bucket the same way every
 // other ledger in the system does.
-const { dateKey, fmtLocal, weekStart, nextWeekStart } = require("../lib/weeks");
+const { dateKey, fmtLocal, weekStart, nextWeekStart, dayStart } = require("../lib/weeks");
 const {
   DATA_DIR,
   TRACKED,
@@ -62,6 +62,7 @@ const {
 } = require("../lib/config");
 
 const DAY = 86_400_000;
+const HOUR = 3_600_000;
 const RAW_DAYS = 7;
 const DAILY_UNTIL_DAYS = 21;
 const WEEKLY_UNTIL_DAYS = 70;
@@ -338,6 +339,32 @@ function firstArchivedMs(cdb, convs) {
   return first;
 }
 
+// DST-safe Pacific-day stepping. lib/weeks has no prev/next-day primitive, but
+// dayStart() re-anchors ANY instant to its 04:00-Pacific day start, so nudging by
+// more than the ±1h DST shift and re-anchoring steps whole Pacific days reliably.
+const prevDayStart = (ds) => dayStart(ds - 2 * HOUR);
+const nextDayStart = (ds) => dayStart(ds + 26 * HOUR);
+
+// The 04:00-Pacific day starts for the daily tier window, index i = i days before
+// today (today = index 0). ANCHORED TO THE PACIFIC CALENDAR, not a rolling 24h
+// window off Date.now() — so a day's key is the same whether the run fires at 04:00
+// or 15:00, and it never skips/collides a date across a DST transition. This is the
+// fix for the old `now - (d+1)*DAY` keying.
+function dayStartsForDaily(now) {
+  const out = [dayStart(now)];
+  for (let i = 1; i < DAILY_UNTIL_DAYS; i++) out.push(prevDayStart(out[i - 1]));
+  return out;
+}
+
+// The Monday-04:00-Pacific week key a daily key ("YYYY-MM-DD") belongs to. Uses a
+// mid-day instant (far from any DST edge) so weekStart lands on the correct Monday
+// regardless of that date's offset. Lets the daily-deletion rule find a daily's
+// week without threading the timestamp through the parsed profile.
+function weekKeyOfDay(dayKey) {
+  const [y, mo, d] = dayKey.split("-").map(Number);
+  return dateKey(weekStart(Date.UTC(y, mo - 1, d, 19, 0)));
+}
+
 // Mutates `t` (daily/weekly/older maps). Returns { rawLines, summaries,
 // attempts, newDailies, historyFrom, foldedOut }. `foldedTo` is the era-fold
 // watermark from state: every weekly key ≤ it has already been distilled.
@@ -352,13 +379,17 @@ function buildConvTiers(cdb, convs, who, since, now, t, foldedTo) {
   let summaries = 0;
   let attempts = 0; // model calls this run WOULD make — the cost preview under --no-llm
   const newDailies = new Map();
-  // Daily: ensure a line for each day in [RAW_DAYS, DAILY_UNTIL) that aged out after tiering started.
+  // Daily: ensure a line for each 04:00-Pacific day in [RAW_DAYS, DAILY_UNTIL) that
+  // aged out after tiering started. Days are anchored to the Pacific calendar (see
+  // dayStartsForDaily) so the key and the summarized window match and are stable
+  // across run time-of-day and DST.
+  const days = dayStartsForDaily(now);
   for (let d = RAW_DAYS; d < DAILY_UNTIL_DAYS; d++) {
-    const dayStart = now - (d + 1) * DAY;
-    if (dayStart < since) continue;
-    const key = dateKey(dayStart + DAY / 2);
-    if (t.daily.has(key) || t.weekly.has(dateKey(weekStart(dayStart + DAY / 2)))) continue;
-    const lines = messagesBetween(cdb, convs, dayStart, dayStart + DAY).lines;
+    const ds = days[d];
+    if (ds < since) continue;
+    const key = dateKey(ds);
+    if (t.daily.has(key) || t.weekly.has(dateKey(weekStart(ds)))) continue;
+    const lines = messagesBetween(cdb, convs, ds, nextDayStart(ds)).lines;
     if (lines.length === 0) continue;
     attempts++;
     const s = summarize(who, key, lines, "daily");
@@ -409,12 +440,14 @@ function buildConvTiers(cdb, convs, who, since, now, t, foldedTo) {
     t.weekly.set(key, wsum);
     summaries++;
   }
-  // Dailies survive until their WHOLE week has rolled up: the cutoff is the start
-  // of the week containing dailyBoundary (the first week the weekly tier does not
-  // own yet), not the raw 21-day line — so the daily tier can briefly hold up to
-  // ~27 days, and nothing falls between the tiers.
-  const dailyCutoff = dateKey(weekStart(dailyBoundary));
-  for (const k of [...t.daily.keys()]) if (k < dailyCutoff) t.daily.delete(k);
+  // Delete a daily ONLY once its week actually has a weekly summary. The old rule
+  // deleted any daily older than the current weekly window regardless of whether
+  // that week was ever summarized — so a first-run straddle week (skipped by the
+  // weekly loop's `wStart < since` guard) or a chronically-failing weekly lost its
+  // dailies with nowhere for the content to go: a permanent tier hole. Keeping the
+  // dailies of an un-summarized week preserves that content until (if ever) its
+  // weekly lands; a summarized week's dailies are redundant and dropped.
+  for (const k of [...t.daily.keys()]) if (t.weekly.has(weekKeyOfDay(k))) t.daily.delete(k);
 
   // ---- era fold: weeks aged past the weekly window distill into their
   // season's note in the Older tier. Weekly lines are KEPT (Nathan's rule:
@@ -582,6 +615,26 @@ function buildGroupTimeline(cdb, sdb, group, state, now) {
   return { slug: group.slug, name: group.name, participants, ...r };
 }
 
+// The tracked MULTI-groups a contact belongs to. A per-contact run (--slug, and
+// the web "Ingest", which passes --slug) processes these in Phase 1 so the
+// contact's "Group activity" fold is refreshed — otherwise it only ever updated on
+// a full all-contacts run. Cost-neutral: a group day is summarized once (idempotent
+// keys), so whoever ingests first that week pays and everyone else skips. Bi-groups
+// are excluded: they don't fold (their content is already in the contact's own
+// timeline), so processing them in a per-contact run would be pure overhead.
+function groupsForContact(sdb, cdb, slug, allGroups) {
+  const rel = `data/contacts/${slug}.md`;
+  const row = cdb.prepare("SELECT signal_id FROM contacts WHERE file_path = ?").get(rel);
+  if (!row || !row.signal_id) return [];
+  const sources = resolveSources(sdb, row.signal_id);
+  const convIds = new Set(sources.multiGroupConvIds);
+  if (!convIds.size) return [];
+  return allGroups.filter((g) => {
+    const conv = sdb.prepare("SELECT id FROM conversations WHERE groupId = ? LIMIT 1").get([g.groupId]);
+    return conv && convIds.has(conv.id);
+  });
+}
+
 // ---- main --------------------------------------------------------------------
 
 function main() {
@@ -614,7 +667,13 @@ function main() {
       return [];
     }
   })();
-  const groups = groupArg ? allGroups.filter((g) => g.slug === groupArg) : slugArg ? [] : allGroups;
+  // A --slug run also processes that contact's multi-groups (Phase 1) so their
+  // "Group activity" fold stays current — not only on a full all-contacts run.
+  const groups = groupArg
+    ? allGroups.filter((g) => g.slug === groupArg)
+    : slugArg
+      ? groupsForContact(sdb, cdb, slugArg, allGroups)
+      : allGroups;
   const slugs = groupArg ? [] : slugArg ? [slugArg] : JSON.parse(fs.readFileSync(TRACKED, "utf8")).slugs;
 
   console.log(`crm-timeline: ${WRITE ? "WRITE" : "DRY-RUN"}${NO_LLM ? " | --no-llm" : ""}${BACKFILL ? " | BACKFILL (whole history)" : ""} | ${slugs.length} contact(s), ${groups.length} group(s)\n`);
@@ -729,6 +788,10 @@ function printTimeline(next) {
   console.log(m ? m[0] : next);
   console.log("\n----- end -----");
 }
+
+// Pure tiering helpers exposed for evals/timeline-tiers-selftest.js. Requiring this
+// module does not run main() (guarded below), so the test can import these directly.
+module.exports = { dayStartsForDaily, weekKeyOfDay, prevDayStart, nextDayStart };
 
 if (require.main === module) {
   // Cross-process pipeline lock (see lib/pipeline-lock.js). The Timeline step
