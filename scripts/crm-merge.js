@@ -48,8 +48,8 @@ const { detect, redact } = require('../lib/redact');
 
 // Bucket a failed pi run so the retry loop knows what to do:
 //   content_filter — a provider rejected the prompt on content grounds; retrying
-//                    verbatim is pointless, but masking the trigger and retrying is
-//                    not (see the auto-remediation in mergeContact).
+//                    verbatim is pointless, so the contact is held for manual review
+//                    (see the content_filter branch in mergeContact + lib/censor-hold).
 //   auth           — bad/absent credentials; retrying will never help. Surface now.
 //   transient      — rate limit, 5xx, timeout, socket/DNS. Back off and retry.
 //   unknown        — anything else; treated as transient (bounded retries).
