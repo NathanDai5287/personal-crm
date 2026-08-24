@@ -618,7 +618,10 @@ function contactList() {
 // profile's. Suggestions come from lib/nicknames (assigned + unassigned).
 function inboxData(list) {
   const nameBySlug = new Map(list.map((c) => [c.slug, c.name]));
-  const contacts = list.map((c) => ({ slug: c.slug, name: c.name })).sort((a, b) => a.name.localeCompare(b.name));
+  // Nathan (the owner) is a valid assign target too — a suggestion like "wayne" is his.
+  // He's not a tracked contact, so add him explicitly at the top of the picker (P1 #5).
+  const contacts = [{ slug: OWNER_SLUG, name: 'Nathan (me)' },
+    ...list.map((c) => ({ slug: c.slug, name: c.name })).sort((a, b) => a.name.localeCompare(b.name))];
   const dates = msgDates();
   try {
     const now = Date.now();
@@ -649,7 +652,10 @@ function applyNickInbox(action, payload) {
   if (action === 'assign') {
     const slug = String(payload.slug || '').trim();
     if (!isSafeSlug(slug)) return { ok: false, status: 400, error: 'bad contact' };
-    try { fs.readFileSync(path.posix.join(CONTACTS_DIR, `${slug}.md`), 'utf8'); } catch { return { ok: false, status: 404, error: 'no such contact' }; }
+    // The owner has no contact file; every other slug must be a real contact.
+    if (slug !== OWNER_SLUG) {
+      try { fs.readFileSync(path.posix.join(CONTACTS_DIR, `${slug}.md`), 'utf8'); } catch { return { ok: false, status: 404, error: 'no such contact' }; }
+    }
     return P.assignNickname(id, slug) ? { ok: true } : { ok: false, status: 404, error: 'that suggestion no longer exists — reload' };
   }
   return { ok: false, status: 400, error: 'unknown action' };

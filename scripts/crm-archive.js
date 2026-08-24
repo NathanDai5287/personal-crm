@@ -40,11 +40,12 @@ const { mirrorMessages, ensureMessagesTable, SYNTH_BAND } = require('../lib/arch
 const { resolveSources, buildMessageQuery } = require('../lib/sources');
 const M = require('../lib/media');
 
-// Downloaded image/audio attachments carry a plaintextHash; they become OCR/STT
-// work. `ocr` for images, `stt` for audio (voice notes).
-const MEDIA_CT = /^(image|audio)\//i;
+// Downloaded image/audio/video attachments carry a plaintextHash; they become OCR/STT
+// work. `ocr` for images; `stt` for audio (voice notes) AND video — a video's audio
+// track is transcribed (ffmpeg pulls it out before whisper).
+const MEDIA_CT = /^(image|audio|video)\//i;
 const mediaAtts = (list) => (list || []).filter((a) => a.path && a.plaintextHash && MEDIA_CT.test(a.contentType || ''));
-const mediaKind = (ct) => (/^audio\//i.test(ct || '') ? 'stt' : 'ocr');
+const mediaKind = (ct) => (/^(audio|video)\//i.test(ct || '') ? 'stt' : 'ocr');
 function enqueueMedia(cdb, entries) {
   if (!entries || !entries.length) return;
   M.ensureMediaTable(cdb);

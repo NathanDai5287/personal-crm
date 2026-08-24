@@ -22,13 +22,39 @@ const path = require('path');
 const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 const { openCrmDb, openSignalDb } = require('../lib/signal-db');
-const { TESSERACT_BIN, FFMPEG_BIN, WHISPER_CLI, WHISPER_MODEL } = require('../lib/config');
+const { TESSERACT_BIN, FFMPEG_BIN, WHISPER_CLI, WHISPER_MODEL, DATA_DIR } = require('../lib/config');
 const { decryptableByHash, decryptRow } = require('../lib/signal-attachments');
 const M = require('../lib/media');
 
 const args = process.argv.slice(2);
 const has = (f) => args.includes(f);
 const argVal = (f, d) => { const i = args.indexOf(f); return i !== -1 && args[i + 1] ? args[i + 1] : d; };
+
+// SINGLETON LOCK. Every full sweep fire-and-forgets a worker; without this, a slow
+// drain (hundreds of items) would have overlapping workers decrypt/OCR the same rows
+// and thrash this modest CPU — the "single worker" the comments assumed but never
+// enforced. A pidfile with O_EXCL; a dead holder's lock is stolen, a live one makes
+// this process exit quietly. Released on exit.
+const WORKER_LOCK = path.join(DATA_DIR, 'media-worker.lock');
+function pidAlive(pid) { if (!Number.isInteger(pid)) return false; try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } }
+function acquireWorkerLock() {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const fd = fs.openSync(WORKER_LOCK, 'wx');
+      fs.writeSync(fd, String(process.pid));
+      fs.closeSync(fd);
+      const release = () => { try { if (Number(fs.readFileSync(WORKER_LOCK, 'utf8')) === process.pid) fs.unlinkSync(WORKER_LOCK); } catch { /* gone */ } };
+      process.on('exit', release);
+      return true;
+    } catch (e) {
+      if (e.code !== 'EEXIST') throw e;
+      let holder = 0; try { holder = Number(fs.readFileSync(WORKER_LOCK, 'utf8')); } catch { /* unreadable */ }
+      if (pidAlive(holder)) return false;                 // a live worker is draining — defer to it
+      try { fs.unlinkSync(WORKER_LOCK); } catch { /* raced */ } // stale (dead holder) — steal and retry
+    }
+  }
+  return false;
+}
 
 try { os.setPriority(19); } catch { /* best-effort renice to the floor */ }
 
@@ -39,12 +65,21 @@ function have(cmd, probe) {
   try { execFileSync(cmd, probe, { stdio: 'ignore', timeout: 15_000 }); return true; } catch { return false; }
 }
 const ocrOk = () => have(TESSERACT, ['--version']);
-const sttOk = () => Boolean(WHISPER_CLI) && fs.existsSync(WHISPER_CLI)
-  && Boolean(WHISPER_MODEL) && fs.existsSync(WHISPER_MODEL) && have(FFMPEG, ['-version']);
+// EXECUTABLE + non-empty, not merely present (P4 #5): a half-built / 0-byte whisper-cli
+// passed existsSync and then sent every audio row to a terminal error.
+function usableBin(p) { try { fs.accessSync(p, fs.constants.X_OK); return fs.statSync(p).size > 0; } catch { return false; } }
+function nonEmpty(p) { try { return fs.statSync(p).size > 0; } catch { return false; } }
+const sttOk = () => Boolean(WHISPER_CLI) && usableBin(WHISPER_CLI)
+  && Boolean(WHISPER_MODEL) && nonEmpty(WHISPER_MODEL) && have(FFMPEG, ['-version']);
+// Skip audio longer than this (P4 #6): a very long memo would burn the whole whisper
+// timeout to a terminal error and stage a huge WAV in /tmp. Override CRM_STT_MAX_SEC.
+const STT_MAX_SEC = Number(process.env.CRM_STT_MAX_SEC) || 1200;
 
 const EXT = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp', 'image/gif': '.gif',
   'image/bmp': '.bmp', 'image/tiff': '.tiff', 'audio/mp4': '.m4a', 'audio/aac': '.aac',
-  'audio/mpeg': '.mp3', 'audio/ogg': '.ogg', 'audio/webm': '.webm', 'audio/wav': '.wav' };
+  'audio/mpeg': '.mp3', 'audio/ogg': '.ogg', 'audio/webm': '.webm', 'audio/wav': '.wav',
+  'video/mp4': '.mp4', 'video/quicktime': '.mov', 'video/webm': '.webm',
+  'video/x-matroska': '.mkv', 'video/3gpp': '.3gp', 'video/mpeg': '.mpeg' };
 const extFor = (ct) => EXT[(ct || '').toLowerCase()] || '.bin';
 
 function runOcr(file) {
@@ -74,11 +109,11 @@ function enqueueExisting(cdb, sdb) {
     `SELECT DISTINCT plaintextHash AS hash, contentType FROM message_attachments
       WHERE path IS NOT NULL AND localKey IS NOT NULL AND plaintextHash IS NOT NULL
         AND attachmentType = 'attachment'
-        AND (contentType LIKE 'image/%' OR contentType LIKE 'audio/%')`,
+        AND (contentType LIKE 'image/%' OR contentType LIKE 'audio/%' OR contentType LIKE 'video/%')`,
   ).all();
   let n = 0;
   for (const r of rows) {
-    const kind = r.contentType.startsWith('audio/') ? 'stt' : 'ocr';
+    const kind = (r.contentType.startsWith('audio/') || r.contentType.startsWith('video/')) ? 'stt' : 'ocr';
     if (M.enqueue(cdb, { hash: r.hash, kind, contentType: r.contentType })) n += 1;
   }
   return { scanned: rows.length, added: n };
@@ -92,6 +127,13 @@ function processOne(cdb, sdb, kinds, tmpDir) {
   try {
     const row = decryptableByHash(sdb, claim.hash);
     if (!row) { M.setSkip(cdb, claim.hash, 'attachment no longer on disk'); return true; }
+    // Duration cap (P4 #6): a very long clip would burn the whole whisper timeout and
+    // stage a huge WAV. Skip it rather than churn to a terminal error.
+    if (claim.kind === 'stt' && row.duration != null && row.duration > STT_MAX_SEC) {
+      M.setSkip(cdb, claim.hash, `too long (${Math.round(row.duration)}s > ${STT_MAX_SEC}s)`);
+      console.log(`  ${claim.kind} ${claim.hash.slice(0, 12)}… -> skipped (too long)`);
+      return true;
+    }
     const buf = decryptRow(row);
     tmp = path.join(tmpDir, `${crypto.randomBytes(8).toString('hex')}${extFor(claim.content_type)}`);
     fs.writeFileSync(tmp, buf);
@@ -113,6 +155,10 @@ function main() {
   M.ensureMediaTable(cdb);
 
   if (has('--status')) { console.log('media_text:', JSON.stringify(M.counts(cdb))); cdb.close(); return; }
+
+  // Singleton: if another worker is already draining, exit quietly (--status above is
+  // exempt — it's read-only). The sweep spawns us fire-and-forget, so this is normal.
+  if (!acquireWorkerLock()) { console.log('media worker: another instance is running — exiting.'); cdb.close(); return; }
 
   const sdb = openSignalDb();
   let kinds = [];

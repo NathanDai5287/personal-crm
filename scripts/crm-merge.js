@@ -309,7 +309,18 @@ function mergeContact(slug, opts = {}) {
         // filters against the per-contact denylist, so re-storing across a retry is
         // free. Best-effort: a parse/store failure must never fail a merge.
         let nicksStored = 0;
-        if (reply) { try { nicksStored = storeNicknameProposals(slug, reply, { resolve: nickResolver().resolve }); } catch { /* non-fatal telemetry */ } }
+        if (reply) {
+          try {
+            // The ids that ACTUALLY appear in this chunk's ledger — a nickname cite
+            // outside this set is a hallucination and is dropped (membership check).
+            let validIds = null;
+            try {
+              const led = fs.readFileSync(path.join(cwd, 'data', 'contacts', '_refresh', `${slug}.new.txt`), 'utf8');
+              validIds = new Set([...led.matchAll(/⟨m(\d+)⟩/g)].map((m) => Number(m[1])));
+            } catch { /* no ledger — skip membership, still parses/dedups */ }
+            nicksStored = storeNicknameProposals(slug, reply, { resolve: nickResolver().resolve, validIds });
+          } catch { /* non-fatal telemetry */ }
+        }
         console.log(`crm-merge: ${slug}: ok${costUsd != null ? ` ($${costUsd.toFixed(4)})` : ''}${nicksStored ? ` (+${nicksStored} nickname${nicksStored === 1 ? '' : 's'})` : ''}${attempt > 1 ? ` (attempt ${attempt})` : ''}`);
         return { ok: true, output, costUsd, attempts: attempt, nicksStored, lastContactFixed: fixed || undefined };
       } catch (e) {
