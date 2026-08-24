@@ -32,8 +32,7 @@ const { CRM_DB, DATA_DIR, TRACKED, ROOT } = require('../lib/config');
 const TRIGGER = require('../lib/task-trigger');
 const TASKS = require('../lib/tasks');
 const { extractFor } = require('./crm-tasks');
-const { redact } = require('../lib/redact');
-const { fmtLocal } = require('../lib/weeks');
+const { renderedBody, formatLine, forModel } = require('../lib/message-context');
 
 const STATE = path.posix.join(DATA_DIR, 'crm-todo-state.json');
 const MODEL = process.env.CRM_TODO_MODEL || 'moonshotai/kimi-k3';
@@ -61,12 +60,14 @@ function saveState(s) {
   fs.renameSync(tmp, STATE);
 }
 
-// Same shape crm-refresh writes, because lib/task-trigger.js parses that format and the
-// model's prompt documents it. Timestamps are Pacific (lib/weeks.js fmtLocal, computed via
-// Intl, not the host clock), matching every other ledger in the system regardless of the
-// machine's own timezone.
-function renderLedger(rows) {
-  return rows.map((m) => `[${fmtLocal(m.sent_at)}] ⟨m${m.id}⟩ ${m.sender}: ${redact(m.body)}`).join('\n');
+// Same shape crm-refresh writes (lib/task-trigger.js parses it and the model's prompt
+// documents it). RENDERED (Layer 2: body + OCR/STT fold via lib/message-context) and
+// censored at egress (forModel) — this ledger IS handed to the extraction model, so it
+// should see the same Layer 2 every model sees. The trigger stays typed-only regardless:
+// task-trigger.ownWords strips the fold markers before matching, so a "make sure" in a
+// transcript never fires. Timestamps are Pacific (Intl, not the host clock).
+function renderLedger(cdb, rows) {
+  return forModel(rows.map((m) => formatLine({ sentAt: m.sent_at, rid: m.id, sender: m.sender, body: renderedBody(cdb, m) })).join('\n'));
 }
 
 function contactsToScan(db) {
@@ -119,13 +120,13 @@ function main() {
     const maxRow = db.prepare('SELECT MAX(id) hi FROM messages WHERE contact_slug = ?').get(slug);
     if (!maxRow || !maxRow.hi || maxRow.hi <= cursor) continue;
     const rows = db.prepare(
-      `SELECT id, sent_at, sender, body FROM messages
+      `SELECT id, sent_at, sender, body, att_hashes FROM messages
        WHERE contact_slug = ? AND id > ? AND body IS NOT NULL AND TRIM(body) <> '' ORDER BY id`,
     ).all(slug, Math.max(0, cursor - CONTEXT_LOOKBACK));
     if (!rows.length) continue;
     scanned += rows.filter((r) => r.id > cursor).length;
 
-    const ledger = renderLedger(rows);
+    const ledger = renderLedger(db, rows);
     const res = TRIGGER.findTriggers(ledger);
     if (!state.cursors[slug] && sinceOverride == null) {
       // No cursor for this contact yet: adopt the current head rather than treating all of
@@ -160,7 +161,7 @@ function main() {
       nearMisses.push({ slug, ...nm, at: row ? row.sent_at : 0 });
     }
     if (ripe.length) {
-      const capped = safeHi >= maxRow.hi ? ledger : renderLedger(rows.filter((r) => r.id <= safeHi));
+      const capped = safeHi >= maxRow.hi ? ledger : renderLedger(db, rows.filter((r) => r.id <= safeHi));
       found.push({ slug, ledger: capped, windows: ripe, hi: safeHi });
     } else if (write) {
       state.cursors[slug] = safeHi;   // nothing ripe; advance only past settled ground

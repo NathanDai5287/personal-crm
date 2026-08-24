@@ -26,6 +26,8 @@ const { estIngestFromRows, isFree, fmtUsd } = require('../lib/cost');
 const { dateKey: ptDateKey, fmtLocal: ptLocal, weekStart, nextWeekStart, nextPacificDaily } = require('../lib/weeks');
 const { resolveSources, buildMessageQuery, buildArchiveQuery } = require('../lib/sources');
 const { validateCitations, ensureMessagesTable } = require('../lib/archive');
+const { renderedBody } = require('../lib/message-context');
+const { decryptByHash } = require('../lib/signal-attachments');
 const TASKS = require('../lib/tasks');
 const P = require('../lib/nicknames');
 const RUN_TOGGLES = require('../lib/run-toggles');
@@ -779,15 +781,26 @@ function applyNickEdit(slug, action, payload) {
 // `hitId` is the server-known highlight (the single message of /m/<id>).
 // `dimIds` is the surrounding-context rows: rendered readable but faded, so the
 // cited message(s) are what the eye lands on.
-function msgBubbles(rows, hitId, dimIds) {
+// Per-attachment "open the original" links (the Layer-1 escape hatch). Each hash
+// resolves through /media/<hash>, which decrypts and serves the real file.
+function mediaLinks(attHashes) {
+  const hashes = String(attHashes || '').split(/\s+/).filter((h) => /^[0-9a-f]{16,}$/i.test(h));
+  if (!hashes.length) return '';
+  return `<span class="orig">` + hashes.map((h) =>
+    `<a href="/media/${h}" target="_blank" rel="noopener" title="open the original attachment">↗ original</a>`).join(' ') + `</span>`;
+}
+
+function msgBubbles(cdb, rows, hitId, dimIds) {
   const fmt = ptLocal; // Pacific, matching every ledger/Timeline stamp
 
   return rows.map((m) => {
     const mine = /^nathan$/i.test(m.sender);
     const hit = m.id === hitId ? ' hit' : '';
     const dim = dimIds && dimIds.has(m.id) ? ' dim' : '';
+    // Layer 2 (Rendered): the stored body + OCR/STT fold. UNCENSORED — the UI default;
+    // the "↗ original" links reveal the raw file (Layer 1).
     return `<div class="q ${mine ? 'me' : 'them'}${hit}${dim}" id="m${m.id}">` +
-      `<span class="who">${esc(m.sender)} · ${esc(fmt(m.sent_at))}</span>${mdInline(m.body)}</div>`;
+      `<span class="who">${esc(m.sender)} · ${esc(fmt(m.sent_at))}</span>${mdInline(renderedBody(cdb, m))}${mediaLinks(m.att_hashes)}</div>`;
   }).join('');
 }
 
@@ -824,7 +837,7 @@ function messagePage(id) {
     const body = `<div class="back"><a href="${backHref}">&larr; back</a></div>` +
       `<div class="profile"><h1>${esc(msg.conversation || 'Conversation')}</h1>` +
       `<p class="sub">source message <code>m${msg.id}</code>, shown with surrounding context</p>` +
-      `<div class="charge">${msgBubbles([...before, msg, ...after], msg.id, dim)}</div></div>` +
+      `<div class="charge">${msgBubbles(cdb, [...before, msg, ...after], msg.id, dim)}</div></div>` +
       SCROLL_TO_HIT;
     return page(`m${msg.id} — ${msg.conversation || 'message'}`, body, '/');
   } finally {
@@ -875,7 +888,7 @@ function spanPage(start, end) {
       `<p class="sub">cited range <code>${span}</code> &middot; ` +
       `${rows.length} message${rows.length === 1 ? '' : 's'} in this conversation` +
       `${anchor.conv_id ? ', shown with surrounding context' : ' (no conversation recorded for this row)'}</p>` +
-      `<div class="charge">${msgBubbles([...before, ...rows, ...after], null, dim)}</div></div>` +
+      `<div class="charge">${msgBubbles(cdb, [...before, ...rows, ...after], null, dim)}</div></div>` +
       SCROLL_TO_HIT;
     return page(`m${start}-m${end} — ${anchor.conversation || 'range'}`, body, '/');
   } finally {
@@ -3114,6 +3127,37 @@ function start() {
           res.writeHead(200, { 'Content-Type': 'font/woff2', 'Cache-Control': 'public, max-age=31536000, immutable' });
           res.end(buf);
         } catch { res.writeHead(404); res.end(); }
+        return;
+      }
+
+      // The Layer-1 escape hatch: decrypt an attachment on demand and serve the
+      // ORIGINAL file. Auth-gated like everything (top of the handler); no CSRF check —
+      // it's a GET opened in a new tab (a top-level navigation sends Sec-Fetch-Site
+      // 'none', which firstPartyOnly rejects, and there's nothing to forge on a read).
+      // Browser-viewable types open inline (new tab); everything else downloads.
+      const mediaHit = url.pathname.match(/^\/media\/([0-9a-f]{16,})$/i);
+      if (mediaHit && req.method === 'GET') {
+        let sdb = null;
+        try {
+          sdb = openSignalDb();
+          const { buf, row } = decryptByHash(sdb, mediaHit[1]);
+          const ct = String(row.contentType || 'application/octet-stream');
+          const inline = /^(image\/|audio\/|video\/(mp4|webm|ogg)|text\/)/i.test(ct) || ct === 'application/pdf';
+          const EXTS = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/gif': '.gif', 'image/webp': '.webp',
+            'audio/mp4': '.m4a', 'audio/mpeg': '.mp3', 'audio/ogg': '.ogg', 'video/mp4': '.mp4', 'video/webm': '.webm',
+            'video/quicktime': '.mov', 'application/pdf': '.pdf' };
+          const name = `original-${mediaHit[1].slice(0, 12)}${EXTS[ct.toLowerCase()] || ''}`;
+          res.writeHead(200, {
+            'Content-Type': ct,
+            'Content-Disposition': `${inline ? 'inline' : 'attachment'}; filename="${name}"`,
+            'Cache-Control': 'private, no-store',
+          });
+          res.end(buf);
+        } catch {
+          send(404, page('Not found', '<div class="back"><a href="/">&larr; back</a></div><p>That attachment could not be opened — it may not be downloaded to this device, or is no longer on disk.</p>'));
+        } finally {
+          try { if (sdb) sdb.close(); } catch { /* already closed */ }
+        }
         return;
       }
 

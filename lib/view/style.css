@@ -483,6 +483,10 @@ tr.runrow.live .tw{border-left:3px solid var(--amber)}
 .q.me{align-self:flex-end;border-right:3px solid var(--ox);background:var(--card2)}
 .q .who{display:block;font-family:"Courier Prime",monospace;font-size:10px;letter-spacing:.08em;
   text-transform:uppercase;color:var(--soft);margin-bottom:2px}
+/* "↗ original" links — the Layer-1 escape hatch on a bubble with attachments. */
+.q .orig{display:block;margin-top:3px;font-family:"Courier Prime",monospace;font-size:10.5px}
+.q .orig a{color:var(--soft);text-decoration:none;margin-right:8px}
+.q .orig a:hover{color:var(--ink);text-decoration:underline}
 /* The key line reads as a marked passage, not a boxed one: warm flag wash,
    oxblood edge, and the who-line names it. */
 .q.hit{background:var(--flag-bg);border-color:var(--ox-soft)}

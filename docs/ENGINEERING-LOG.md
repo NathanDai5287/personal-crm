@@ -1456,3 +1456,28 @@ sources. Cursor at 91,972 = Signal's current max.
 the overlap floor is derived from it, so advancing it after sweeping one person would shrink
 everyone else's window to nothing. An unknown slug throws instead of sweeping nothing,
 because "swept 0 messages" and "you typed it wrong" must not look identical.
+
+### Two layers — Original vs Rendered, and censoring as model-egress (2026-08-23)
+Nathan's mental model, now the architecture (see AGENTS.md "Two layers"): every
+message is **Original** (Layer 1 — what's stored in crm.db: typed text + sweep-baked
+`[photo]`/`[link]`/`[re]`/quote enrichments + the real media blobs) and **Rendered**
+(Layer 2 — Original + machine OCR/STT folded in, computed on read). Both the models and
+the UI read Rendered. `lib/message-context.js` (`renderedBody`/`formatLine`) is the ONE
+builder.
+
+DECISION — "option a": Layer 1 is the archived body *with* its baked enrichments; we do
+NOT re-architect to store pristine typed text and move photo/quote/link to Layer 2. The
+sweep already bakes those (Signal deletes the originals, so it's the only capture), and
+reversing that for purity would mean separately persisting all the enrichment metadata
+for little gain.
+
+DECISION — **censoring is not a layer.** `lib/redact` (slur-masking) exists only to get
+past a model provider's content filter, so it applies at MODEL EGRESS
+(`message-context.forModel`) — the merge-ledger copy pi reads (`.pi.txt`, written from
+the uncensored committed `.new.txt` and deleted after), the Timeline summarizer's
+payload, the todo context — and never to the UI or the stored record. Result: the UI
+shows Rendered uncensored with a click-through to the Original (unredacted text / the
+media file, served by a decrypt-on-demand route), and the committed ledger is the
+faithful uncensored record. `foldSuffix` keeps only injection-defense sanitizing (strips
+`⟨⟩[]|#"`), not censoring. The todo TRIGGER scans Layer-1 typed text only — a task must
+be typed, never spoken into a voice note — though its model context window is Rendered.
