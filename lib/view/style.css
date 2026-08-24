@@ -287,7 +287,7 @@ td.r{text-align:right;font-variant-numeric:tabular-nums}
    settles to stamp blue; a censor-held one reads oxblood — the "needs a human" ink. */
 .prog{width:55%;min-width:260px}
 .pcell{width:100%}
-.pbar{display:flex;height:17px;border-radius:2px;overflow:hidden;
+.pbar{display:flex;height:20px;border-radius:0;overflow:hidden;
   background:var(--zebra);border:1px solid var(--rule)}
 .pbar .seg{height:100%}
 .pbar .seg.ing{background:var(--moss)}
