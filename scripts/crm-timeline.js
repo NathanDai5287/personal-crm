@@ -49,8 +49,7 @@ const { openSignalDb, openCrmDb } = require("../lib/signal-db");
 const { render, loadTemplate } = require("../lib/timeline-prompt");
 const { runSweep } = require("./crm-archive");
 const { resolveSources, groupOthers } = require("../lib/sources");
-const { foldSuffix: mediaFold } = require("../lib/media");
-const { redact } = require("../lib/redact");
+const { renderedBody, formatLine, forModel } = require("../lib/message-context");
 // Pacific, always — see lib/weeks.js header. dateKey/fmtLocal replace this file's old
 // getUTC*()-based dayKey/fmtTs (a message at 23:30 Pacific landed on the next UTC day),
 // and weekStart/nextWeekStart replace isoWeekKey's UTC-ISO week with the pipeline's own
@@ -173,7 +172,8 @@ function buildSummaryPrompt(who, periodLabel, lines, style, template) {
       ? `These are one-line weekly summaries of Signal messages ${who} during ${periodLabel}.`
       : `These are Signal messages ${who} during ${periodLabel}.`,
     STYLE_INSTRUCTION: STYLE_INSTRUCTION[style] || STYLE_INSTRUCTION.weekly,
-    MESSAGES: lines.join("\n"),
+    // MODEL EGRESS: censor here — the one point the Timeline model reads the lines.
+    MESSAGES: forModel(lines.join("\n")),
   });
 }
 
@@ -334,7 +334,9 @@ function messagesBetween(cdb, convs, fromMs, toMs) {
   }
   rows.sort((a, b) => a.sent_at - b.sent_at || a.rid - b.rid);
   return {
-    lines: rows.map((m) => `[${fmtLocal(m.sent_at)}] ⟨m${m.rid}⟩ ${m._c.prefix || ""}${m.sender}: ${redact((m.body || "").replace(/\s+/g, " ").trim())}${mediaFold(cdb, m.att_hashes)}`),
+    // Uncensored RENDERED lines (body + OCR/STT fold). Censoring is applied at model
+    // egress in buildSummaryPrompt (the timeline model's only entry point), never here.
+    lines: rows.map((m) => formatLine({ sentAt: m.sent_at, rid: m.rid, prefix: m._c.prefix || "", sender: m.sender, body: renderedBody(cdb, m) })),
     senders: new Set(rows.map((r) => r.sourceServiceId).filter(Boolean)),
   };
 }

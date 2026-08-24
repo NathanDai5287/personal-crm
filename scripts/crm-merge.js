@@ -100,7 +100,10 @@ function buildArgs(slug, mergePromptText, opts = {}) {
     '--tools', 'read,edit',
     '--system-prompt', mergePromptText,
     `@data/contacts/${slug}.md`,
-    `@data/contacts/_refresh/${slug}.new.txt`,
+    // The model reads the CENSORED copy (.pi.txt), written from the uncensored
+    // .new.txt at merge time (see mergeContact). Censoring is model-egress only; the
+    // committed .new.txt stays uncensored — the faithful Rendered record.
+    `@data/contacts/_refresh/${slug}.pi.txt`,
     opts.userMessage || DEFAULT_USER_MESSAGE,
   ];
 }
@@ -249,6 +252,13 @@ function mergeContact(slug, opts = {}) {
   // so those auto-remediate (and the learned word is censored from then on).
   const maxAttempts = opts.maxAttempts != null ? opts.maxAttempts : Number(process.env.CRM_MERGE_RETRIES || 3);
   const ledgerPath = path.join(cwd, 'data', 'contacts', '_refresh', `${slug}.new.txt`);
+  // CENSOR AT MODEL EGRESS (lib/message-context): the committed ledger (.new.txt) is
+  // the uncensored Rendered record; pi reads a censored copy (.pi.txt) written from
+  // it here and re-written by the content-filter path below. Deleted in the finally
+  // so it never enters the committed memory history.
+  const piLedgerPath = path.join(cwd, 'data', 'contacts', '_refresh', `${slug}.pi.txt`);
+  const writePiLedger = () => { try { fs.writeFileSync(piLedgerPath, redact(fs.readFileSync(ledgerPath, 'utf8'))); return true; } catch { return false; } };
+  writePiLedger();
   const piEnv = { ...process.env, PI_SKIP_VERSION_CHECK: '1', PI_OFFLINE: '1' };
   let attempt = 0;
   let remediations = 0;
@@ -341,13 +351,18 @@ function mergeContact(slug, opts = {}) {
             let learned = [];
             let masked = false;
             try {
-              const led = fs.readFileSync(ledgerPath, 'utf8');
-              learned = learn(detect(led));
-              const red = redact(led);
-              if (red !== led) { fs.writeFileSync(ledgerPath, red); masked = true; }
+              // Learn the new trigger from the UNCENSORED source (.new.txt), then
+              // re-censor the model's copy (.pi.txt). .new.txt is never modified.
+              learned = learn(detect(fs.readFileSync(ledgerPath, 'utf8')));
+              let before = '';
+              try { before = fs.readFileSync(piLedgerPath, 'utf8'); } catch { /* none yet */ }
+              writePiLedger();
+              let after = '';
+              try { after = fs.readFileSync(piLedgerPath, 'utf8'); } catch { /* write failed */ }
+              masked = after && after !== before;
             } catch { /* ledger unreadable — fall through to surface */ }
             if (masked) {
-              console.log(`crm-merge: ${slug}: content filter — auto-censored ${learned.length ? `new trigger(s) [${learned.join(', ')}]` : 'known trigger(s)'} in the ledger, retrying`);
+              console.log(`crm-merge: ${slug}: content filter — auto-censored ${learned.length ? `new trigger(s) [${learned.join(', ')}]` : 'known trigger(s)'} in the model's ledger copy, retrying`);
               continue;
             }
           }
@@ -370,6 +385,8 @@ function mergeContact(slug, opts = {}) {
     return { ok: false, error: lastError, errorClass: lastClass, attempts: attempt };
   } finally {
     if (tempSession) { try { fs.rmSync(tempSession, { recursive: true, force: true }); } catch { /* best-effort */ } }
+    // The censored model-copy is transient — never let it reach the committed history.
+    try { fs.unlinkSync(piLedgerPath); } catch { /* already gone */ }
   }
 }
 

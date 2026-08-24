@@ -49,9 +49,8 @@ const { openSignalDb, openCrmDb } = require('../lib/signal-db');
 const { runSweep } = require('./crm-archive');
 const { resolveSources, buildArchiveQuery } = require('../lib/sources');
 const { fmtLocal, planChunks, lastCompleteWeekStart, gateBuckets } = require('../lib/weeks');
-const { redact } = require('../lib/redact');
 const { confirmedNicknames } = require('../lib/nicknames');
-const { foldSuffix } = require('../lib/media');
+const { renderedBody, formatLine } = require('../lib/message-context');
 const { buildResolver } = require('../lib/people-resolve');
 const {
   TRACKED, DISPLAY_NAMES, REFRESH_DIR, CONTACTS_DIR, BOT_SERVICE_ID,
@@ -149,10 +148,11 @@ function planContact(cdb, sdb, slug, opts) {
   if (!q) return null;
   const msgs = cdb.prepare(q.sql).all(...q.params);
   if (msgs.length === 0) return null;
-  // Fold any OCR/transcript for a message's attachments onto its line (read time),
-  // so the merge model reads what a photo said or a voice note contained. Attached
-  // now so it rides into every chunk; a no-media message costs nothing.
-  for (const m of msgs) m.fold = foldSuffix(cdb, m.att_hashes);
+  // Build each message's RENDERED body (Layer 2: stored body + OCR/transcript fold),
+  // uncensored, once here (planContact has cdb) so it rides into every chunk. The
+  // ledger written from it is uncensored — censoring is applied at model egress
+  // (crm-merge, before pi reads it). A no-media message costs nothing.
+  for (const m of msgs) m.rendered = renderedBody(cdb, m);
 
   const display = (nicks[row.signal_id] && nicks[row.signal_id].name) || row.name;
   const cutoff = lastCompleteWeekStart(now);
@@ -262,7 +262,7 @@ function writeChunkLedger(plan, chunk, chunkIndex, chunkTotal, dir = REFRESH_DIR
     const ctx = label ? `(${label}) ` : '';
     // Tag the old bot so the merge reads its lines as automated, not a person.
     const sender = m.src === BOT_SERVICE_ID ? `${m.sender} (bot)` : m.sender;
-    return `[${fmtLocal(m.sent_at)}] ⟨m${m.rid}⟩ ${ctx}${sender}: ${redact(m.body)}${m.fold || ''}`;
+    return formatLine({ sentAt: m.sent_at, rid: m.rid, prefix: ctx, sender, body: m.rendered });
   });
 
   const srcBits = [];
