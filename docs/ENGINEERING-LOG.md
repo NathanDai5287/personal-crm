@@ -15,6 +15,12 @@ Newest first.
 
 ## 2026-08-24
 
+### SURPRISE — People and Me rendered two navbars because both body and legacy shell supplied one
+The Bindery view functions `V.people()` and `V.me()` already render `Tabs(...)`. Their server call sites nevertheless passed a `current` route to the legacy `page()` shell, which prepends another `V.Tabs(current)`. People acquired the extra argument during the nickname-inbox change; Me shipped with it. Fix: those two Bindery call sites no longer pass `current`. Custom/legacy bodies that do not contain tabs still use the shell argument.
+
+### DECISION — reapply the scoped roster-bar/hover change for live inspection
+After restoring the pre-change UI, Nathan asked to see `c3455d5` deployed with the duplicate-navbar regression fixed. Reapplied its scoped `.pcell .pbar` roster styling, `.jobbar` live-monitor class, 28px square bar, and hover count overlay. This supersedes the revert decision immediately below; the deployed result is now the evidence for the next iteration.
+
 ### DECISION — revert the roster hover-overlay attempt
 The `c3455d5` roster-bar change did not fix the visible problem on minmus and introduced another UI problem. Reverted its code in full: counts return below the bar, the live monitor and roster again share `.pbar`, and the earlier 20px roster styling is restored. This deliberately reopens the CSS-collision problem recorded below; the next fix needs to start from the actually rendered minmus page rather than another unverified CSS adjustment.
 

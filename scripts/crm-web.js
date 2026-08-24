@@ -693,7 +693,7 @@ const NN_INBOX_JS = `<script>(function(){
 function indexPage() {
   const list = contactList();
   const { suggestions, contacts } = inboxData(list);
-  return page('People — personal-crm', render(V.people(list, { suggestions, contacts }).body) + NN_INBOX_JS, '/');
+  return page('People — personal-crm', render(V.people(list, { suggestions, contacts }).body) + NN_INBOX_JS);
 }
 
 // A nickname's citation slips resolve exactly like a fact bullet's: the face is the
@@ -1233,7 +1233,7 @@ function mePage() {
   }
   const v = V.me(nicks);
   const cfgJs = `<script>window.__EDIT_CFG=${JSON.stringify({ slug: OWNER_SLUG }).replace(/</g, '\\u003c')}</script>`;
-  return page(v.title, render(v.body) + cfgJs + NN_JS, '/me');
+  return page(v.title, render(v.body) + cfgJs + NN_JS);
 }
 
 // The whole edit state machine, in page. Mirrors the server exactly where it
