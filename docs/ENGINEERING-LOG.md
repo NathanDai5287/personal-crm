@@ -1522,3 +1522,29 @@ anthropic models per the eval-model policy, and censoring eval inputs could dist
 eval measures); pre-applying `redact.CANDIDATES` on the first `.pi.txt` write so a not-yet-learned
 slur doesn't reach pi on attempt 1 (Grok/Kimi PB); an app-wide CSP / `X-Frame-Options` (the UI
 leans on inline scripts, so a global policy needs care).
+
+### Archive union merge — DUNA folded into MINMUS (2026-08-23)
+The DUNA→MINMUS migration (see the 2026-08-22 reference above) built minmus's `crm.db`
+independently, anticipating a later union but never performing it. Verified today that neither
+archive was a subset of the other: comparing on `sent_at` (Signal's send-instant — the only
+cross-machine-stable message identity; body/sender/type/enrichment and the row `id` all drift
+per install), of DUNA's 95,413 messages **316 were absent from MINMUS** (161 calls, 114
+outgoing, 41 incoming, Jul 2025–Aug 2026 — things DUNA's Signal Desktop captured that
+minmus's missed, calls being device-local), while MINMUS held 825 DUNA lacked (669 of them
+older than DUNA's earliest message).
+
+Merged with the new `scripts/crm-import-archive.js` (dry-run by default, `--write` to apply,
+INSERT-only, transactional, takes the pipeline lock). Two per-install identifiers could not
+cross verbatim, and the tool handles both:
+- **`id`** — the `CRM_ARCHIVE_ID_OFFSET` (+100M) was applied only to LATER minmus sweeps, so
+  the id spaces OVERLAP (both start at 748; minmus had 86,435 rows < 100M). Imported rows get
+  FRESH ids above the target's `MAX(id)`, so nothing collides and no citation is disturbed.
+- **`conv_id`** — Signal assigns a different conversationId per install (DUNA 26, MINMUS 27,
+  **zero overlap**, even different UUID formats). Remapped source→target by majority vote over
+  shared messages (same `sent_at` ⇒ same conversation); all 26 DUNA conv_ids resolved.
+
+Result: **imported 316** (ids 100098668–100098983); minmus 95,922 → **96,238**; re-running the
+`sent_at` diff shows **0** DUNA messages missing — DUNA is now a subset of MINMUS. The imported
+rows are unmerged, so the next ingest folds them into their contacts' profiles (backfill ==
+play-forward). Pre-import backup: `data/crm.db.pre-import-20260823-231808.bak` on minmus.
+`crm-import-archive.js` is reusable for any future second-machine fold.
