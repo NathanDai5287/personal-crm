@@ -15,6 +15,9 @@ Newest first.
 
 ## 2026-08-24
 
+### DECISION — revert the roster hover-overlay attempt
+The `c3455d5` roster-bar change did not fix the visible problem on minmus and introduced another UI problem. Reverted its code in full: counts return below the bar, the live monitor and roster again share `.pbar`, and the earlier 20px roster styling is restored. This deliberately reopens the CSS-collision problem recorded below; the next fix needs to start from the actually rendered minmus page rather than another unverified CSS adjustment.
+
 ### SURPRISE — a later `.pbar` rule turned the roster ingest bars into 10px pills
 The roster bar was already `height:20px; border-radius:0`. A second `.pbar` block (live job monitor, further down the same stylesheet) overrode it to `height:10px; border-radius:5px` because both selectors had equal specificity and the later one won. That is why the people list still showed thin pills after two commits that had already "thickened" and "squared off" the bar.
 
