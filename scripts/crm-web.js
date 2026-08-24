@@ -3137,19 +3137,43 @@ function start() {
       // Browser-viewable types open inline (new tab); everything else downloads.
       const mediaHit = url.pathname.match(/^\/media\/([0-9a-f]{16,})$/i);
       if (mediaHit && req.method === 'GET') {
+        // Cross-site embed guard. A top-level navigation (opening "↗ original" in a new
+        // tab) sends Sec-Fetch-Site none/same-origin/same-site; only an off-site page
+        // embedding this URL (`<img src=…>`) sends 'cross-site'. Refuse that so private
+        // media can't be pulled into a third-party page riding the cached auth.
+        if ((req.headers['sec-fetch-site'] || '').toLowerCase() === 'cross-site') {
+          res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' }); res.end('Cross-site request refused.'); return;
+        }
         let sdb = null;
         try {
           sdb = openSignalDb();
           const { buf, row } = decryptByHash(sdb, mediaHit[1]);
           const ct = String(row.contentType || 'application/octet-stream');
-          const inline = /^(image\/|audio\/|video\/(mp4|webm|ogg)|text\/)/i.test(ct) || ct === 'application/pdf';
+          const lc = ct.toLowerCase();
+          // INLINE ONLY for types the browser renders inertly. contentType is chosen by
+          // the Signal SENDER, so an attacker-picked `text/html` or `image/svg+xml` opened
+          // inline would run script on THIS origin with the logged-in session (stored XSS,
+          // full same-origin read/write). Positive allowlist (no text/*, no svg/xml) +
+          // nosniff (no MIME-sniffing a spoofed type up to HTML) + CSP sandbox (no script
+          // even if one slips the allowlist). Everything else downloads. See the
+          // 2026-08-23 stored-XSS entry in docs/ENGINEERING-LOG.md.
+          const INLINE_OK = new Set([
+            'image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/bmp', 'image/avif',
+            'image/heic', 'image/heif',
+            'audio/mp4', 'audio/mpeg', 'audio/ogg', 'audio/aac', 'audio/wav', 'audio/x-wav', 'audio/webm',
+            'video/mp4', 'video/webm', 'video/ogg', 'video/quicktime',
+            'application/pdf',
+          ]);
+          const inline = INLINE_OK.has(lc);
           const EXTS = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/gif': '.gif', 'image/webp': '.webp',
             'audio/mp4': '.m4a', 'audio/mpeg': '.mp3', 'audio/ogg': '.ogg', 'video/mp4': '.mp4', 'video/webm': '.webm',
             'video/quicktime': '.mov', 'application/pdf': '.pdf' };
-          const name = `original-${mediaHit[1].slice(0, 12)}${EXTS[ct.toLowerCase()] || ''}`;
+          const name = `original-${mediaHit[1].slice(0, 12)}${EXTS[lc] || ''}`;
           res.writeHead(200, {
             'Content-Type': ct,
             'Content-Disposition': `${inline ? 'inline' : 'attachment'}; filename="${name}"`,
+            'X-Content-Type-Options': 'nosniff',
+            'Content-Security-Policy': 'sandbox',
             'Cache-Control': 'private, no-store',
           });
           res.end(buf);

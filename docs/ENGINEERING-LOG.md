@@ -1481,3 +1481,44 @@ media file, served by a decrypt-on-demand route), and the committed ledger is th
 faithful uncensored record. `foldSuffix` keeps only injection-defense sanitizing (strips
 `⟨⟩[]|#"`), not censoring. The todo TRIGGER scans Layer-1 typed text only — a task must
 be typed, never spoken into a voice note — though its model context window is Rendered.
+
+### Adversarial-audit remediation — XSS, the censor-before-match trigger leak, and doc drift (2026-08-23)
+A two-agents-per-prompt review of the two-layer work surfaced a batch of real defects; the
+obvious ones are fixed here.
+
+- **P0 — censored-before-match broke the typed-only todo trigger.** `crm-todo-scan.js`
+  `renderLedger` ran `forModel` (redact) over the ledger BEFORE `findTriggers` scanned it.
+  `redact`'s replacement is `[redacted black slur]` — the injected `]` closes
+  `task-trigger.ownWords`'s fold-strip `[^\]]*` early, so a `[transcript: … i'll make sure …]`
+  no longer stripped and a SPOKEN "make sure"/"eod" minted a task. Fix: `renderLedger` is now
+  **uncensored**. It never reaches a model directly — `findTriggers` is a local regex and
+  `crm-tasks.extractFor` re-censors the trigger windows via `task-trigger.renderWindows`
+  before egress — so censoring there bought nothing and broke the guard. (Also hardened the
+  root: `attachments.describeQuote`/`describePreview` now strip `[` `]` from baked quote/link
+  text, closing the same leak with no media involved — Kimi PD.)
+- **HIGH — stored XSS on `/media/<hash>`.** The inline allowlist admitted `text/*` (→ `text/html`)
+  and `image/` (→ `image/svg+xml`); contentType is chosen by the Signal SENDER, so a crafted
+  attachment opened via "↗ original" ran script on the CRM origin with the logged-in session.
+  Fix: positive inline allowlist (known-inert image/audio/video/pdf only; never text or svg),
+  `X-Content-Type-Options: nosniff`, `Content-Security-Policy: sandbox`, and a
+  `Sec-Fetch-Site: cross-site` reject so the private blob can't be embedded off-site (Grok PC).
+- **HIGH — `.pi.txt` committable after a crash.** `finally` cleanup doesn't run on SIGKILL and
+  `memory-commit.js` `add -f` force-adds ignored files, so a stray censored ledger copy (or a
+  `_session-tmp` pi session dir) could land in the memory history. Fix: explicit excludes for
+  `data/contacts/_refresh/*.pi.txt` and `data/_session-tmp`.
+- **Docs overclaimed the architecture (PE).** Corrected in AGENTS.md "Two layers": `forModel`
+  is not the only egress (three points: Timeline `forModel`, merge `.pi.txt`, todo
+  `renderWindows` — the latter two call `redact` directly); Rendered IS persisted as the
+  uncensored `.new.txt` snapshot; the trigger scans the uncensored Rendered ledger + strips
+  fold markers (not raw Layer 1); the media BLOBS are Signal's files (404 when purged), only
+  the crm.db row is the permanent record.
+- **`decryptByHash` spurious 404 (Kimi PC).** Duplicate `plaintextHash` rows meant `LIMIT 1`
+  could pick a row whose blob was purged while a sibling still had bytes. Now tries every
+  candidate row before failing.
+
+DEFERRED (need Nathan's call, see the conversation): censoring the eval harness fixtures
+(`evals/run.js`/`judge.js`/`compact-*` send uncensored fixture text — but they target
+anthropic models per the eval-model policy, and censoring eval inputs could distort what the
+eval measures); pre-applying `redact.CANDIDATES` on the first `.pi.txt` write so a not-yet-learned
+slur doesn't reach pi on attempt 1 (Grok/Kimi PB); an app-wide CSP / `X-Frame-Options` (the UI
+leans on inline scripts, so a global policy needs care).

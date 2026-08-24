@@ -32,6 +32,13 @@ const WT = ROOT;
 // KEPT deliberately: contacts/*.md (the whole point), the small state JSONs, and
 // contacts/_refresh — the refresh ledgers are overwritten per chunk, so
 // committing them captures the exact input that produced each merge.
+// TRANSIENT, and MUST NEVER be committed:
+//   *.pi.txt         The censored ledger copy pi reads mid-merge. Written, read, and
+//                    deleted in a `finally` within one merge — but `finally` does not run
+//                    on SIGKILL, and `add -f` below would force-add a survivor. It carries
+//                    nothing the uncensored .new.txt doesn't already, so exclude it.
+//   _session-tmp     Throwaway pi session dirs (crm-merge cost readback). Gitignored, but
+//                    `add -f` overrides .gitignore, so it needs an explicit exclude too.
 const PATHS = ['data'];
 const EXCLUDE = [
   ':(exclude)data/crm.db',
@@ -40,6 +47,8 @@ const EXCLUDE = [
   ':(exclude)data/signal-key.txt',
   ':(exclude)data/web-password.txt',
   ':(exclude)data/contacts/_raw',
+  ':(exclude)data/contacts/_refresh/*.pi.txt',
+  ':(exclude)data/_session-tmp',
 ];
 
 const msg = process.argv[2] || 'memory snapshot';

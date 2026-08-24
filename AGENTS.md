@@ -101,24 +101,33 @@ Every message exists at two layers, and the distinction is load-bearing:
 
 - **Layer 1 — Original.** The message as stored in `crm.db`: the sender's typed text,
   already carrying the sweep-time enrichments (`[photo]`, `[link: …]`, `[re …]`,
-  quote/call text — baked in at archive time because Signal deletes the originals),
-  plus the real audio/video/image/file blobs on disk. This is the permanent record and
-  what `⟨m…⟩` citations point at. (We deliberately do NOT strip the baked enrichments
-  back out — "option a": the archived body IS Layer 1.)
-- **Layer 2 — Rendered.** Original **+ machine OCR + speech-to-text** folded in.
-  Computed **on read**, never stored (OCR/STT live in `media_text` as inputs). Built in
-  ONE place — `lib/message-context.js` `renderedBody()` / `formatLine()` — and it is
-  what **both the models and the UI read**.
+  quote/call text — baked in at archive time because Signal deletes the originals). The
+  stored row (text + `att_hashes`) is the permanent record and what `⟨m…⟩` citations
+  point at. The media BLOBS themselves are NOT in crm.db — they stay in Signal's own
+  attachment store on disk, best-effort: a `/media/<hash>` fetch 404s once Signal purges
+  the file, so the blobs are not a permanent record, only the row is. (We deliberately do
+  NOT strip the baked enrichments back out — "option a": the archived body IS Layer 1.)
+- **Layer 2 — Rendered.** Original **+ machine OCR + speech-to-text** folded in. The
+  per-read Rendered body is computed **on read**, not persisted (OCR/STT live in
+  `media_text` as inputs). Built in ONE place — `lib/message-context.js` `renderedBody()`
+  / `formatLine()` — and it is what **both the models and the UI read**. One Rendered
+  artifact IS persisted, on purpose: the refresh writes each merge's input ledger to
+  `_refresh/<slug>.new.txt` in the memory history — an **uncensored** Rendered snapshot,
+  kept so every merge's exact input stays diffable.
 
 **Censoring is NOT a layer.** `lib/redact` masks slurs for one reason only: to stop a
-model *provider's* content filter from rejecting a chunk. It applies at **model egress**
-(`message-context.forModel`, called where text is handed to a provider — the merge
-ledger copy, the Timeline summarizer's payload, the todo context) and NOWHERE else. So
-the UI shows Rendered **uncensored**, with a click-through to the Original (unredacted
-text / the media file); the committed merge ledger (`.new.txt`) is the uncensored
-Rendered record, and only the transient `.pi.txt` copy pi reads is censored. The
-`todo` TRIGGER scans Layer-1 typed text only (never OCR/STT — a task must be *typed*,
-not spoken); its model context window is Rendered like any other model call.
+model *provider's* content filter from rejecting a chunk. It applies wherever Rendered
+text is handed to a provider — and NOWHERE else — at **three egress points**: the
+Timeline summarizer's payload (via `message-context.forModel`), the merge ledger copy pi
+reads (`.pi.txt`, redacted from the uncensored `.new.txt`), and each todo trigger window
+(`task-trigger.renderWindows`, which calls `redact` as it renders). So the UI shows
+Rendered **uncensored**, with a click-through to the Original (unredacted text / the media
+file), and the committed `.new.txt` is the uncensored Rendered record. The `todo` TRIGGER
+runs on the **uncensored** Rendered ledger (NOT raw Layer 1) but strips the OCR/STT fold
+markers before matching (`task-trigger.ownWords`), so only **typed** words can fire a task
+— a "make sure" spoken in a voice note or shown in a photo never triggers. It is matched
+BEFORE any censoring precisely because `redact`'s `[redacted …]` replacement contains a
+`]` that would otherwise break the fold-strip and leak a spoken trigger.
 
 ## BACKFILL == PLAY-IT-FORWARD (governing design principle)
 

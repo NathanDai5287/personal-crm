@@ -32,7 +32,7 @@ const { CRM_DB, DATA_DIR, TRACKED, ROOT } = require('../lib/config');
 const TRIGGER = require('../lib/task-trigger');
 const TASKS = require('../lib/tasks');
 const { extractFor } = require('./crm-tasks');
-const { renderedBody, formatLine, forModel } = require('../lib/message-context');
+const { renderedBody, formatLine } = require('../lib/message-context');
 
 const STATE = path.posix.join(DATA_DIR, 'crm-todo-state.json');
 const MODEL = process.env.CRM_TODO_MODEL || 'moonshotai/kimi-k3';
@@ -61,13 +61,17 @@ function saveState(s) {
 }
 
 // Same shape crm-refresh writes (lib/task-trigger.js parses it and the model's prompt
-// documents it). RENDERED (Layer 2: body + OCR/STT fold via lib/message-context) and
-// censored at egress (forModel) — this ledger IS handed to the extraction model, so it
-// should see the same Layer 2 every model sees. The trigger stays typed-only regardless:
-// task-trigger.ownWords strips the fold markers before matching, so a "make sure" in a
-// transcript never fires. Timestamps are Pacific (Intl, not the host clock).
+// documents it). RENDERED (Layer 2: body + OCR/STT fold via lib/message-context), and
+// UNCENSORED — this ledger is NEVER handed to a model directly. It feeds findTriggers
+// (a local regex on typed words) and crm-tasks.extractFor, which re-renders the trigger
+// windows through redact (task-trigger.renderWindows) before the model sees anything, so
+// egress censoring already happens downstream. Censoring HERE would be both pointless and
+// harmful: redact's replacement contains a `]` ("[redacted black slur]"), which closes
+// ownWords' fold-strip `[^\]]*` early and lets a "make sure"/"eod" SPOKEN in a transcript
+// leak past the typed-only guard and mint a task. Keeping it uncensored is what lets the
+// fold-strip see clean markers. Timestamps are Pacific (Intl, not the host clock).
 function renderLedger(cdb, rows) {
-  return forModel(rows.map((m) => formatLine({ sentAt: m.sent_at, rid: m.id, sender: m.sender, body: renderedBody(cdb, m) })).join('\n'));
+  return rows.map((m) => formatLine({ sentAt: m.sent_at, rid: m.id, sender: m.sender, body: renderedBody(cdb, m) })).join('\n');
 }
 
 function contactsToScan(db) {
