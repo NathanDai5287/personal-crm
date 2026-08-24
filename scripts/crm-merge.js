@@ -44,7 +44,7 @@ function nickResolver() {
   } catch { _resolver = { resolve: () => null }; }
   return _resolver;
 }
-const { detect, learn, redact } = require('../lib/redact');
+const { detect, redact } = require('../lib/redact');
 
 // Bucket a failed pi run so the retry loop knows what to do:
 //   content_filter — a provider rejected the prompt on content grounds; retrying
@@ -248,8 +248,9 @@ function mergeContact(slug, opts = {}) {
   // RETRY WITH ERROR HANDLING. A weekly run must not fail on a transient blip, so
   // transient errors back off and retry up to `maxAttempts`; only an exhausted or
   // unrecoverable error surfaces. content_filter is special: retrying verbatim is
-  // useless, but naming the slur, masking it in the ledger, and retrying is not —
-  // so those auto-remediate (and the learned word is censored from then on).
+  // useless and we do NOT auto-guess a replacement (Nathan picks the wording), so the
+  // chunk is parked for review and the contact is HELD (see the content_filter branch
+  // below and lib/censor-hold.js) — no retry, no spend.
   const maxAttempts = opts.maxAttempts != null ? opts.maxAttempts : Number(process.env.CRM_MERGE_RETRIES || 3);
   const ledgerPath = path.join(cwd, 'data', 'contacts', '_refresh', `${slug}.new.txt`);
   // CENSOR AT MODEL EGRESS (lib/message-context): the committed ledger (.new.txt) is
@@ -261,7 +262,6 @@ function mergeContact(slug, opts = {}) {
   writePiLedger();
   const piEnv = { ...process.env, PI_SKIP_VERSION_CHECK: '1', PI_OFFLINE: '1' };
   let attempt = 0;
-  let remediations = 0;
   let lastError = null;
   let lastClass = null;
   try {
@@ -343,30 +343,22 @@ function mergeContact(slug, opts = {}) {
         }
 
         if (lastClass === 'content_filter') {
-          // AUTO-REMEDIATE: name the culprit, learn it (persisted, censored from now
-          // on), mask the ledger in place, and retry. Bounded so a filter we can't
-          // localize can't loop forever.
-          if (remediations < 2) {
-            remediations += 1;
-            let learned = [];
-            let masked = false;
-            try {
-              // Learn the new trigger from the UNCENSORED source (.new.txt), then
-              // re-censor the model's copy (.pi.txt). .new.txt is never modified.
-              learned = learn(detect(fs.readFileSync(ledgerPath, 'utf8')));
-              let before = '';
-              try { before = fs.readFileSync(piLedgerPath, 'utf8'); } catch { /* none yet */ }
-              writePiLedger();
-              let after = '';
-              try { after = fs.readFileSync(piLedgerPath, 'utf8'); } catch { /* write failed */ }
-              masked = after && after !== before;
-            } catch { /* ledger unreadable — fall through to surface */ }
-            if (masked) {
-              console.log(`crm-merge: ${slug}: content filter — auto-censored ${learned.length ? `new trigger(s) [${learned.join(', ')}]` : 'known trigger(s)'} in the model's ledger copy, retrying`);
-              continue;
-            }
-          }
-          console.log(`crm-merge: ${slug}: FAIL — content filter with no maskable trigger found (needs manual review): ${lastError.slice(0, 160)}`);
+          // HOLD FOR MANUAL REVIEW — do NOT auto-guess a replacement. Nathan's call: he
+          // chooses the masking wording himself (see lib/censor-hold.js). We park the
+          // whole UNCENSORED rejected chunk so he can SEE the offending words, hold the
+          // contact, and stop — no retry, no further spend. crm-daily leaves this
+          // contact's cursor untouched and skips held contacts on later runs; ingest
+          // resumes for them once he adds a rule and releases the hold
+          // (scripts/crm-censor.js). The .pi.txt copy is cleaned up in the finally below.
+          let parkedTo = null;
+          try {
+            const chunk = fs.readFileSync(ledgerPath, 'utf8'); // uncensored .new.txt — the point is to see the words
+            parkedTo = require('../lib/censor-hold').hold(slug, chunk, lastError);
+          } catch { /* best-effort; the failure below still surfaces */ }
+          const rel = parkedTo ? path.relative(cwd, parkedTo) : null;
+          console.log(`crm-merge: ${slug}: HELD for censor review — provider rejected the chunk on content grounds.${rel ? ` Chunk saved to ${rel}.` : ''} Resolve with: node scripts/crm-censor.js resolve ${slug} <word> <replacement...>`);
+          lastError = `content filter — held for manual censor review${rel ? ` (${rel})` : ''}`;
+          lastClass = 'content_filter_held';
           break;
         }
         if (lastClass === 'auth') {

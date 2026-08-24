@@ -49,6 +49,7 @@ const EXCLUDE = [
   ':(exclude)data/contacts/_raw',
   ':(exclude)data/contacts/_refresh/*.pi.txt',
   ':(exclude)data/_session-tmp',
+  ':(exclude)data/censor-review',
 ];
 
 const msg = process.argv[2] || 'memory snapshot';

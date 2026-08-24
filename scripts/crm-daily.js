@@ -374,6 +374,18 @@ function main() {
           }
         }
       }
+      // HELD FOR CENSOR REVIEW (lib/censor-hold.js). A contact whose merge was rejected
+      // on content grounds is parked until Nathan picks a replacement wording and
+      // releases the hold. Skip them here so the run neither re-hits the provider filter
+      // nor re-spends; their cursor is untouched (a held contact was never merged), so
+      // they re-merge automatically on the first run after they're released.
+      const HOLD = require('../lib/censor-hold');
+      const heldSlugs = plans.filter((p) => HOLD.isHeld(p.slug)).map((p) => p.slug);
+      if (heldSlugs.length) {
+        plans = plans.filter((p) => !HOLD.isHeld(p.slug));
+        logLines.push(`[3] held for censor review (skipped): ${heldSlugs.join(', ')} — resolve with 'node scripts/crm-censor.js list'`);
+        warnings.push(`${heldSlugs.length} contact(s) held for censor review: ${heldSlugs.join(', ')}`);
+      }
       totalChunks = plans.reduce((n, p) => n + p.chunks.length, 0);
       const note = plans.length === 0
         ? 'no unmerged messages for any tracked contact'
