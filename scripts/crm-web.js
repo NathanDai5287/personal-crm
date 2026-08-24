@@ -600,13 +600,17 @@ function contactList() {
       if (r.mx) lastSeen.set(r.slug, r.mx);
     }
     const pending = cdb.prepare('SELECT COUNT(*) n FROM messages WHERE contact_slug = ? AND id NOT IN (SELECT message_id FROM merged WHERE slug = ?)');
+    // heldReview: this contact's ingest is paused because a merge chunk was rejected by
+    // the model provider's content filter and is waiting for Nathan to pick a masking
+    // rule (lib/censor-hold.js). Surfaced in the UI so a stuck person is visible.
+    const HOLD = require('../lib/censor-hold');
     return listContacts().map((c) => {
       const waiting = pending.get(c.slug, c.slug).n;
       const facts = c.talkingPoints.slice(0, 3).map((tp) => mdInline((tp.date ? `**${tp.date}** ` : '') + tp.text));
       return {
         slug: c.slug, name: c.name, rel: c.relationship,
         last: lastSeen.has(c.slug) ? ptDateKey(lastSeen.get(c.slug)) : c.last,
-        held: held.get(c.slug) || 0, waiting, facts,
+        held: held.get(c.slug) || 0, waiting, facts, heldReview: HOLD.isHeld(c.slug),
         stamp: waiting > 0 ? `${waiting} waiting` : null, stampBlue: true,
       };
     });
@@ -1995,6 +1999,7 @@ function adminData() {
   const backupMs = backupAgeMs(now);
   const waiting = roster.reduce((s, x) => s + x.waiting, 0);
   const inPeople = roster.filter((x) => x.waiting > 0).length;
+  const heldReview = roster.filter((x) => x.heldReview).length;
   const HOUR = 3600000;
   const health = {
     kept: kept.toLocaleString(), span, tracked: roster.length,
@@ -2003,6 +2008,7 @@ function adminData() {
     sweepStale: sweepMs != null && sweepMs > 90 * 60000,
     waiting: waiting.toLocaleString(), waitingSub: `in ${inPeople} ${inPeople === 1 ? 'person' : 'people'}`,
     backupAge: backupMs == null ? '—' : fmtAgo(backupMs), backupSub: 'off-machine', backupStale: backupMs != null && backupMs > 8 * DAY,
+    heldReview,
   };
   // A dial per scheduled job, named to match the Key — no vague "pipeline". Each
   // maps to a real registered task (tools/register-*.ps1): sweep is the hourly
