@@ -13,6 +13,15 @@ Newest first.
 
 ---
 
+## 2026-08-24
+
+### SURPRISE — a later `.pbar` rule turned the roster ingest bars into 10px pills
+The roster bar was already `height:20px; border-radius:0`. A second `.pbar` block (live job monitor, further down the same stylesheet) overrode it to `height:10px; border-radius:5px` because both selectors had equal specificity and the later one won. That is why the people list still showed thin pills after two commits that had already "thickened" and "squared off" the bar.
+
+Fix: roster bars are `.pcell .pbar` (28px, square); the monitor bar is `.jobbar`. Counts that sat under the bar now appear on hover, overlaid on the rectangle.
+
+---
+
 ## 2026-08-23
 
 ### DECISION — the code now matches the operator's four-job mental model; "compaction" is renamed "Timeline" and is no longer a job
