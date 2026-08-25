@@ -51,6 +51,15 @@ const { planAll, writeChunkLedger, chunkSummary } = require('./crm-refresh');
 const { validateCitations, markMerged } = require('../lib/archive');
 const { mergeCallUsd, recordCostSample, fitCostModel } = require('../lib/cost');
 const { openCrmDb, openSignalDb } = require('../lib/signal-db');
+const { applyStructuredReply, renderStructuredProfile } = require('../lib/structured-person');
+const { buildResolver } = require('../lib/people-resolve');
+
+function personResolver(cdb) {
+  const contacts = cdb.prepare('SELECT file_path, name FROM contacts').all()
+    .map((r) => ({ slug: r.file_path ? r.file_path.replace('data/contacts/', '').replace(/\.md$/, '') : null, name: r.name }))
+    .filter((c) => c.slug);
+  return buildResolver(contacts).resolve;
+}
 
 // REJECT UNKNOWN FLAGS BEFORE ANYTHING ELSE. Both flags here fail dangerously when
 // misspelled rather than safely: `--dry-runn` performs a REAL run against every
@@ -482,6 +491,8 @@ function main() {
             dryRun: false,
             stream: true,
             model: MERGE_MODEL_EFF,
+            runId: runTag,
+            deferStructured: true,
             label: `${i + 1}/${total} ${chunk.label} · ${chunk.count} msgs`,
           });
           detail.ms = Date.now() - t0;
@@ -495,12 +506,33 @@ function main() {
             // whole run with no record (P3-4): record it as this chunk's failure and
             // stop the contact — the run still reaches step 7 and writes its record.
             try {
-              markMerged(mergeDb, p.slug, chunk.msgs.map((m) => m.rid), Date.now());
+              const profilePath = path.join(CONTACTS_DIR, `${p.slug}.md`);
+              const profileBeforeStructured = fs.readFileSync(profilePath, 'utf8');
+              mergeDb.exec('BEGIN IMMEDIATE');
+              try {
+                const structured = applyStructuredReply(mergeDb, p.slug, result.reply, {
+                  required: true, runId: runTag, resolve: personResolver(mergeDb), transaction: false,
+                  validMessageIds: chunk.msgs.map((m) => m.rid),
+                });
+                const timeline = profileBeforeStructured.match(/^## Timeline\s*$[\s\S]*/m)?.[0] || null;
+                const rendered = renderStructuredProfile(profileBeforeStructured, structured.facts);
+                const afterTimeline = rendered.match(/^## Timeline\s*$[\s\S]*/m)?.[0] || null;
+                if (timeline !== afterTimeline) throw new Error('structured renderer changed Timeline bytes');
+                fs.writeFileSync(profilePath, rendered);
+                markMerged(mergeDb, p.slug, chunk.msgs.map((m) => m.rid), Date.now(), { transaction: false });
+                mergeDb.exec('COMMIT');
+                result.factsStored = structured.factsStored;
+                result.mentionsStored = structured.mentionsStored;
+              } catch (e) {
+                try { mergeDb.exec('ROLLBACK'); } catch { /* original error wins */ }
+                try { fs.writeFileSync(profilePath, result.profileBefore == null ? profileBeforeStructured : result.profileBefore); } catch { /* surfaced in failure */ }
+                throw e;
+              }
               state.ranAt = Date.now();
               atomicWriteJson(REFRESH_STATE, state);
             } catch (e) {
               contactFailed = true;
-              const err = `frontier write failed after a successful merge: ${e.message}`;
+              const err = `structured/frontier commit failed after a successful model call: ${e.message}`;
               mergeFailures.push({ slug: p.slug, chunk: chunk.label, chunkIndex: i + 1, chunkTotal: total, error: err, errorClass: 'frontier_write' });
               detail.error = err;
               logLines.push(`[4] merge ${p.slug} ${i + 1}/${total} (${chunk.label}): ${err} — stopping this contact`);

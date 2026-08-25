@@ -25,6 +25,9 @@ const { dateKey } = require('../lib/weeks');
 const { sumSessionCostUsd, sessionAssistantText } = require('../lib/cost');
 const { storeNicknameProposals } = require('../lib/nicknames');
 const { buildResolver } = require('../lib/people-resolve');
+const { applyStructuredReply, renderStructuredProfile } = require('../lib/structured-person');
+const { openCrmDb } = require('../lib/signal-db');
+const { ensureMessagesTable } = require('../lib/archive');
 
 // Resolver for nickname TARGETS (feature 2): maps a name the model names in a
 // `target | nickname | ids` line to a contact slug (or Nathan). Built once per
@@ -253,6 +256,13 @@ function mergeContact(slug, opts = {}) {
   // below and lib/censor-hold.js) — no retry, no spend.
   const maxAttempts = opts.maxAttempts != null ? opts.maxAttempts : Number(process.env.CRM_MERGE_RETRIES || 3);
   const ledgerPath = path.join(cwd, 'data', 'contacts', '_refresh', `${slug}.new.txt`);
+  const profileFilePath = path.join(cwd, 'data', 'contacts', `${slug}.md`);
+  let profileBefore = null;
+  try { profileBefore = fs.readFileSync(profileFilePath, 'utf8'); } catch { /* merge will report its own file error */ }
+  const restoreProfile = () => {
+    if (profileBefore == null) return;
+    try { fs.writeFileSync(profileFilePath, profileBefore); } catch { /* caller still sees failure */ }
+  };
   // CENSOR AT MODEL EGRESS (lib/message-context): the committed ledger (.new.txt) is
   // the uncensored Rendered record; pi reads a censored copy (.pi.txt) written from
   // it here and re-written by the content-filter path below. Deleted in the finally
@@ -311,7 +321,39 @@ function mergeContact(slug, opts = {}) {
         // lacks the ack — an unreadable transcript falls through to success as before,
         // and a false negative merely re-merges next run (never loses data).
         if (reply && !/(^|\n)\s*(DONE\b|NO-?OP\b)/i.test(reply)) {
+          restoreProfile();
           return { ok: false, error: 'merge produced no DONE/NO-OP acknowledgment — treated as a failed merge (messages NOT marked merged)', errorClass: 'no_ack', attempts: attempt };
+        }
+
+        // STRUCTURED PERSON. Production replies must carry complete FACTS plus new
+        // MENTIONS. Validate every source against the archive, write both tables in
+        // one transaction, then deterministically render What-I-know/identity fields.
+        // Evals use throwaway zero-row archives and score the prose edit itself, so
+        // they deliberately skip this production write seam.
+        let factsStored = 0;
+        let mentionsStored = 0;
+        if (!opts.deferStructured && opts.structured !== false && cwd === ROOT) {
+          try {
+            const cdb = openCrmDb();
+            try {
+              ensureMessagesTable(cdb);
+              const structured = applyStructuredReply(cdb, slug, reply, {
+                required: true, runId: opts.runId || null, resolve: nickResolver().resolve,
+              });
+              factsStored = structured.factsStored;
+              mentionsStored = structured.mentionsStored;
+              const profilePath = path.join(cwd, 'data', 'contacts', `${slug}.md`);
+              const before = fs.readFileSync(profilePath, 'utf8');
+              const timeline = before.match(/^## Timeline\s*$[\s\S]*/m)?.[0] || null;
+              const rendered = renderStructuredProfile(before, structured.facts);
+              const afterTimeline = rendered.match(/^## Timeline\s*$[\s\S]*/m)?.[0] || null;
+              if (timeline !== afterTimeline) throw new Error('structured renderer changed Timeline bytes');
+              fs.writeFileSync(profilePath, rendered);
+            } finally { cdb.close(); }
+          } catch (e) {
+            restoreProfile();
+            return { ok: false, error: `structured person output rejected: ${e.message}`, errorClass: 'structured_output', attempts: attempt };
+          }
         }
 
         // NICKNAMES. The model emits nicknames as a [[NICKNAMES]] block in its REPLY
@@ -331,9 +373,10 @@ function mergeContact(slug, opts = {}) {
             nicksStored = storeNicknameProposals(slug, reply, { resolve: nickResolver().resolve, validIds });
           } catch { /* non-fatal telemetry */ }
         }
-        console.log(`crm-merge: ${slug}: ok${costUsd != null ? ` ($${costUsd.toFixed(4)})` : ''}${nicksStored ? ` (+${nicksStored} nickname${nicksStored === 1 ? '' : 's'})` : ''}${attempt > 1 ? ` (attempt ${attempt})` : ''}`);
-        return { ok: true, output, costUsd, attempts: attempt, nicksStored, lastContactFixed: fixed || undefined };
+        console.log(`crm-merge: ${slug}: ok${costUsd != null ? ` ($${costUsd.toFixed(4)})` : ''}${factsStored ? ` (+${factsStored} facts)` : ''}${mentionsStored ? ` (+${mentionsStored} mentions)` : ''}${nicksStored ? ` (+${nicksStored} nickname${nicksStored === 1 ? '' : 's'})` : ''}${attempt > 1 ? ` (attempt ${attempt})` : ''}`);
+        return { ok: true, output, reply, profileBefore, costUsd, attempts: attempt, factsStored, mentionsStored, nicksStored, lastContactFixed: fixed || undefined };
       } catch (e) {
+        restoreProfile();
         lastError = String((e && e.stderr) || stderrCap || (e && e.message) || e).slice(0, 2000);
         lastClass = classifyPiError(lastError);
         // If we couldn't capture the error text but the ledger holds a known slur,

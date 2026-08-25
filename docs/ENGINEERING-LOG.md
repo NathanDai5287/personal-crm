@@ -15,6 +15,19 @@ Newest first.
 
 ## 2026-08-24
 
+### DECISION — Person is now a structured read model; facts and mentions are authoritative rows
+Completed the structured-person refactor that began with `lib/person.js` Phase 0. Merge replies now carry mandatory JSON `[[FACTS]]` and `[[MENTIONS]]` blocks. `lib/structured-person.js` validates source ids against the archive, resolves mention targets ambiguity-first through the existing people resolver, writes typed facts/edges, and deterministically renders `## What I know` plus identity fields. `lib/person.js` reads current facts and graph neighbors; the People page consumes that accessor. Relationship/Birthday/Phone manual edits write through as provenance-free manual standing facts. `lib/schema.js`'s redundant todo implementation was removed; `lib/tasks.js` remains the only task store.
+
+No separate prose migration was added, per Nathan's earlier decision that this is still the first version. Existing profiles remain byte-for-byte unchanged until their next merge; that merge emits the complete current fact set from the profile plus ledger and the deterministic renderer takes over. This avoids a paid migration pass while giving each contact a clean transition at its normal ingest boundary.
+
+### SURPRISE — the parked fact writer was not retry-idempotent or atomic with the merge frontier
+`recordFact()` always inserted. If a model edit succeeded but the frontier write failed, replaying the same chunk would duplicate its facts; writing facts inside `crm-merge` would also allow facts to commit without `(contact,message)` advancing. Fixed structurally: exact fact replays dedup through `idx_facts_retry`, and crm-daily commits facts, mentions, and `merged` rows in one `BEGIN IMMEDIATE` transaction. The profile is rendered before commit and restored to its pre-merge bytes on any structured/frontier failure. This preserves the existing one-chunk/one-merge/one-frontier/one-commit unit.
+
+The parked snapshot implementation also said identity included `as_of` but then bypassed incumbent lookup for every snapshot. That preserved a trend across different dates, but also kept contradictory duplicates for a correction at the same date. Snapshot rows now compete only when their identity keys match: different as-ofs coexist; a corrected same-as-of supersedes.
+
+### DECISION — structured dates use Pacific date conversion, and derived values stay derived
+Period/as-of `YYYY-MM-DD` values convert through `lib/weeks.js` (`dateKeyToMs`), never host-local or raw UTC. `deriveAge()` now evaluates against the Pacific date. The database refuses standing/periodic `age`, `tenure`, `years_together`, and `days_since_contact`; store the invariant or an honest snapshot instead.
+
 ### SURPRISE — People and Me rendered two navbars because both body and legacy shell supplied one
 The Bindery view functions `V.people()` and `V.me()` already render `Tabs(...)`. Their server call sites nevertheless passed a `current` route to the legacy `page()` shell, which prepends another `V.Tabs(current)`. People acquired the extra argument during the nickname-inbox change; Me shipped with it. Fix: those two Bindery call sites no longer pass `current`. Custom/legacy bodies that do not contain tabs still use the shell argument.
 

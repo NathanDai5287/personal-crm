@@ -118,10 +118,6 @@ keep working; `/status`, `/runs`, `/actions` move under `/admin/*` with redirect
 
 ## Data model
 
-- [ ] **Wire up `lib/schema.js`.** Built and unwired. Facts as store of record with
-  typed identity (standing / periodic / snapshot) and supersession; markdown becomes
-  a render. This is the real fix for corrections being durable, and for `What I know`
-  growing without bound.
 - [ ] **Wire aliases into the merge.** `lib/aliases.js` works (`abhi` →
   `abhiram-chalamalasetty`, `max` → ambiguous → refuses). Not passed to the prompt
   yet — doing so mid-comparison would have changed the prompt.

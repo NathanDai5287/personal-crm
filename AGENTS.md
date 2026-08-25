@@ -95,6 +95,26 @@ the old spelling on purpose — renaming them would orphan data or is out of sco
   condenses aged-out messages into one-line `## Timeline` entries. NOT a merge, and
   NOT a separate job — it runs inside ingest. (Was called "compaction".)
 
+## Person: structured facts and graph edges
+
+`lib/person.js` is the single read-side definition of a Person. With a `crm.db`
+handle it returns current structured facts and inbound/outbound mention edges, while
+retaining compatibility fallbacks for identity fields that have not yet been observed
+by the structured pipeline.
+
+The merge reply always includes JSON `[[FACTS]]` and `[[MENTIONS]]` blocks. They never
+go into the profile. `lib/structured-person.js` validates every source message against
+the archive; `lib/schema.js` stores standing, periodic, and snapshot facts with
+supersession and mention edges keyed by stable slugs. Structured writes and the merge
+frontier commit in ONE SQLite transaction. A failure rolls back both and restores the
+pre-merge profile.
+
+`## What I know` and structured identity fields are deterministic renders of current
+facts after a successful merge. The model may edit its working prose, but that prose is
+not authoritative. Hand edits to Relationship/Birthday/Phone write through as manual
+standing facts. Tasks remain owned exclusively by `lib/tasks.js`; do not reintroduce
+the retired todo implementation from the old parked schema.
+
 ## Two layers: Original and Rendered
 
 Every message exists at two layers, and the distinction is load-bearing:

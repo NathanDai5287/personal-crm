@@ -30,6 +30,9 @@ const { renderedBody } = require('../lib/message-context');
 const { decryptByHash } = require('../lib/signal-attachments');
 const TASKS = require('../lib/tasks');
 const P = require('../lib/nicknames');
+const PERSON = require('../lib/person');
+const { factLabel } = require('../lib/structured-person');
+const { recordFact, retractCurrentFact } = require('../lib/schema');
 const RUN_TOGGLES = require('../lib/run-toggles');
 const RUN_MODELS = require('../lib/run-models');
 const JOBS_DEF = require('../lib/jobs'); // single source of truth for the job set + labels
@@ -606,10 +609,15 @@ function contactList() {
     const HOLD = require('../lib/censor-hold');
     return listContacts().map((c) => {
       const waiting = pending.get(c.slug, c.slug).n;
-      const facts = c.talkingPoints.slice(0, 3).map((tp) => mdInline((tp.date ? `**${tp.date}** ` : '') + tp.text));
+      const person = PERSON.getPerson(c.slug, { cdb });
+      const structured = person && person.facts.length
+        ? person.facts.filter((f) => !['relationship', 'birthday', 'phone', 'signal_id'].includes(f.field)).slice(0, 3)
+          .map((f) => mdInline(`**${factLabel(f.field)}:** ${f.value}${f.src_msg ? ` ⟨m${f.src_msg}⟩` : ''}`))
+        : null;
+      const facts = structured || c.talkingPoints.slice(0, 3).map((tp) => mdInline((tp.date ? `**${tp.date}** ` : '') + tp.text));
       return {
-        slug: c.slug, name: c.name, rel: c.relationship,
-        last: lastSeen.has(c.slug) ? ptDateKey(lastSeen.get(c.slug)) : c.last,
+        slug: c.slug, name: person ? person.name : c.name, rel: person ? person.relationship : c.relationship,
+        last: lastSeen.has(c.slug) ? ptDateKey(lastSeen.get(c.slug)) : (person ? person.lastContact : c.last),
         held: held.get(c.slug) || 0, waiting, facts, heldReview: HOLD.isHeld(c.slug),
         stamp: waiting > 0 ? `${waiting} waiting` : null, stampBlue: true,
       };
@@ -1111,6 +1119,7 @@ function profilePage(slug) {
     const h2 = l.match(/^## (.+)$/);
     if (h2) { curSec = h2[1].trim().toLowerCase(); continue; }
     if (/^### /.test(l) && curSec === 'what i know') topics += 1;
+    else if (/^[-*] /.test(l.trim()) && curSec === 'what i know') topics += 1;
     else if (/^[-*] /.test(l.trim()) && curSec === 'talking points') openers += 1;
   }
   const CITES = /⟨\s*m(\d+)(?:-m(\d+))?(?:\s+@m(\d+))?(?:\s+ts)?\s*⟩/g;
@@ -1186,6 +1195,9 @@ function profilePage(slug) {
     const unitHtml = units.map((u, i) => {
       const text = sectionText(lines, u);
       if (u.level === 2 && text === lines[u.from].trimEnd()) return renderProfile(text, mdOpts);
+      // Structured facts are the source of truth; this section is rendered from
+      // crm.db after merges and is intentionally not hand-editable as prose.
+      if (u.level === 2 && u.heading === 'What I know') return renderProfile(text, mdOpts);
       const view = renderProfile(text, mdOpts).replace(/<\/h([23])>/, `${pencil(u.heading)}</h$1>`);
       return `<section class="eunit" data-idx="${i}" data-heading="${esc(u.heading)}">`
         + `<div class="eview">${view}</div>`
@@ -1775,7 +1787,7 @@ function applyManualEdit(slug, payload) {
         while (i > 0 && lines[i - 1].trim() === '') i -= 1;
         lines.splice(i, 0, `- **${label}:** ${value}`);
       }
-      fieldChanges.push({ field: label, from: cur == null ? '(absent)' : cur, to: value });
+      fieldChanges.push({ key: f.key, field: label, from: cur == null ? '(absent)' : cur, to: value });
     }
 
     if (!fieldChanges.length && !secChanges.length) return { ok: true, changed: 0 };
@@ -1786,6 +1798,28 @@ function applyManualEdit(slug, payload) {
     let out = lines.join('\n');
     if (!out.endsWith('\n')) out += '\n';
     fs.writeFileSync(file, out);
+    // Hand-owned Person fields write through to the structured store in the same
+    // save. A cleared/TBD value retracts the current fact; a real value becomes a
+    // provenance-free manual standing fact. Roll the file back if this write fails.
+    if (fieldChanges.length) {
+      let personDb = null;
+      try {
+        personDb = openCrmDb();
+        personDb.exec('BEGIN IMMEDIATE');
+        for (const f of fieldChanges) {
+          if (f.to === '_TBD_') retractCurrentFact(personDb, slug, f.key);
+          else recordFact(personDb, {
+            slug, field: f.key, kind: 'standing', value: f.to, src_msg: null,
+            observed_at: startedAt, run_id: null,
+          });
+        }
+        personDb.exec('COMMIT');
+      } catch (e) {
+        if (personDb) { try { personDb.exec('ROLLBACK'); } catch { /* original wins */ } }
+        try { fs.writeFileSync(file, md); } catch { /* surfaced below */ }
+        return { ok: false, status: 500, error: `structured person write failed; profile restored: ${e.message}` };
+      } finally { if (personDb) try { personDb.close(); } catch { /* closed */ } }
+    }
     // Same isolated-history commit as a rename, so the edit shows on the
     // profile's history page with a clean attribution. pre/post shas make the
     // run's line-level diff viewable at /runs/<id>/diff/<slug>.
