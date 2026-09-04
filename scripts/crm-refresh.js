@@ -179,17 +179,44 @@ function planContact(cdb, sdb, slug, opts) {
   bucketMsgs.forEach((bm, bi) => { for (const ch of planChunks(bm)) { ch.bucketIndex = bi; chunks.push(ch); } });
   if (chunks.length === 0) return null;
 
-  // Cast of characters: OTHER tracked people these messages refer to (by name or a
-  // confirmed nickname), each as a compact profile digest for the ledger header.
+  // Cast of characters: the OTHER tracked people relevant to this chunk, each as a
+  // compact profile digest for the ledger header. Two sources, unioned:
+  //   (a) ROSTER — every tracked member of the sourced groups, so the model knows who
+  //       is in the room even if they never sent a message this chunk (Nathan's rule:
+  //       "the model should know who is in the group chat, even if some never speak").
+  //   (b) MENTIONS — tracked people named (or nicknamed) in the messages, which catches
+  //       someone talked ABOUT who isn't a participant of these chats.
+  // Untracked members are intentionally omitted: no profile means no person object (the
+  // permissions layer). Their WORDS still appear in the ledger via full-group context,
+  // labelled with the name chain (nickname -> iPhone contact -> profile -> phone).
   // Excludes the subject (the profile is about them) and Nathan (the reader).
   const cast = [];
   try {
     const resolver = getResolver(cdb);
-    const mentioned = new Set();
-    for (const bm of bucketMsgs) for (const m of bm) for (const s of resolver.mentionsIn(m.body || '')) mentioned.add(s);
-    mentioned.delete(slug);
-    mentioned.delete('nathan');
-    for (const s of mentioned) {
+    const relevant = new Set();
+
+    // (a) tracked roster of every sourced group
+    const groupConvIds = [...sources.biGroupConvIds, ...sources.multiGroupConvIds];
+    if (groupConvIds.length) {
+      const slugByServiceId = new Map();
+      for (const c of require('../lib/person').trackedContacts(cdb)) {
+        if (c.signalId) slugByServiceId.set(c.signalId, c.slug);
+      }
+      const ph = groupConvIds.map(() => '?').join(',');
+      for (const r of sdb.prepare(`SELECT members FROM conversations WHERE id IN (${ph})`).all(groupConvIds)) {
+        for (const sid of (r.members || '').split(/\s+/).filter(Boolean)) {
+          const s = slugByServiceId.get(sid);
+          if (s) relevant.add(s);
+        }
+      }
+    }
+
+    // (b) tracked people named in the messages themselves
+    for (const bm of bucketMsgs) for (const m of bm) for (const s of resolver.mentionsIn(m.body || '')) relevant.add(s);
+
+    relevant.delete(slug);
+    relevant.delete('nathan');
+    for (const s of relevant) {
       const d = personDigest(s, resolver.nameBySlug.get(s) || s);
       if (d) cast.push(d);
     }
@@ -278,12 +305,12 @@ function writeChunkLedger(plan, chunk, chunkIndex, chunkTotal, dir = REFRESH_DIR
     if (names.length) nickBits.push(`${who} is also called ${names.map((n) => `"${n}"`).join(', ')}`);
   }
 
-  // CAST OF CHARACTERS: the other tracked people these messages refer to, each a
-  // compact profile digest — so a mention of "B"/"bee" is a real person the model
-  // knows (relationship, age, a fact), not a bare name. Context only; the subject is
-  // still the one profile being edited.
+  // CAST OF CHARACTERS: the other tracked people in these chats — the group roster plus
+  // anyone named in the messages — each a compact profile digest, so a participant or a
+  // mention of "B"/"bee" is a real person the model knows (relationship, age, a fact),
+  // not a bare name. Context only; the subject is still the one profile being edited.
   const castLines = (plan.cast && plan.cast.length)
-    ? ['# people referenced (context — NOT the subject of this profile):', ...plan.cast.map((d) => `#   ${d}`)]
+    ? ['# people in these chats (context — NOT the subject of this profile):', ...plan.cast.map((d) => `#   ${d}`)]
     : [];
 
   const header = [
