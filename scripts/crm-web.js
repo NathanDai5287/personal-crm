@@ -164,50 +164,9 @@ function inline(s) {
 }
 
 // Pull a few metadata fields from the leading "- **Key:** value" bullets.
-function parseMeta(md) {
-  const meta = {};
-  const re = /^-\s+\*\*([^:*]+):\*\*\s*(.+)$/;
-  for (const line of md.split(/\r?\n/)) {
-    if (line.startsWith('## ')) break; // metadata block is only at the top
-    const m = line.trim().match(re);
-    if (m) meta[m[1].trim().toLowerCase()] = m[2].replace(/[_*]/g, '').trim();
-  }
-  return meta;
-}
-
-// Pull the `## Talking points` bullets: [{date|null, text}].
-// MONTH PRECISION IS LEGAL. prompts/merge.md permits `YYYY-MM` when only the
-// month is known ("sometime in August") rather than stamping a false precise day —
-// and real profiles use it (nigesh carries `2027-02`). Requiring YYYY-MM-DD
-// here silently demoted those to undated and left the `**…**` markup in the text.
-// The bold is optional: bullets written before 2026-08-11 carry `**date**`, newer
-// ones a plain date (prompt v12 keeps bold for structure labels only).
-//
-// `line` is the 1-based file line, needed to blame the bullet back to the merge
-// that wrote it.
-function parseTalkingPoints(md) {
-  const items = [];
-  let inSection = false;
-  const lines = md.split(/\r?\n/);
-  for (let i = 0; i < lines.length; i += 1) {
-    const t = lines[i].trim();
-    if (/^##\s+Talking points/i.test(t)) { inSection = true; continue; }
-    if (inSection && /^#/.test(t)) break; // next heading ends the section
-    if (!inSection) continue;
-    const m = t.match(/^[-*]\s+(?:(?:\*\*)?(\d{4}-\d{2}(?:-\d{2})?)(?:\*\*)?\s+)?(.+)$/);
-    if (m && m[2]) {
-      items.push({
-        date: m[1] || null,
-        // A month-only date sorts and compares correctly against YYYY-MM-DD once
-        // padded; keep the raw form for display.
-        sortDate: m[1] ? (m[1].length === 7 ? `${m[1]}-01` : m[1]) : null,
-        text: m[2].trim(),
-        line: i + 1,
-      });
-    }
-  }
-  return items;
-}
+// `## Talking points` and profile-header parsing now live in lib/person (the single
+// people API): getPerson returns `talkingPoints`, and the roster/tasks read people
+// through PERSON.allPeople. parseSectionBullets stays here — it reads other sections.
 
 // Section-scoped bullet reader, for `## Open questions` (uncited by design) and
 // anything else worth surfacing as a task.
@@ -286,30 +245,6 @@ function blameProfile(slug) {
   return map;
 }
 
-function listContacts() {
-  let files = [];
-  try { files = fs.readdirSync(CONTACTS_DIR).filter((f) => f.endsWith('.md')); } catch { /* none */ }
-  const contacts = [];
-  for (const f of files) {
-    const slug = f.replace(/\.md$/, '');
-    let md;
-    try { md = fs.readFileSync(path.posix.join(CONTACTS_DIR, f), 'utf8'); } catch { continue; }
-    const meta = parseMeta(md);
-    const titleLine = md.split(/\r?\n/).find((l) => l.startsWith('# '));
-    const name = titleLine ? titleLine.slice(2).trim() : slug;
-    contacts.push({
-      slug,
-      name,
-      relationship: meta['relationship'] || '',
-      last: meta['last contact'] || '',
-      messages: meta['messages'] || '',
-      talkingPoints: parseTalkingPoints(md),
-    });
-  }
-  // Sort by last-contact date desc (ISO-ish strings sort lexically); blanks last.
-  contacts.sort((a, b) => (b.last || '').localeCompare(a.last || ''));
-  return contacts;
-}
 
 // ---------------------------------------------------------------------------
 // HTML shell
@@ -363,21 +298,10 @@ function page(title, bodyHtml, current) {
 function taskItems() {
   const today = ptDateKey(Date.now());
   const out = { upcoming: [], recent: [], undated: [], questions: [] };
-  let files = [];
-  try { files = fs.readdirSync(CONTACTS_DIR).filter((f) => f.endsWith('.md')); } catch { return out; }
-
-  for (const f of files) {
-    const slug = f.replace(/\.md$/, '');
-    let md;
-    try { md = fs.readFileSync(path.posix.join(CONTACTS_DIR, f), 'utf8'); } catch { continue; }
-    const titleLine = md.split(/\r?\n/).find((l) => l.startsWith('# '));
-    const name = titleLine ? titleLine.slice(2).trim() : slug;
-    // No blame here. It was one `git blame` subprocess per contact on every page
-    // load, and the model/chunk badges it fed are internal plumbing that meant
-    // nothing to the reader. Line-level authorship still lives on the profile
-    // history page, where it is actually a debugging question.
-    for (const tp of parseTalkingPoints(md)) {
-      const item = { ...tp, slug, name };
+  // Through the one people API: each person carries its parsed talking points.
+  for (const p of PERSON.allPeople()) {
+    for (const tp of (p.talkingPoints || [])) {
+      const item = { ...tp, slug: p.slug, name: p.name };
       if (!tp.sortDate) out.undated.push(item);
       else if (tp.sortDate >= today) out.upcoming.push(item);
       else out.recent.push(item);
@@ -608,23 +532,23 @@ function contactList() {
     // the model provider's content filter and is waiting for Nathan to pick a masking
     // rule (lib/censor-hold.js). Surfaced in the UI so a stuck person is visible.
     const HOLD = require('../lib/censor-hold');
-    return listContacts().map((c) => {
-      const waiting = pending.get(c.slug, c.slug).n;
-      const person = PERSON.getPerson(c.slug, { cdb });
-      const structuredFacts = person
-        ? person.facts.filter((f) => !['relationship', 'birthday', 'phone', 'signal_id'].includes(f.field)).slice(0, 3)
-        : [];
+    // ONE people read: lib/person.allPeople is the single source (profile header + live
+    // crm.db facts/counts + talking points). No second per-contact profile read.
+    return PERSON.allPeople({ cdb }).map((person) => {
+      const waiting = pending.get(person.slug, person.slug).n;
+      const structuredFacts = person.facts
+        .filter((f) => !['relationship', 'birthday', 'phone', 'signal_id'].includes(f.field)).slice(0, 3);
       const structured = structuredFacts.length
         ? structuredFacts.map((f) => mdInline(`**${factLabel(f.field)}:** ${f.value}${f.src_msg ? ` ⟨m${f.src_msg}⟩` : ''}`))
         : null;
-      const facts = structured || c.talkingPoints.slice(0, 3).map((tp) => mdInline((tp.date ? `**${tp.date}** ` : '') + tp.text));
+      const facts = structured || (person.talkingPoints || []).slice(0, 3).map((tp) => mdInline((tp.date ? `**${tp.date}** ` : '') + tp.text));
       return {
-        slug: c.slug, name: person ? person.name : c.name, rel: person ? person.relationship : c.relationship,
-        last: lastSeen.has(c.slug) ? ptDateKey(lastSeen.get(c.slug)) : (person ? person.lastContact : c.last),
-        held: held.get(c.slug) || 0, waiting, facts, heldReview: HOLD.isHeld(c.slug),
+        slug: person.slug, name: person.name, rel: person.relationship,
+        last: lastSeen.has(person.slug) ? ptDateKey(lastSeen.get(person.slug)) : person.lastContact,
+        held: held.get(person.slug) || 0, waiting, facts, heldReview: HOLD.isHeld(person.slug),
         stamp: waiting > 0 ? `${waiting} waiting` : null, stampBlue: true,
       };
-    });
+    }).sort((a, b) => (b.last || '').localeCompare(a.last || '')); // most-recent contact first, blanks last
   } finally {
     cdb.close();
   }
