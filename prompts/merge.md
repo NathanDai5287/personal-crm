@@ -261,7 +261,7 @@ Nathan | Wayne | ⟨m89204⟩
 
 # Structured person output
 
-After the acknowledgment line, always emit both blocks below. They are machine input and never belong in the profile file.
+After the acknowledgment line, always emit the block below. It is machine input and never belongs in the profile file.
 
 `[[FACTS]]` is a JSON array containing the complete current set of durable, atomic facts supported by the finished profile — carry forward still-current facts already in the profile and add/change what this ledger supports. An empty set is `[]`. Each object has:
 
@@ -283,21 +283,7 @@ After the acknowledgment line, always emit both blocks below. They are machine i
 - Identity fields use these exact names when present: `relationship`, `birthday`, `phone`, `signal_id`. Do not emit the person's display name as a fact.
 - `source_message_id` is one archive id that directly proves the fact: the `@m…` primary when its profile citation has one, otherwise the strongest single/end id. It must be from this ledger or copied from that fact's existing profile citation. Never guess it.
 - Do not turn personality summaries, conversational style, jokes, or talking points into atomic facts merely to fill the array.
-
-`[[MENTIONS]]` is a JSON array of tracked people newly and explicitly referenced in this ledger. It creates durable person-to-person edges. Empty is `[]`.
-
-```
-[[MENTIONS]]
-[
-  {"target":"Katia Dai","kind":"mentioned","note":"invited to the same dinner","source_message_id":90215}
-]
-[[/MENTIONS]]
-```
-
-- `target` is the clearest full name available; ambiguous names are rejected downstream rather than guessed.
-- `kind` is `mentioned`, `coattended`, or `related`. `note` is optional, short, and supported by the cited line.
-- Only emit another person, never the subject of this profile. Each source id must appear in this ledger.
-- Re-emit all current facts every run; emit mentions only when this ledger supplies them. Storage handles retry deduplication.
+- Re-emit all current facts every run; storage handles retry deduplication.
 
 # Before you finish
 
@@ -319,6 +305,6 @@ Check each of these. If any fails, fix it before replying:
 - Every `###` section you touched covers exactly one topic; surviving claims kept their existing citations.
 - Nothing you wrote is about you, these instructions, or the merge run itself; every claim is written at the strength its messages said it.
 - If you emitted a [[NICKNAMES]] block, it sits after the DONE/NO-OP line, every id in it appears literally in the ledger, no nickname is anyone's canonical name or a group-chat name, and every nickname belonging to someone other than the subject names its target as the first of three fields.
-- `[[FACTS]]` and `[[MENTIONS]]` are both present after the acknowledgment, contain valid JSON arrays, and every structured source id obeys the rules above.
+- `[[FACTS]]` is present after the acknowledgment, contains a valid JSON array, and every structured source id obeys the rules above.
 
-Then reply with **exactly one** acknowledgment line — `DONE — <n> talking points, <n> facts added/changed` on a real edit, or `NO-OP` when nothing was worth recording — followed by `[[FACTS]]` and `[[MENTIONS]]`, plus a `[[NICKNAMES]]` block when one is due. The acknowledgment and both structured blocks are mandatory: the pipeline rejects and reruns an incomplete reply.
+Then reply with **exactly one** acknowledgment line — `DONE — <n> talking points, <n> facts added/changed` on a real edit, or `NO-OP` when nothing was worth recording — followed by `[[FACTS]]`, plus a `[[NICKNAMES]]` block when one is due. The acknowledgment and the `[[FACTS]]` block are mandatory: the pipeline rejects and reruns an incomplete reply.
