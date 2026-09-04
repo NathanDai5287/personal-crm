@@ -38,20 +38,20 @@ assert.strictEqual(deriveAge('2000-01-01', Date.parse('2026-08-24T12:00:00Z')), 
 const h = db();
 const resolve = (name) => name === 'Bob Smith' ? 'bob-smith' : null;
 const newest = { field: 'employer', kind: 'standing', value: 'New Co', source_message_id: 20 };
+// A stray [[MENTIONS]] block in the reply is ignored — the model no longer feeds the
+// graph (crm-mention-scan does), so only the [[FACTS]] are applied.
 let r = applyStructuredReply(h, 'alice', reply([newest], [
   { target: 'Bob Smith', kind: 'mentioned', note: 'invited Bob', source_message_id: 30 },
 ]), { resolve, runId: 'run-1' });
 assert.strictEqual(r.factsStored, 1);
+assert.strictEqual(r.mentionsStored, 0);
 assert.strictEqual(currentFacts(h, 'alice')[0].value, 'New Co');
-assert.strictEqual(neighbors(h, 'alice').outbound[0].slug, 'bob-smith');
+assert.strictEqual(neighbors(h, 'alice').outbound.length, 0);
 
-// Exact replay is free: no duplicate fact or mention.
-r = applyStructuredReply(h, 'alice', reply([newest], [
-  { target: 'Bob Smith', kind: 'mentioned', note: 'invited Bob', source_message_id: 30 },
-]), { resolve, runId: 'run-2' });
+// Exact replay is free: no duplicate fact.
+r = applyStructuredReply(h, 'alice', reply([newest]), { resolve, runId: 'run-2' });
 assert.strictEqual(r.factsStored, 0);
 assert.strictEqual(factHistory(h, 'alice', 'employer').length, 1);
-assert.strictEqual(neighbors(h, 'alice').outbound[0].n, 1);
 
 // An older backfilled statement is recorded but cannot take the crown.
 applyStructuredReply(h, 'alice', reply([
@@ -71,15 +71,11 @@ applyStructuredReply(h, 'alice', reply([
 ]), { resolve });
 assert.deepStrictEqual(currentFacts(h, 'alice').filter((f) => f.field === 'balance').map((f) => f.value).sort(), ['$11 corrected', '$12']);
 
-// A bad mention rolls back the fact written in the same reply.
-assert.throws(() => applyStructuredReply(h, 'alice', reply([
-  { field: 'favorite_color', kind: 'standing', value: 'green', source_message_id: 30 },
-], [{ target: 'Ambiguous Max', kind: 'mentioned', source_message_id: 30 }]), { resolve }), /unknown or ambiguous/);
-assert.strictEqual(currentFacts(h, 'alice').some((f) => f.field === 'favorite_color'), false);
-
+// A bad fact throws and rolls back (nothing from this reply is written).
 assert.throws(() => applyStructuredReply(h, 'alice', reply([
   { field: 'age', kind: 'standing', value: '26', source_message_id: 30 },
 ]), { resolve }), /derived/);
+assert.strictEqual(currentFacts(h, 'alice').some((f) => f.field === 'age'), false);
 assert.throws(() => applyStructuredReply(h, 'alice', reply([
   { field: 'birthday', kind: 'standing', value: 'January 1', source_message_id: 999 },
 ]), { resolve }), /missing archive message/);
@@ -125,7 +121,7 @@ const injected = renderStructuredProfile(md, [
 ]);
 assert.match(injected, /^- \*\*Relationship:\*\* \$& \$1 \$' newest$/m);
 
-// Facts, mentions, and the merge frontier can share the caller's transaction.
+// Facts and the merge frontier can share the caller's transaction.
 const h2 = db();
 h2.exec('BEGIN IMMEDIATE');
 applyStructuredReply(h2, 'alice', reply([newest]), { resolve, transaction: false });
