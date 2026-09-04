@@ -1094,6 +1094,8 @@ function edgePage(fromSlug, toSlug, opts = {}) {
         + `<input type="hidden" name="from" value="${esc(fromSlug)}">`
         + `<input type="hidden" name="orig_to" value="${esc(toSlug)}">`
         + `<input type="hidden" name="src_msg" value="${esc(c.src_msg)}">`
+        + (hideMine ? '<input type="hidden" name="mine" value="0">' : '')
+        + (hideDm ? '<input type="hidden" name="dm" value="0">' : '')
         + `<select name="new_to"><option value="" selected disabled>choose a person&hellip;</option>${options}</select>`
         + '<button type="submit">link to&hellip;</button>'
         + '</form>'
@@ -3722,10 +3724,13 @@ function start() {
             const newTo = p.get('new_to') || '';
             const srcMsg = Number(p.get('src_msg'));
             // new_to === orig_to is a no-op that would delete the citation; new_to ===
-            // from would make a self-edge the rebuild drops. Reject both.
+            // from would make a self-edge the rebuild drops. Reject both. new_to must
+            // also be a REAL target — a tracked person or the owner — so a crafted POST
+            // can't mint a ghost node that persists through rebuilds.
             if (!isSafeSlug(from) || !isSafeSlug(origTo) || !isSafeSlug(newTo)
               || !Number.isInteger(srcMsg) || srcMsg <= 0
-              || newTo === origTo || newTo === from) {
+              || newTo === origTo || newTo === from
+              || !(newTo === OWNER_SLUG || PERSON.exists(newTo))) {
               send(400, page('Bad request', '<p>Bad request.</p>'));
               return;
             }
@@ -3758,7 +3763,10 @@ function start() {
             } finally {
               try { rdb.close(); } catch { /* already closed */ }
             }
-            res.writeHead(303, { Location: `/graph/edge?from=${encodeURIComponent(from)}&to=${encodeURIComponent(origTo)}` });
+            // Land on the NEW edge (where the citation now lives), preserving the view
+            // filters the correction was made under.
+            const flags = (p.get('mine') === '0' ? '&mine=0' : '') + (p.get('dm') === '0' ? '&dm=0' : '');
+            res.writeHead(303, { Location: `/graph/edge?from=${encodeURIComponent(from)}&to=${encodeURIComponent(newTo)}${flags}` });
             res.end();
           } catch {
             try { send(400, page('Bad request', '<p>Bad request.</p>')); } catch { /* sent */ }

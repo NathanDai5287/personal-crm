@@ -40,10 +40,13 @@ function nickResolver() {
     const { openCrmDb } = require('../lib/signal-db');
     const cdb = openCrmDb();
     // TRACKED people only: an untracked stub is not a resolvable nickname target.
-    _resolver = trackedResolver(cdb);
-    cdb.close();
-  } catch { _resolver = { resolve: () => null }; }
-  return _resolver;
+    try { _resolver = trackedResolver(cdb); } finally { cdb.close(); }
+    return _resolver;
+  } catch {
+    // Do NOT cache a failure — a transient openCrmDb error would otherwise disable
+    // resolution for the whole process. Return a one-shot no-op and retry next call.
+    return { resolve: () => null, mentionsIn: () => new Set() };
+  }
 }
 const { detect, redact } = require('../lib/redact');
 

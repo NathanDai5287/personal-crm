@@ -64,6 +64,15 @@ function main() {
     return;
   }
 
+  // Take the pipeline lock so a concurrent sweep can't reconcile/rebuild against a
+  // half-renamed state (file moved but the DB not yet updated, or vice versa).
+  const lock = require('../lib/pipeline-lock').acquire('rename-slug');
+  if (!lock.ok) {
+    console.error(`crm-rename-slug: skipped, a pipeline run is in progress (${lock.holderDesc}). Try again when idle.`);
+    cdb.close();
+    process.exit(1);
+  }
+  try {
   // FS first so a DB failure leaves a clean rollback target; if the DB txn throws we move
   // the file back. tracked.json is rewritten last (cheap, idempotent).
   fs.renameSync(oldMd, newMd);
@@ -88,6 +97,7 @@ function main() {
   } catch (e) {
     try { fs.renameSync(newMd, oldMd); } catch { /* best-effort restore */ }
     cdb.close();
+    lock.release();
     console.error(`crm-rename-slug: FAILED, rolled back (${e.message}).`);
     process.exit(1);
   }
@@ -98,6 +108,7 @@ function main() {
     fs.writeFileSync(TRACKED, `${JSON.stringify(trackedRaw, null, 2)}\n`);
   }
   console.log(`crm-rename-slug: done. ${oldSlug} -> ${newSlug}. Run a sweep (node scripts/crm-archive.js) to rebuild derived state.`);
+  } finally { lock.release(); }
 }
 
 main();

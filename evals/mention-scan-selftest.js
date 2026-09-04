@@ -41,6 +41,16 @@ insFull.run(9, 9000, 'Nathan', 'Dave says hi', 'carol', 'nathan-sid', 'outgoing'
 // the enrichment would falsely mint nathan->carol and nathan->dave.
 insFull.run(10, 10000, 'Nathan', '[re Carol: "Dave is fake"] sounds good', 'carol', 'nathan-sid', 'outgoing');
 
+// Legacy rows (no src/type) that DO set the conversation column, to pin the DM fallback.
+const insConv = h.prepare(
+  'INSERT INTO messages (id, sent_at, sender, body, contact_slug, conversation) VALUES (?,?,?,?,?,?)'
+);
+// id=11: a 1:1 DM whose contact_slug is TRACKED -> the contact is the speaker.
+insConv.run(11, 11000, 'Bob Smith', 'Dave is here', 'bob', 'DM with Bob Smith');
+// id=12: a legacy DM whose contact_slug is UNTRACKED (a pruned stub) -> must NOT mint a
+// speaker edge; trusting contact_slug here would resurrect an untracked-speaker edge.
+insConv.run(12, 12000, 'Stranger', 'Dave is late', 'stranger', 'DM with Stranger');
+
 const resolver = buildResolver([
   { slug: 'bob', name: 'Bob Smith' },
   { slug: 'carol', name: 'Carol Jones' },
@@ -49,9 +59,9 @@ const resolver = buildResolver([
 const idToSlug = new Map([['carol-sid', 'carol'], ['bob-sid', 'bob'], ['dave-sid', 'dave']]);
 
 let r = rebuildMentions(h, { resolver, idToSlug });
-assert.strictEqual(r.scanned, 10, 'scanned all 10 candidate messages');
+assert.strictEqual(r.scanned, 12, 'scanned all 12 candidate messages');
 assert.strictEqual(r.deleted, 0, 'nothing to clear on first run');
-assert.strictEqual(r.edges, 7, 'the 4 legacy edges + carol->dave, carol->bob, nathan->dave (enriched reply mints none)');
+assert.strictEqual(r.edges, 8, 'the 7 above + tracked-DM bob->dave (id 11); untracked-DM id 12 mints none');
 
 const edge = (from, to, srcMsg) => h.prepare(
   'SELECT * FROM mentions WHERE from_slug = ? AND to_slug = ? AND src_msg = ?'
@@ -67,6 +77,8 @@ assert.strictEqual(edge('bob', 'dave', 7), undefined, 'the ingest contact is NOT
 assert.ok(edge('carol', 'bob', 8), 'a third party naming the ingest contact makes carol->bob, not a dropped self-edge');
 assert.ok(edge('nathan', 'dave', 9), 'outgoing is attributed to nathan regardless of sender/contact_slug');
 assert.strictEqual(h.prepare('SELECT COUNT(*) n FROM mentions WHERE src_msg = 10').get().n, 0, 'the enriched reply mints no edge -- only typed words are scanned');
+assert.ok(edge('bob', 'dave', 11), 'tracked contact_slug in a DM is the speaker: bob->dave from message 11');
+assert.strictEqual(h.prepare('SELECT COUNT(*) n FROM mentions WHERE src_msg = 12').get().n, 0, 'untracked contact_slug in a DM mints no edge (tracked-set gate)');
 
 const selfEdges = h.prepare('SELECT COUNT(*) n FROM mentions WHERE from_slug = to_slug').get().n;
 assert.strictEqual(selfEdges, 0, 'no self-edges');
@@ -77,14 +89,14 @@ assert.strictEqual(nonScan, 0, 'every row this scan wrote is source=scan');
 // Idempotent: a second rebuild with no data change clears the prior scan rows
 // and reinserts the same edge count.
 r = rebuildMentions(h, { resolver, idToSlug });
-assert.strictEqual(r.deleted, 7, 'second run clears the 7 rows the first run wrote');
-assert.strictEqual(r.edges, 7, 'second run reproduces the same edge count');
+assert.strictEqual(r.deleted, 8, 'second run clears the 8 rows the first run wrote');
+assert.strictEqual(r.edges, 8, 'second run reproduces the same edge count');
 
 // A human correction (mention_reassign) survives the rebuild: message 3 was
 // scanned as carol->bob, but the citation is actually about Nathan.
 recordReassign(h, { src_msg: 3, from_slug: 'carol', orig_to: 'bob', new_to: 'nathan' });
 r = rebuildMentions(h, { resolver, idToSlug });
-assert.strictEqual(r.edges, 7, 'edge count unchanged -- one edge retargeted, not added');
+assert.strictEqual(r.edges, 8, 'edge count unchanged -- one edge retargeted, not added');
 assert.strictEqual(edge('carol', 'bob', 3), undefined, 'the original mis-resolved edge no longer exists');
 assert.ok(edge('carol', 'nathan', 3), 'the corrected edge exists instead');
 

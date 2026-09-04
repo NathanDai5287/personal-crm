@@ -1,8 +1,9 @@
 // scripts/crm-mention-scan.js — the deterministic name scan that builds the
-// `mentions` relationship graph (lib/schema.js). Every textual mention of a
-// tracked person is one directed edge speaker -> target, one row per
-// (speaker, target, message); Nathan gets a node too ('nathan') when he is
-// the speaker or the resolver names him as a target.
+// `mentions` relationship graph (lib/schema.js). A textual mention of a tracked
+// person BY a resolvable speaker is one directed edge speaker -> target, one row per
+// (speaker, target, message); Nathan gets a node too ('nathan') when he is the
+// speaker or the resolver names him as a target. A message whose speaker can't be
+// attributed to a tracked person (an untracked group speaker) yields no edge.
 //
 // FULL REBUILD every run: cheap (~6s over ~100k messages) and always correct
 // after a new nickname or contact is added, so there is no incremental state
@@ -40,6 +41,11 @@ function rebuildMentions(cdb, opts = {}) {
   const idToSlug = opts.idToSlug || new Map(
     contacts.filter((c) => c.signalId && c.slug).map((c) => [c.signalId, c.slug])
   );
+  // The tracked slugs, for gating the legacy contact_slug fallback below: a row's
+  // contact_slug may name an UNtracked person (a pruned stub), and trusting it would
+  // mint a speaker edge from someone who isn't tracked — the exact invariant this
+  // refactor removes. idToSlug's values are the tracked slugs.
+  const trackedSlugs = new Set(idToSlug.values());
   const remap = reassignMap(cdb);
 
   let scanned = 0;
@@ -67,7 +73,7 @@ function rebuildMentions(cdb, opts = {}) {
       // Legacy rows archived before src/type existed: fall back to the old heuristic,
       // but trust contact_slug only for a DM ('DM with …'), never a group row.
       else if (/^nathan$/i.test(row.sender)) speaker = 'nathan';
-      else if (row.contact_slug && /^DM with /.test(row.conversation || '')) speaker = row.contact_slug;
+      else if (row.contact_slug && trackedSlugs.has(row.contact_slug) && /^DM with /.test(row.conversation || '')) speaker = row.contact_slug;
       else speaker = resolver.resolve(row.sender);
       if (!speaker) continue; // can't attribute this message to anyone tracked
 
