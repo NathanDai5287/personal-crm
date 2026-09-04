@@ -46,6 +46,7 @@ const fs = require("fs");
 const path = require("path");
 const { execFileSync } = require("child_process");
 const { openSignalDb, openCrmDb } = require("../lib/signal-db");
+const { signalNameMap } = require("../lib/signal-names");
 const { render, loadTemplate } = require("../lib/timeline-prompt");
 const { runSweep } = require("./crm-archive");
 const { resolveSources, groupOthers } = require("../lib/sources");
@@ -64,7 +65,7 @@ const {
   GROUPS_DIR,
   BACKUP_DIR,
   TIMELINE_STATE,
-  DISPLAY_NAMES,
+
   MY_SERVICE_ID,
   BOT_SERVICE_ID,
   PI_CLI,
@@ -549,11 +550,11 @@ function buildConversationTimeline({ cdb, convs, who, file, stateKey, state, now
   return { changed, summaries, attempts, since: sinceOut, foldedTo: foldedOut, next, newDailies };
 }
 
-function buildContactTimeline(cdb, sdb, slug, state, now, foldLines, nicks) {
+function buildContactTimeline(cdb, sdb, slug, state, now, foldLines, nameMap) {
   const rel = `data/contacts/${slug}.md`;
   const row = cdb.prepare("SELECT signal_id, name FROM contacts WHERE file_path = ?").get(rel);
   if (!row || !row.signal_id) return { slug, skipped: "no crm row" };
-  const display = (nicks[row.signal_id] && nicks[row.signal_id].name) || row.name;
+  const display = nameMap.get(row.signal_id) || row.name;
 
   // Same source universe as crm-refresh.js: DM (all messages), bi-groups
   // (both directions — effectively private channels), multi-groups (only the
@@ -661,15 +662,9 @@ function main() {
   try {
     state = JSON.parse(fs.readFileSync(TIMELINE_STATE, "utf8"));
   } catch {}
-  const nicks = (() => {
-    try {
-      return JSON.parse(fs.readFileSync(DISPLAY_NAMES, "utf8")).byServiceId || {};
-    } catch {
-      return {};
-    }
-  })();
   const cdb = openCrmDb();
   const sdb = openSignalDb();
+  const nameMap = signalNameMap(sdb);
   // ARCHIVE-FIRST: pull anything new into the archive, then read all message
   // content from it (Signal is only consulted for conversation metadata).
   runSweep(cdb, sdb);
@@ -734,7 +729,7 @@ function main() {
 
   // Phase 2: contacts (with any folded group activity).
   for (const slug of slugs) {
-    const r = buildContactTimeline(cdb, sdb, slug, state, now, foldByContact.get(slug) || [], nicks);
+    const r = buildContactTimeline(cdb, sdb, slug, state, now, foldByContact.get(slug) || [], nameMap);
     if (r.skipped) {
       console.log(`- ${slug}: skipped (${r.skipped})`);
       continue;

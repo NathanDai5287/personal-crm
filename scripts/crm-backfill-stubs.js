@@ -6,6 +6,7 @@ const path = require('path');
 const { openSignalDb, openCrmDb } = require('../lib/signal-db');
 const { CONTACTS_DIR } = require('../lib/config');
 const { dateKey } = require('../lib/weeks');
+const { nameFor } = require('../lib/signal-names');
 
 function slugify(name) {
   return name.toLowerCase().normalize('NFKD').replace(/[^\w\s-]/g, '').trim().replace(/\s+/g, '-').slice(0, 60) || 'unknown';
@@ -13,19 +14,23 @@ function slugify(name) {
 
 const db = openSignalDb();
 
-// Private conversations that have at least one text message, with stats.
+// Private conversations that have at least one text message, with stats. The name
+// is resolved in JS by THE rule (lib/signal-names: Signal nickname > iPhone contact
+// > phone; profile name never used), so the SQL selects raw name fields + json.
 const rows = db.prepare(`
-  SELECT c.serviceId, c.e164, COALESCE(c.name, c.profileName) AS name,
+  SELECT c.serviceId, c.e164, c.name, c.json,
          COUNT(*) AS msg_count, MIN(m.sent_at) AS first_at, MAX(m.sent_at) AS last_at,
          SUM(CASE WHEN m.type='incoming' THEN 1 ELSE 0 END) AS from_them,
          SUM(CASE WHEN m.type='outgoing' THEN 1 ELSE 0 END) AS from_me
   FROM conversations c
   JOIN messages m ON m.conversationId = c.id
   WHERE c.type='private' AND m.body IS NOT NULL AND m.type IN ('incoming','outgoing')
-        AND COALESCE(c.name, c.profileName) IS NOT NULL
   GROUP BY c.id
   ORDER BY msg_count DESC
-`).all();
+`).all().map((r) => ({ ...r, ...nameFor(r) }))
+  // Only people with an actual name (nickname or iPhone contact) get a stub; a bare
+  // phone number or serviceId is not worth a profile.
+  .filter((r) => r.source === 'signal nickname' || r.source === 'iPhone contact');
 db.close();
 
 fs.mkdirSync(CONTACTS_DIR, { recursive: true });

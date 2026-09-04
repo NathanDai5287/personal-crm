@@ -58,9 +58,40 @@ const {
 const path = require('path');
 const { spawn } = require('child_process');
 const {
-  TRACKED, TRACKED_GROUPS, DISPLAY_NAMES, ARCHIVE_STATE, MY_SERVICE_ID, BOT_SERVICE_ID,
-  ARCHIVE_ID_OFFSET, ROOT,
+  TRACKED, TRACKED_GROUPS, ARCHIVE_STATE, MY_SERVICE_ID, BOT_SERVICE_ID,
+  ARCHIVE_ID_OFFSET, ROOT, CONTACTS_DIR,
 } = require('../lib/config');
+const { signalNameMap } = require('../lib/signal-names');
+
+// AUTO-DERIVED, READ-ONLY TITLE. A contact's display name is the resolved Signal
+// name (lib/signal-names) — never hand-edited in the CRM. This rewrites the profile
+// `# ` heading and crm.db contacts.name to match, so the UI (which reads the heading)
+// and the model (which reads archive labels) can never drift, and a Signal-app rename
+// propagates here automatically. Idempotent: only writes a profile whose heading is
+// actually stale. Never invents a name — a contact with no Signal name keeps its
+// heading. Best-effort per file so one unreadable profile can't abort a sweep.
+function syncContactNames(cdb, slugs, nameMap) {
+  for (const slug of slugs) {
+    const rel = `data/contacts/${slug}.md`;
+    let row;
+    try { row = cdb.prepare('SELECT signal_id, name FROM contacts WHERE file_path = ?').get(rel); } catch { continue; }
+    const want = row && row.signal_id ? nameMap.get(row.signal_id) : null;
+    if (!want) continue; // no Signal name to derive from — leave the heading alone
+    if (row.name !== want) {
+      try { cdb.prepare('UPDATE contacts SET name = ? WHERE file_path = ?').run(want, rel); } catch { /* non-fatal */ }
+    }
+    const file = path.posix.join(CONTACTS_DIR, `${slug}.md`);
+    let md;
+    try { md = fs.readFileSync(file, 'utf8'); } catch { continue; }
+    const lines = md.split(/\r?\n/);
+    const idx = lines.findIndex((l) => l.startsWith('# '));
+    const current = idx === -1 ? null : lines[idx].slice(2).trim();
+    if (current === want) continue; // heading already right
+    if (idx === -1) lines.unshift(`# ${want}`, '');
+    else lines[idx] = `# ${want}`;
+    try { fs.writeFileSync(file, lines.join('\n')); } catch { /* non-fatal */ }
+  }
+}
 
 // Fire-and-forget the OCR/STT worker as a detached, low-priority side job so it
 // drains the media queue this sweep enqueued without blocking or being tied to the
@@ -132,15 +163,11 @@ function atomicWriteJson(file, obj) {
   fs.renameSync(tmp, file);
 }
 
-// serviceId -> display name (Signal names overridden by Nathan's display names).
-function buildNameMap(sdb, nicks) {
-  const m = new Map();
-  for (const r of sdb.prepare(
-    "SELECT serviceId, COALESCE(name, profileFullName, profileName, e164) AS nm FROM conversations WHERE type='private' AND serviceId IS NOT NULL"
-  ).all()) if (r.nm) m.set(r.serviceId, r.nm);
-  for (const [sid, info] of Object.entries(nicks)) if (info && info.name) m.set(sid, info.name);
-  return m;
-}
+// serviceId -> display name. THE rule lives in lib/signal-names: Signal nickname,
+// then iPhone contact name, then phone number; the Signal PROFILE name (theirs, not
+// yours) is never used. Speaker labels are frozen into the archive from this, so it
+// is the same resolver the /repair path re-runs.
+const buildNameMap = signalNameMap;
 
 // The incremental bound for one source, shared by contacts and groups so the
 // reuse-overlap can never be applied to one and forgotten on the other.
@@ -198,7 +225,7 @@ function callItems(sdb, convIds, bound, nameFor) {
   }
   return items;
 }
-function sweepContact(cdb, sdb, slug, cursors, now, ranAt, nicks, deep, nameMap) {
+function sweepContact(cdb, sdb, slug, cursors, now, ranAt, deep, nameMap) {
   const rel = `data/contacts/${slug}.md`;
   const row = cdb.prepare('SELECT signal_id, name FROM contacts WHERE file_path = ?').get(rel);
   if (!row || !row.signal_id) return NOTHING;
@@ -209,7 +236,7 @@ function sweepContact(cdb, sdb, slug, cursors, now, ranAt, nicks, deep, nameMap)
   const q = buildMessageQuery(sources, row.signal_id, bound);
   if (!q) return NOTHING; // no message sources at all (so no call sources either)
 
-  const display = (nicks[row.signal_id] && nicks[row.signal_id].name) || row.name;
+  const display = nameMap.get(row.signal_id) || row.name;
   const first = display.split(' ')[0];
   const speaker = (m) => {
     if (m.type === 'outgoing' || m.src === MY_SERVICE_ID) return 'Nathan';
@@ -373,7 +400,6 @@ function runSweep(cdb, sdb, opts = {}) {
   const deep = Boolean(opts.deep);
   const onlySlug = opts.onlySlug || null;
   const now = Date.now();
-  const nicks = loadJson(DISPLAY_NAMES, {}).byServiceId || {};
   const state = loadJson(ARCHIVE_STATE, {});
   const cursors = (state && state.cursors) || {};
   const ranAt = state && state.ranAt;
@@ -406,8 +432,12 @@ function runSweep(cdb, sdb, opts = {}) {
   // Built once and shared by BOTH sweep paths. The per-contact sweep needs it so a
   // THIRD party in one of the contact's multi-groups is labeled with their own
   // name, not the contact's (the group speaker-attribution bug).
-  const nameMap = buildNameMap(sdb, nicks);
-  for (const slug of slugs) tally(slug, sweepContact(cdb, sdb, slug, cursors, now, ranAt, nicks, deep, nameMap));
+  const nameMap = buildNameMap(sdb);
+  // Reconcile display names with Signal on every sweep (the sweep is the "pull from
+  // Signal" step, and runs on the ingest/sweep cadence). A Signal nickname change
+  // thus propagates to the profile heading + crm.db name automatically.
+  syncContactNames(cdb, slugs, nameMap);
+  for (const slug of slugs) tally(slug, sweepContact(cdb, sdb, slug, cursors, now, ranAt, deep, nameMap));
   if (groups.length) {
     for (const g of groups) tally(`group:${g.slug}`, sweepGroup(cdb, sdb, g, cursors, now, ranAt, nameMap, deep));
   }

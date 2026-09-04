@@ -13,7 +13,79 @@ Newest first.
 
 ---
 
+## 2026-09-03
+
+### DECISION — the Signal nickname is the single source of truth for a person's name
+Audited every place a display name came from. Five sources existed and disagreed for
+several contacts: the Signal profile name (set by *them* — gave us "fingersix",
+"A Ch"), the iPhone contact name, the Signal nickname (set by *me*), the
+`crm-display-names.json` override file, and the hand-editable profile `# Title`
+(via a Rename button). New rule, in priority order: **Signal nickname → iPhone
+contact name → phone number**. The Signal PROFILE name is never used.
+
+- Verified the Signal nickname (`nicknameGivenName`/`nicknameFamilyName` on the
+  conversation) is stored locally AND syncs across linked devices via Signal's
+  storage service — the same 19 nicknames read byte-identically from Signal on DUNA
+  and MINMUS. So renaming someone in the Signal app renames them here.
+- New `lib/signal-names.js` is the ONE resolver (`signalNameMap`/`nameFor`);
+  it excludes my own and the bot's serviceIds so a mis-linked contact is never
+  retitled to the bot's nickname. Every caller that wrote
+  `COALESCE(name, profileFullName, profileName, e164)` by hand now uses it.
+- `crm-display-names.json` is DELETED. Its display-override half is subsumed by the
+  rule; its alias half ("abhi" → Abhiram) moved into the confirmed-nickname store,
+  which `lib/people-resolve` already layers over derived names (preserving
+  EXPLICIT-BEATS-DERIVED). `lib/aliases` no longer reads any file.
+- The profile `# Title` is now auto-derived and read-only: `crm-refresh.syncContactNames`
+  rewrites the heading and `crm.db` name from the resolved Signal name on every run
+  (idempotent), so the UI and the model can never drift. The Rename button/route/view
+  were removed. To rename someone, set their Signal nickname.
+- SURPRISE: DUNA carries 17 stale profile `.md` files (fingersix, p, shreyas, nigesh,
+  abhiram-chalamalasetty, …) that MINMUS does not. `crm.db` contacts (37) and
+  `crm-tracked.json` (20) are identical on both; only the served `.md` set differs.
+  MINMUS's 20 tracked profiles ALL already match their Signal name — zero live drift.
+  The earlier "4 mismatches" were DUNA-only cruft, not served.
+- Archived sender labels are frozen (append-only); `crm-repair-senders` re-run under
+  the new resolver relabels history, and now covers DMs, not just group rows.
+
 ## 2026-08-24
+
+### SURPRISE — the structured-Person seam had nine fail-open/rebuild defects
+Cross-model review exposed gaps that the first refactor's happy-path selftest did not
+exercise. Fixed the mechanical cases without changing the unresolved content policy:
+
+- `crm-wipe` now deletes the rebuilt profile's facts, outbound mention edges, and
+  merge frontier together. Inbound edges remain because they are observations owned
+  by other profiles.
+- A manual clear is now a timestamped tombstone (`facts.retracted_at`), so a
+  late-arriving older message cannot resurrect the value. A genuinely newer message
+  can still supersede it; whether manual values should outrank even newer messages is
+  a separate policy decision.
+- Structured blocks must be fully closed; identity rendering uses replacement
+  callbacks (so `$&`, `$1`, and `$'` are data); multiple identity facts render
+  newest-first; inferred snapshot dates use the source message's Pacific day.
+- Fact provenance is now restricted to the current chunk OR ids cited by the
+  pre-merge profile. Mentions remain current-chunk-only. This preserves legitimate
+  carry-forward while closing arbitrary archive-row provenance laundering.
+- Standalone `crm-merge` now uses the same facts + mentions + merge-frontier SQLite
+  transaction as daily ingest and supplies the ledger's valid message ids.
+- Retry reply parsing reads only the newest pi session file. Cost accounting still
+  sums every attempt, but a failed attempt's structured blocks can no longer leak
+  into the successful attempt's commit.
+- People cards with identity-only structured rows fall back to their existing prose
+  summary instead of rendering blank.
+
+Regression coverage lives in `evals/structured-person-selftest.js`; the four
+deterministic suites remain green (42 mutants, 29 Timeline checks, 137 tier
+assertions, structured-person PASS).
+
+### DECISION — carried-forward fact provenance must already be visible in the pre-merge profile
+The merge prompt permits a fact's source id to come either from the new ledger or
+from that fact's existing profile citation. A chunk-only validator would reject
+legitimate carry-forward; archive-existence-only permits laundering any archived
+row into a fact and then superseding good history. The validator therefore accepts
+the union of current chunk ids and citation ids extracted from the profile snapshot
+taken before the model ran. It deliberately does not trust citations the model adds
+during the current edit as evidence of prior provenance.
 
 ### DECISION — Person is now a structured read model; facts and mentions are authoritative rows
 Completed the structured-person refactor that began with `lib/person.js` Phase 0. Merge replies now carry mandatory JSON `[[FACTS]]` and `[[MENTIONS]]` blocks. `lib/structured-person.js` validates source ids against the archive, resolves mention targets ambiguity-first through the existing people resolver, writes typed facts/edges, and deterministically renders `## What I know` plus identity fields. `lib/person.js` reads current facts and graph neighbors; the People page consumes that accessor. Relationship/Birthday/Phone manual edits write through as provenance-free manual standing facts. `lib/schema.js`'s redundant todo implementation was removed; `lib/tasks.js` remains the only task store.

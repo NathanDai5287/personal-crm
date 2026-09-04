@@ -15,7 +15,8 @@ const fs = require('fs');
 const path = require('path');
 const { openSignalDb, openCrmDb } = require('../lib/signal-db');
 const { planAll, planContact, writeChunkLedger } = require('../scripts/crm-refresh');
-const { CONTACTS_DIR, DISPLAY_NAMES } = require('../lib/config');
+const { CONTACTS_DIR } = require('../lib/config');
+const { signalNameMap } = require('../lib/signal-names');
 
 // A contact whose cursor is already caught up has no PENDING chunk, so planAll
 // returns nothing for them and they cannot be a fixture. For held-out contacts
@@ -29,11 +30,9 @@ const HELDOUT_WINDOW_DAYS = 7;
 function planFromHistory(cdb, sdb, slug) {
   const row = cdb.prepare('select max(sent_at) t from messages where contact_slug = ?').get(slug);
   if (!row || !row.t) return null;
-  let nicks = {};
-  try { nicks = JSON.parse(fs.readFileSync(DISPLAY_NAMES, 'utf8')).byServiceId || {}; } catch { /* none */ }
   return planContact(cdb, sdb, slug, {
     cursors: {},              // no cursor -> backfill window, not "everything since 0"
-    nicks,
+    nameMap: signalNameMap(sdb),
     now: row.t + 1,           // anchored to data, not Date.now()
     includePartialWeek: true, // the last week is partial by definition
     backfillDays: HELDOUT_WINDOW_DAYS,

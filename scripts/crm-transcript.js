@@ -50,13 +50,13 @@ const limit = parseInt(limitArg || '20', 10);
 const { fmtLocal } = require('../lib/weeks');
 function fmtTs(ms) { return fmtLocal(ms); }
 
+const { signalNameMap } = require('../lib/signal-names');
+
 const db = openSignalDb();
 
-// serviceId -> display name, from every private conversation (one row per person).
-const nameMap = new Map();
-for (const r of db.prepare(`SELECT serviceId, COALESCE(name, profileFullName, profileName, e164) AS nm FROM conversations WHERE type='private' AND serviceId IS NOT NULL`).all()) {
-  if (r.nm) nameMap.set(r.serviceId, r.nm);
-}
+// serviceId -> display name (Signal nickname > iPhone contact > phone; profile name
+// never used — see lib/signal-names).
+const nameMap = signalNameMap(db);
 
 let conv;
 if (serviceId) {

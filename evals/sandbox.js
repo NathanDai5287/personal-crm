@@ -259,19 +259,6 @@ function crmDbTemplate() {
 }
 
 // A serviceId-shaped identifier derived from the slug. Deterministic, and it is
-// NOT anybody's real Signal id — the real ones live in data/, which is never read
-// here.
-function fakeServiceId(slug) {
-  const h = sha(`eval-sandbox-serviceid:${slug}`);
-  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
-}
-
-function displayName(profile, slug) {
-  const m = /^#\s+(.+)$/m.exec(String(profile || ''));
-  if (m) return m[1].trim();
-  return slug.split('-').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
-}
-
 function ledgerIds(text) {
   return [...String(text || '').matchAll(/^\[[^\]]+\]\s*⟨m(\d+)⟩/gm)].map((m) => Number(m[1]));
 }
@@ -352,11 +339,9 @@ function dataStandins(cases, focus) {
     groups: [],
   }, null, 2)}\n`);
 
-  const byServiceId = {};
-  for (const slug of slugs) {
-    byServiceId[fakeServiceId(slug)] = { name: displayName(profiles.get(slug), slug), slug };
-  }
-  out.set('data/crm-display-names.json', `${JSON.stringify({ byServiceId }, null, 2)}\n`);
+  // Names now resolve from Signal (lib/signal-names) and the profile `# Title` /
+  // crm.db contacts.name; there is no crm-display-names.json any more, so the
+  // sandbox no longer writes one.
 
   out.set('data/crm-refresh-state.json', `${JSON.stringify({ cursors, ranAt }, null, 2)}\n`);
   out.set('data/crm-archive-state.json', `${JSON.stringify({

@@ -610,9 +610,11 @@ function contactList() {
     return listContacts().map((c) => {
       const waiting = pending.get(c.slug, c.slug).n;
       const person = PERSON.getPerson(c.slug, { cdb });
-      const structured = person && person.facts.length
+      const structuredFacts = person
         ? person.facts.filter((f) => !['relationship', 'birthday', 'phone', 'signal_id'].includes(f.field)).slice(0, 3)
-          .map((f) => mdInline(`**${factLabel(f.field)}:** ${f.value}${f.src_msg ? ` ⟨m${f.src_msg}⟩` : ''}`))
+        : [];
+      const structured = structuredFacts.length
+        ? structuredFacts.map((f) => mdInline(`**${factLabel(f.field)}:** ${f.value}${f.src_msg ? ` ⟨m${f.src_msg}⟩` : ''}`))
         : null;
       const facts = structured || c.talkingPoints.slice(0, 3).map((tp) => mdInline((tp.date ? `**${tp.date}** ` : '') + tp.text));
       return {
@@ -1640,54 +1642,11 @@ const NN_JS = `<script>(function(){
   });
 })();</script>`;
 
-// ---- rename a contact's display name ---------------------------------------
-// The roster name is the profile's `# ` title line (listContacts reads it), so a
-// rename is a one-line rewrite of data/contacts/<slug>.md. The slug, archive
-// (crm.db contact_slug), cursors, and git history are all keyed off the slug and
-// are deliberately untouched — this changes what you SEE, not the identity.
-function renamePage(slug) {
-  const file = path.posix.join(CONTACTS_DIR, `${slug}.md`);
-  let md;
-  try { md = fs.readFileSync(file, 'utf8'); } catch { return null; }
-  const titleLine = md.split(/\r?\n/).find((l) => l.startsWith('# '));
-  const name = titleLine ? titleLine.slice(2).trim() : slug;
-  const v = V.rename({ slug, name });
-  return page(v.title, render(v.body));
-}
-
-function renameContact(slug, newName) {
-  const file = path.posix.join(CONTACTS_DIR, `${slug}.md`);
-  // A rename is a read-modify-write of the same profile a merge/sweep may be
-  // rewriting — same hazard applyManualEdit guards. Refuse while THIS process runs
-  // a job (its own lock would hand back an inherited no-op), then take the
-  // cross-process pipeline lock so a scheduled run can't clobber the rename.
-  if (job && job.running) return { ok: false, error: 'a job is running — rename again when it finishes' };
-  const lock = require('../lib/pipeline-lock').acquire('manual-rename');
-  if (!lock.ok) return { ok: false, error: `a run is in progress (${lock.holderDesc}) — rename again when it finishes` };
-  try {
-    let md;
-    try { md = fs.readFileSync(file, 'utf8'); } catch { return { ok: false, error: 'no such contact' }; }
-    const lines = md.split(/\r?\n/);
-    const idx = lines.findIndex((l) => l.startsWith('# '));
-    if (idx === -1) lines.unshift(`# ${newName}`, '');
-    else lines[idx] = `# ${newName}`;
-    fs.writeFileSync(file, lines.join('\n'));
-    // Best-effort commit to the isolated history, so the rename is attributed and
-    // future diffs stay clean. Non-fatal: the file is already written and served,
-    // and the next pipeline run snapshots it regardless.
-    const relPath = `data/contacts/${slug}.md`;
-    try {
-      // -f: data/ is ignored by the MAIN repo's .gitignore, which this shared
-      // work-tree applies — a bare `add` refuses the path (memory-commit.js
-      // force-adds for the same reason).
-      execFileSync('git', ['--git-dir', GITDIR, '--work-tree', ROOT, 'add', '-f', '--', relPath], { cwd: ROOT, timeout: 15_000 });
-      execFileSync('git', ['--git-dir', GITDIR, '--work-tree', ROOT, 'commit', '-m', `rename ${slug} → ${newName}`], { cwd: ROOT, timeout: 15_000 });
-    } catch { /* uncommitted rename still shows */ }
-    return { ok: true };
-  } finally {
-    lock.release();
-  }
-}
+// NO RENAME. A contact's display name is auto-derived from their Signal nickname
+// (lib/signal-names) and reconciled into the profile heading + crm.db on every
+// pipeline run (crm-refresh.syncContactNames). To rename someone, set their
+// nickname in the Signal app; it syncs here. The old /c/<slug>/rename form and its
+// renameContact() writer were removed.
 
 // ---- manual edit: apply a save from the profile page -------------------------
 // One POST carries every dirty unit: `##` sections as replacement Markdown, and
@@ -1807,7 +1766,7 @@ function applyManualEdit(slug, payload) {
         personDb = openCrmDb();
         personDb.exec('BEGIN IMMEDIATE');
         for (const f of fieldChanges) {
-          if (f.to === '_TBD_') retractCurrentFact(personDb, slug, f.key);
+          if (f.to === '_TBD_') retractCurrentFact(personDb, slug, f.key, startedAt);
           else recordFact(personDb, {
             slug, field: f.key, kind: 'standing', value: f.to, src_msg: null,
             observed_at: startedAt, run_id: null,
@@ -3452,32 +3411,8 @@ function start() {
         }, 512_000);
         return;
       }
-      // Rename a contact's display name. GET renders the form, POST applies it.
-      const cn = url.pathname.match(/^\/c\/([^/]+)\/rename$/);
-      if (cn) {
-        const slug = decodeURIComponent(cn[1]);
-        if (!isSafeSlug(slug)) { send(400, page('Bad request', '<p>Bad request.</p>')); return; }
-        if (req.method === 'POST') {
-          if (!firstPartyOnly(req)) { send(403, page('Forbidden', '<p>Cross-site request refused.</p>')); return; }
-          readBody(req, (raw2) => {
-            try {
-              const name = String(new URLSearchParams(raw2).get('name') || '').replace(/[\r\n]+/g, ' ').trim().slice(0, 120);
-              if (!name) { send(400, page('Bad request', '<div class="back"><a href="/admin">&larr; pipeline</a></div><p>A name is required.</p>')); return; }
-              const r = renameContact(slug, name);
-              if (!r.ok) { send(404, page('Not found', `<p>${esc(r.error)}</p>`)); return; }
-              res.writeHead(303, { Location: '/admin' });
-              res.end();
-            } catch (e) {
-              try { send(500, page('Error', `<p class="bad">${esc(String(e.message).slice(0, 200))}</p>`)); } catch { /* sent */ }
-            }
-          });
-          return;
-        }
-        const html = renamePage(slug);
-        if (!html) { send(404, page('Not found', '<div class="back"><a href="/admin">&larr; pipeline</a></div><p>No such contact.</p>')); return; }
-        send(200, html);
-        return;
-      }
+      // A contact's display name is auto-derived from their Signal nickname
+      // (lib/signal-names) and is not editable here — the /rename route was removed.
       const ch = url.pathname.match(/^\/c\/([^/]+)\/history$/);
       if (ch) {
         const slug = decodeURIComponent(ch[1]);

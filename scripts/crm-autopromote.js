@@ -11,8 +11,9 @@
 
 const fs = require("fs");
 const { openSignalDb, openCrmDb } = require("../lib/signal-db");
-const { TRACKED, CONTACTS_DIR, DISPLAY_NAMES, BOT_SERVICE_ID } = require("../lib/config");
+const { TRACKED, CONTACTS_DIR, BOT_SERVICE_ID } = require("../lib/config");
 const { dateKey } = require("../lib/weeks");
+const { signalNameDetails } = require("../lib/signal-names");
 
 const DAY = 86_400_000;
 const WINDOW_DAYS = 30; // look-back window for "recent activity"
@@ -36,15 +37,12 @@ function todayKey() {
 
 function main() {
   const tracked = JSON.parse(fs.readFileSync(TRACKED, "utf8"));
-  const nicks = (() => {
-    try {
-      return JSON.parse(fs.readFileSync(DISPLAY_NAMES, "utf8")).byServiceId || {};
-    } catch {
-      return {};
-    }
-  })();
   const cdb = openCrmDb();
   const sdb = openSignalDb();
+  // serviceId -> { name, source } under THE rule (Signal nickname > iPhone contact >
+  // phone). No display-name override file any more — the nickname you set in Signal
+  // is the name, so a promoted contact is titled exactly as Signal shows them.
+  const names = signalNameDetails(sdb);
 
   // Already-tracked serviceIds + slugs.
   const trackedSlugs = new Set(tracked.slugs);
@@ -60,10 +58,11 @@ function main() {
   const since = Date.now() - WINDOW_DAYS * DAY;
   const convs = sdb
     .prepare(
-      `SELECT id, serviceId, COALESCE(name, profileFullName, profileName, e164) AS nm, e164
-       FROM conversations WHERE type='private' AND serviceId IS NOT NULL`,
+      `SELECT id, serviceId, e164 FROM conversations
+       WHERE type='private' AND serviceId IS NOT NULL`,
     )
-    .all();
+    .all()
+    .map((c) => ({ ...c, nm: (names.get(c.serviceId) || {}).name || c.e164 || null }));
 
   const candidates = [];
   for (const c of convs) {
@@ -92,14 +91,10 @@ function main() {
   let promoted = 0;
   const promotedSlugs = [];
   for (const c of candidates) {
-    const nick = nicks[c.serviceId];
     const existing = cdb.prepare("SELECT name, file_path FROM contacts WHERE signal_id = ?").get(c.serviceId);
+    const resolved = names.get(c.serviceId) || {};
     let slug, name, source;
-    if (nick && nick.slug) {
-      slug = nick.slug;
-      name = nick.name || c.nm || slug;
-      source = "display name";
-    } else if (existing && existing.file_path) {
+    if (existing && existing.file_path) {
       // Already a known contact (under any name) — reuse it, never insert a duplicate.
       slug = existing.file_path.replace("data/contacts/", "").replace(/\.md$/, "");
       name = existing.name || c.nm || slug;
@@ -108,7 +103,7 @@ function main() {
       name = c.nm || c.serviceId.slice(0, 8);
       slug = slugify(name, c.serviceId.slice(0, 8));
       while (usedSlugs.has(slug) || fs.existsSync(`${CONTACTS_DIR}/${slug}.md`)) slug += "-2";
-      source = "Signal name — add a display name to crm-display-names.json if wrong";
+      source = `${resolved.source || "signal"} — set a Signal nickname if wrong`;
     }
     usedSlugs.add(slug);
     console.log(`- ${c.nm || c.e164 || c.serviceId} → ${slug} (${name})  (${c.total} msgs, ${c.incoming} from them)  [${source}]`);

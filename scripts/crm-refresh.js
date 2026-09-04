@@ -53,9 +53,10 @@ const { confirmedNicknames } = require('../lib/nicknames');
 const { renderedBody, formatLine } = require('../lib/message-context');
 const { buildResolver } = require('../lib/people-resolve');
 const {
-  TRACKED, DISPLAY_NAMES, REFRESH_DIR, CONTACTS_DIR, BOT_SERVICE_ID,
+  TRACKED, REFRESH_DIR, CONTACTS_DIR, BOT_SERVICE_ID,
   INGEST_N, INGEST_FLOOR_DAYS, INGEST_CEILING_DAYS,
 } = require('../lib/config');
+const { signalNameMap } = require('../lib/signal-names');
 
 // CAST OF CHARACTERS: the other tracked people a conversation refers to. So the merge
 // model, reading A's ledger, knows WHO "B"/"bee" is — a real person object with
@@ -105,13 +106,6 @@ const DAY = 86_400_000;
 // a window by hand if one is ever wanted.
 const MERGE_BACKFILL_DAYS = process.env.CRM_BACKFILL_DAYS ? Number(process.env.CRM_BACKFILL_DAYS) : null;
 
-function loadNicknames() {
-  try {
-    return JSON.parse(fs.readFileSync(DISPLAY_NAMES, 'utf8')).byServiceId || {};
-  } catch {
-    return {};
-  }
-}
 
 // ---- planning ------------------------------------------------------------------
 
@@ -131,7 +125,7 @@ function loadNicknames() {
 // up in its date place instead of being stranded below an advancing cursor. See
 // AGENTS.md (BACKFILL == PLAY-IT-FORWARD).
 function planContact(cdb, sdb, slug, opts) {
-  const { nicks, now, includePartialWeek, backfillDays } = opts;
+  const { nameMap, now, includePartialWeek, backfillDays } = opts;
   const rel = `data/contacts/${slug}.md`;
   const row = cdb.prepare('SELECT signal_id, name FROM contacts WHERE file_path = ?').get(rel);
   if (!row || !row.signal_id) return null;
@@ -154,7 +148,7 @@ function planContact(cdb, sdb, slug, opts) {
   // (crm-merge, before pi reads it). A no-media message costs nothing.
   for (const m of msgs) m.rendered = renderedBody(cdb, m);
 
-  const display = (nicks[row.signal_id] && nicks[row.signal_id].name) || row.name;
+  const display = nameMap.get(row.signal_id) || row.name;
   const cutoff = lastCompleteWeekStart(now);
 
   // On-demand single-contact runs (includePartialWeek) bypass the gate and fold
@@ -214,7 +208,9 @@ function planContact(cdb, sdb, slug, opts) {
 }
 
 // Plan every tracked contact (or just one). Sweeps the archive first so the plan
-// reflects everything Signal currently has.
+// reflects everything Signal currently has. The sweep (crm-archive.runSweep) also
+// reconciles each contact's display name/heading with their Signal nickname, so no
+// separate name-sync step is needed here.
 function planAll(cdb, sdb, opts = {}) {
   const {
     onlySlug = null,
@@ -232,10 +228,10 @@ function planAll(cdb, sdb, opts = {}) {
   let tracked = JSON.parse(fs.readFileSync(TRACKED, 'utf8')).slugs || [];
   if (onlySlug) tracked = tracked.filter((s) => s === onlySlug);
 
-  const nicks = loadNicknames();
+  const nameMap = signalNameMap(sdb);
   const plans = [];
   for (const slug of tracked) {
-    const p = planContact(cdb, sdb, slug, { nicks, now, includePartialWeek, backfillDays });
+    const p = planContact(cdb, sdb, slug, { nameMap, now, includePartialWeek, backfillDays });
     if (p) plans.push(p);
   }
   return plans;

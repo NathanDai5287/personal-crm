@@ -23,31 +23,26 @@
 //
 //   node scripts/crm-repair-senders.js            # preview (dry-run)
 //   node scripts/crm-repair-senders.js --write     # apply
-const fs = require('fs');
 const { openCrmDb, openSignalDb } = require('../lib/signal-db');
-const { MY_SERVICE_ID, BOT_SERVICE_ID, DISPLAY_NAMES } = require('../lib/config');
+const { MY_SERVICE_ID, BOT_SERVICE_ID } = require('../lib/config');
+const { signalNameMap: buildNameMap } = require('../lib/signal-names');
 
 const WRITE = process.argv.includes('--write');
 
-// Same resolution as crm-archive.buildNameMap: Signal names, overridden by
-// Nathan's display-name overrides (crm-display-names.json).
-function buildNameMap(sdb) {
-  let nicks = {};
-  try { nicks = JSON.parse(fs.readFileSync(DISPLAY_NAMES, 'utf8')).byServiceId || {}; } catch { /* none */ }
-  const m = new Map();
-  for (const r of sdb.prepare(
-    "SELECT serviceId, COALESCE(name, profileFullName, profileName, e164) AS nm FROM conversations WHERE type='private' AND serviceId IS NOT NULL",
-  ).all()) if (r.nm) m.set(r.serviceId, r.nm);
-  for (const [sid, info] of Object.entries(nicks)) if (info && info.name) m.set(sid, info.name);
-  return m;
-}
+// Speaker names resolve exactly as the sweep freezes them (lib/signal-names):
+// Signal nickname, then iPhone contact name, then phone number; the Signal PROFILE
+// name is never used. Re-running this after the resolver changed is how the old
+// profile-name labels ("fingersix") get rewritten to the nickname ("Darren Pai").
 
 function main() {
   const cdb = openCrmDb();
   const sdb = openSignalDb();
   const nameMap = buildNameMap(sdb);
-  // Every GROUP conversationId (bi- and multi- alike). Only rows in these convs
-  // can carry a mislabeled third-party speaker; DMs are single-party and correct.
+  // GROUP conversationIds (bi- and multi- alike). A group third party is labeled by
+  // FULL name; a DM sender (and a contact's own group line) by FIRST name — the same
+  // split the sweep writes (crm-archive.sweepContact). We now repair BOTH: a wrong
+  // Signal PROFILE name ("fingersix") baked into a DM before the resolver changed is
+  // exactly what this rewrites to the nickname.
   const groupConvIds = new Set(
     sdb.prepare("SELECT id FROM conversations WHERE type='group'").all().map((r) => r.id),
   );
@@ -57,17 +52,22 @@ function main() {
   const rows = cdb.prepare('SELECT id, conv_id, src, sender, type FROM messages WHERE src IS NOT NULL').all();
   const fixes = [];
   for (const r of rows) {
-    if (!groupConvIds.has(r.conv_id)) continue;
-    let correct;
-    if (r.type === 'outgoing' || r.src === MY_SERVICE_ID) correct = 'Nathan';
-    else if (r.src === BOT_SERVICE_ID) correct = 'Janet';
-    else correct = nameMap.get(r.src) || null;
-    if (!correct) continue;                                   // src not resolvable — leave it
-    if (r.sender === correct || r.sender === firstWord(correct)) continue; // already right
+    let full;
+    if (r.type === 'outgoing' || r.src === MY_SERVICE_ID) full = 'Nathan';
+    else if (r.src === BOT_SERVICE_ID) full = 'Janet';
+    else full = nameMap.get(r.src) || null;
+    if (!full) continue;                                       // src not resolvable — leave it
+    // Either the full or the first-name form is an acceptable, already-correct label.
+    if (r.sender === full || r.sender === firstWord(full)) continue;
+    // Write it the way the sweep would: DMs (and Nathan) use the first name; a third
+    // party in a group keeps their full name so shared-group lines stay unambiguous.
+    const isGroup = groupConvIds.has(r.conv_id);
+    const correct = (isGroup && r.src !== MY_SERVICE_ID) ? full : firstWord(full);
+    if (r.sender === correct) continue;
     fixes.push({ id: r.id, from: r.sender, to: correct });
   }
 
-  console.log(`crm-repair-senders: ${WRITE ? 'WRITE' : 'DRY-RUN'} | ${fixes.length} group row(s) to relabel (of ${rows.length} with a src)`);
+  console.log(`crm-repair-senders: ${WRITE ? 'WRITE' : 'DRY-RUN'} | ${fixes.length} row(s) to relabel (of ${rows.length} with a src)`);
   const byPair = new Map();
   for (const f of fixes) { const k = `${f.from}  ->  ${f.to}`; byPair.set(k, (byPair.get(k) || 0) + 1); }
   for (const [k, n] of [...byPair.entries()].sort((a, b) => b[1] - a[1]).slice(0, 40)) {
