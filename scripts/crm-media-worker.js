@@ -92,8 +92,23 @@ function runStt(file, tmpDir) {
   // whisper.cpp needs 16 kHz mono PCM WAV; transcode the decrypted media first.
   const wav = path.join(tmpDir, `${path.basename(file)}.wav`);
   try {
-    execFileSync(FFMPEG, ['-y', '-i', file, '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', wav],
-      { stdio: 'ignore', timeout: 120_000 });
+    try {
+      // Capture stderr so a NO-AUDIO input (a silent video / muted clip / GIF-as-mp4)
+      // can be told apart from a real transcode failure.
+      execFileSync(FFMPEG, ['-y', '-i', file, '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', wav],
+        { stdio: ['ignore', 'ignore', 'pipe'], timeout: 120_000, encoding: 'utf8' });
+    } catch (e) {
+      const err = String((e && e.stderr) || (e && e.message) || '');
+      // A clip with no audio stream is not a failure — there is nothing to transcribe.
+      // Signal it so the caller records 'skip', not a permanent 'error' that inflates
+      // the error count and burns a retry on every --retry-errors.
+      if (/does not contain any stream|matches no streams/i.test(err)) {
+        const noAudio = new Error('no audio track');
+        noAudio.code = 'NO_AUDIO';
+        throw noAudio;
+      }
+      throw e;
+    }
     const out = execFileSync(WHISPER_CLI, ['-m', WHISPER_MODEL, '-f', wav, '-nt', '-np'],
       { encoding: 'utf8', timeout: 600_000, maxBuffer: 8 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] });
     return out.replace(/\s+/g, ' ').trim();
@@ -142,8 +157,13 @@ function processOne(cdb, sdb, kinds, tmpDir) {
     else M.setDone(cdb, claim.hash, text, engine);
     console.log(`  ${claim.kind} ${claim.hash.slice(0, 12)}… -> ${text ? `${text.length} chars` : 'empty'}`);
   } catch (e) {
-    M.setError(cdb, claim.hash, e.message, engine);
-    console.log(`  ${claim.kind} ${claim.hash.slice(0, 12)}… -> ERROR ${e.message}`);
+    if (e && e.code === 'NO_AUDIO') {
+      M.setSkip(cdb, claim.hash, 'no audio track');
+      console.log(`  ${claim.kind} ${claim.hash.slice(0, 12)}… -> skipped (no audio track)`);
+    } else {
+      M.setError(cdb, claim.hash, e.message, engine);
+      console.log(`  ${claim.kind} ${claim.hash.slice(0, 12)}… -> ERROR ${e.message}`);
+    }
   } finally {
     if (tmp) { try { fs.unlinkSync(tmp); } catch { /* gone */ } }
   }
