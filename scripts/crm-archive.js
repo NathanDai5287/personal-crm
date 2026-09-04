@@ -410,6 +410,20 @@ function runSweep(cdb, sdb, opts = {}) {
   ensureMessagesTable(cdb); // creates the table and adds src/type if missing
   const backfilledMeta = backfillMeta(cdb, sdb);
 
+  // Keep the contacts table honest: prune rows whose profile was deleted (i.e. the person
+  // was untracked). Full sweep only; non-fatal. This is the write-side of the tracked-set
+  // boundary (lib/person.reconcileContacts); lib/person.trackedContacts is the read-side.
+  // Together they guarantee an untracked person is invisible to every people surface.
+  if (!onlySlug) {
+    try {
+      const pruned = require('../lib/person').reconcileContacts(cdb);
+      if (pruned.length) {
+        const names = pruned.map((p) => p.replace('data/contacts/', '').replace(/\.md$/, '')).join(', ');
+        console.log(`crm-archive: pruned ${pruned.length} untracked contact row(s): ${names}`);
+      }
+    } catch (e) { console.error('crm-archive: contact reconcile failed (non-fatal): ' + e.message); }
+  }
+
   let seen = 0;
   let inserted = 0;
   const collisions = [];

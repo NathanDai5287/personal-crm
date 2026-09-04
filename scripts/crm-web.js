@@ -920,12 +920,9 @@ function spanPage(start, end) {
 // uses everywhere else), plus the synthetic 'nathan' node the scanner also uses.
 function graphNameMap(cdb) {
   const m = new Map();
-  let rows = [];
-  try { rows = cdb.prepare('SELECT file_path, name FROM contacts').all(); } catch { /* no contacts table yet */ }
-  for (const r of rows) {
-    const slug = String(r.file_path || '').replace('data/contacts/', '').replace(/\.md$/, '');
-    if (slug) m.set(slug, r.name || slug);
-  }
+  // TRACKED people only (lib/person): an untracked stub row never becomes a graph node
+  // or a dropdown option. OWNER is added explicitly (he has no profile-about-him).
+  try { for (const c of PERSON.trackedContacts(cdb)) m.set(c.slug, c.name || c.slug); } catch { /* no contacts yet */ }
   m.set(OWNER_SLUG, 'Nathan');
   return m;
 }
@@ -937,26 +934,41 @@ function graphNameFor(nameBySlug, slug) {
 }
 
 // GET /graph — the diagram + the reliable table fallback below it.
-function graphPage() {
+function graphPage(opts = {}) {
+  const hideMine = !!opts.hideMine;
+  const hideDm = !!opts.hideDm;
+  // Carried onto every edge link so a filter survives a click into an edge page.
+  const edgeSuffix = (hideMine ? '&mine=0' : '') + (hideDm ? '&dm=0' : '');
   let cdb;
   try { cdb = openCrmDb(); } catch { cdb = null; }
   let edges = [];
   let nameBySlug = new Map();
   try {
     if (cdb) {
-      edges = mentionEdges(cdb);
+      edges = mentionEdges(cdb, { hideMine, hideDm });
       nameBySlug = graphNameMap(cdb);
     }
   } finally {
     if (cdb) { try { cdb.close(); } catch { /* already closed */ } }
   }
 
+  // Two view filters (default off): hide the mentions Nathan speaks, and hide the trivial
+  // case of naming the other party in your own 1:1. Each link flips one flag.
+  const gq = (m, d) => { const p = []; if (m) p.push('mine=0'); if (d) p.push('dm=0'); return p.length ? `?${p.join('&')}` : ''; };
+  const controls = '<p class="sub">Filters: '
+    + `<a href="/graph${gq(!hideMine, hideDm)}">${hideMine ? 'show' : 'hide'} my mentions</a>`
+    + ` &middot; <a href="/graph${gq(hideMine, !hideDm)}">${hideDm ? 'show' : 'hide'} naming the other person in a 1:1</a>`
+    + ((hideMine || hideDm) ? ' &middot; <a href="/graph">reset</a>' : '')
+    + '</p>';
+
   const caption = '<p class="sub">Every edge is one person mentioning another, by name, in your archived '
     + 'messages &middot; click an edge to see the citations.</p>';
 
   if (!edges.length) {
-    const body = `<div class="profile"><h1>Relationship graph</h1>${caption}`
-      + '<p>No mentions recorded yet &mdash; this fills in after the next sweep runs the mention scan.</p></div>';
+    const empty = (hideMine || hideDm)
+      ? '<p>No edges match the current filters.</p>'
+      : '<p>No mentions recorded yet &mdash; this fills in after the next sweep runs the mention scan.</p>';
+    const body = `<div class="profile"><h1>Relationship graph</h1>${caption}${controls}${empty}</div>`;
     return page('Relationship graph — personal-crm', body, '/graph');
   }
 
@@ -1003,7 +1015,7 @@ function graphPage() {
     if (!a || !b) return ''; // defensive: never throw on a row geometry can't place
     const fromName = graphNameFor(nameBySlug, e.from_slug);
     const toName = graphNameFor(nameBySlug, e.to_slug);
-    const href = `/graph/edge?from=${encodeURIComponent(e.from_slug)}&to=${encodeURIComponent(e.to_slug)}`;
+    const href = `/graph/edge?from=${encodeURIComponent(e.from_slug)}&to=${encodeURIComponent(e.to_slug)}${edgeSuffix}`;
     const titleTxt = `${fromName} → ${toName} · ${e.n} mention${e.n === 1 ? '' : 's'}`;
     let d;
     if (e.from_slug === e.to_slug) {
@@ -1051,20 +1063,23 @@ function graphPage() {
   // Table fallback: same edges, most-weighted first, every row a link. This is
   // what makes the feature usable even where SVG hit-testing is fiddly.
   const rows = [...edges].sort((x, y) => (y.n - x.n) || (y.last - x.last)).map((e) => {
-    const href = `/graph/edge?from=${encodeURIComponent(e.from_slug)}&to=${encodeURIComponent(e.to_slug)}`;
+    const href = `/graph/edge?from=${encodeURIComponent(e.from_slug)}&to=${encodeURIComponent(e.to_slug)}${edgeSuffix}`;
     return `<tr><td><a href="${esc(href)}">${esc(graphNameFor(nameBySlug, e.from_slug))}</a></td><td>&rarr;</td>`
       + `<td><a href="${esc(href)}">${esc(graphNameFor(nameBySlug, e.to_slug))}</a></td>`
       + `<td class="num">${e.n}</td><td>${esc(ptLocal(e.last))}</td></tr>`;
   }).join('');
   const table = `<table class="tbl"><tr><th>From</th><th></th><th>To</th><th>mentions</th><th>last</th></tr>${rows}</table>`;
 
-  const body = `<div class="profile"><h1>Relationship graph</h1>${caption}${svg}<h2>All edges</h2>${table}</div>`;
+  const body = `<div class="profile"><h1>Relationship graph</h1>${caption}${controls}${svg}<h2>All edges</h2>${table}</div>`;
   return page('Relationship graph — personal-crm', body, '/graph');
 }
 
 // GET /graph/edge?from=&to= — every citation behind one directed edge, newest
 // first, each with a compact "link this citation to someone else" form.
-function edgePage(fromSlug, toSlug) {
+function edgePage(fromSlug, toSlug, opts = {}) {
+  const hideMine = !!opts.hideMine;
+  const hideDm = !!opts.hideDm;
+  const backSuffix = (hideMine ? '&mine=0' : '') + (hideDm ? '&dm=0' : '');
   let cdb;
   try { cdb = openCrmDb(); } catch { cdb = null; }
   let cites = [];
@@ -1072,7 +1087,7 @@ function edgePage(fromSlug, toSlug) {
   let allSlugs = [];
   try {
     if (cdb) {
-      cites = edgeCitations(cdb, fromSlug, toSlug);
+      cites = edgeCitations(cdb, fromSlug, toSlug, { hideMine, hideDm });
       nameBySlug = graphNameMap(cdb);
       allSlugs = [...nameBySlug.keys()];
       if (!allSlugs.includes(OWNER_SLUG)) allSlugs.push(OWNER_SLUG);
@@ -1116,7 +1131,7 @@ function edgePage(fromSlug, toSlug) {
       + action + '</div></div>';
   }).join('');
 
-  const body = '<div class="back"><a href="/graph">&larr; back to graph</a></div>'
+  const body = `<div class="back"><a href="/graph${backSuffix ? `?${backSuffix.replace(/^&/, '')}` : ''}">&larr; back to graph</a></div>`
     + `<div class="profile"><h1>${esc(fromName)} &rarr; ${esc(toName)}</h1>`
     + `<p class="sub">${cites.length} citation${cites.length === 1 ? '' : 's'}, newest first</p>`
     + (cites.length ? rows : '<p>No citations recorded for this edge.</p>')
@@ -3682,12 +3697,15 @@ function start() {
       // Relationship graph: READ (diagram + citations) and CORRECT (relink one
       // citation to a different person). Sits before the generic /c/<slug> match
       // below so 'graph' is never mistaken for a contact slug.
-      if (url.pathname === '/graph') { send(200, graphPage()); return; }
+      // View filters (default off): ?mine=0 hides Nathan's own mentions; ?dm=0 hides
+      // naming the other party of your own 1:1.
+      const graphOpts = { hideMine: url.searchParams.get('mine') === '0', hideDm: url.searchParams.get('dm') === '0' };
+      if (url.pathname === '/graph') { send(200, graphPage(graphOpts)); return; }
       if (url.pathname === '/graph/edge') {
         const from = url.searchParams.get('from') || '';
         const to = url.searchParams.get('to') || '';
         if (!isSafeSlug(from) || !isSafeSlug(to)) { send(400, page('Bad request', '<p>Bad request.</p>')); return; }
-        send(200, edgePage(from, to));
+        send(200, edgePage(from, to, graphOpts));
         return;
       }
       if (url.pathname === '/graph/reassign' && req.method === 'POST') {

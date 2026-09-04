@@ -18,6 +18,7 @@ const { recordMention, reassignMap, mentionSchema } = require('../lib/schema');
 const { buildResolver } = require('../lib/people-resolve');
 const { MY_SERVICE_ID, BOT_SERVICE_ID } = require('../lib/config');
 const { ownWords } = require('../lib/task-trigger');
+const { trackedContacts } = require('../lib/person');
 
 // cdb: the crm.db handle. opts.resolver lets callers (the selftest) inject a
 // fixture resolver instead of building one from the real contacts table.
@@ -25,21 +26,19 @@ function rebuildMentions(cdb, opts = {}) {
   ensureMessagesTable(cdb);
   mentionSchema(cdb);
 
-  const slugOf = (fp) => (fp ? fp.replace('data/contacts/', '').replace(/\.md$/, '') : null);
-  // Only touch the contacts table for the halves the caller didn't inject (the
-  // selftest injects both, and has no contacts table).
-  const contacts = (opts.resolver && opts.idToSlug)
-    ? [] : cdb.prepare('SELECT file_path, name, signal_id FROM contacts').all();
+  // TRACKED people only (lib/person.trackedContacts): a contacts row with a profile on
+  // disk. An untracked stub therefore can't become a graph node, a mention target, or a
+  // speaker. Only queried for the halves the caller didn't inject (the selftest injects
+  // both and has no contacts table).
+  const contacts = (opts.resolver && opts.idToSlug) ? [] : trackedContacts(cdb);
   const resolver = opts.resolver || buildResolver(
-    contacts.map((r) => ({ slug: slugOf(r.file_path), name: r.name })).filter((c) => c.slug)
+    contacts.map((c) => ({ slug: c.slug, name: c.name })).filter((c) => c.slug)
   );
-  // serviceId -> slug for tracked contacts. `src` (the sender's Signal serviceId)
-  // is the AUTHORITATIVE speaker of a message; contact_slug is only the contact the
-  // row was INGESTED for, so it names the speaker on a genuine 1:1 DM but not a
-  // group third party. Resolving the speaker from src fixes that at scale.
+  // serviceId -> slug for tracked contacts. `src` (the sender's Signal serviceId) is the
+  // AUTHORITATIVE speaker of a message; contact_slug is only the contact the row was
+  // INGESTED for, so it names the speaker on a genuine 1:1 DM but not a group third party.
   const idToSlug = opts.idToSlug || new Map(
-    contacts.filter((r) => r.signal_id && slugOf(r.file_path))
-      .map((r) => [r.signal_id, slugOf(r.file_path)])
+    contacts.filter((c) => c.signalId && c.slug).map((c) => [c.signalId, c.slug])
   );
   const remap = reassignMap(cdb);
 
