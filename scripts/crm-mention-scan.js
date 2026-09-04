@@ -17,6 +17,7 @@ const { ensureMessagesTable } = require('../lib/archive');
 const { recordMention, reassignMap, mentionSchema } = require('../lib/schema');
 const { buildResolver } = require('../lib/people-resolve');
 const { MY_SERVICE_ID, BOT_SERVICE_ID } = require('../lib/config');
+const { ownWords } = require('../lib/task-trigger');
 
 // cdb: the crm.db handle. opts.resolver lets callers (the selftest) inject a
 // fixture resolver instead of building one from the real contacts table.
@@ -71,7 +72,12 @@ function rebuildMentions(cdb, opts = {}) {
       else speaker = resolver.resolve(row.sender);
       if (!speaker) continue; // can't attribute this message to anyone tracked
 
-      const targets = resolver.mentionsIn(row.body || '');
+      // Scan only the person's TYPED words, not the baked enrichments. composeBody
+      // leads a reply with [re X: "..."] and a link with [link: ...]; scanning those
+      // would mint edges to the quoted author (and to names inside the quoted text)
+      // that the speaker never typed. ownWords strips them, same rule the todo
+      // trigger uses -- a mention, like a task, must be typed.
+      const targets = resolver.mentionsIn(ownWords(row.body || ''));
       for (const target of targets) {
         // Follow the correction chain: a second reassign of the same citation keys
         // its override off the previous corrected target, so chase transitively

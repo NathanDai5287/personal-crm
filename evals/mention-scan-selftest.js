@@ -36,6 +36,10 @@ insFull.run(7, 7000, 'Carol Jones', 'Dave is late', 'bob', 'carol-sid', 'incomin
 insFull.run(8, 8000, 'Carol Jones', 'Bob is here', 'bob', 'carol-sid', 'incoming');
 // id=9: outgoing is Nathan regardless of the sender label or contact_slug.
 insFull.run(9, 9000, 'Nathan', 'Dave says hi', 'carol', 'nathan-sid', 'outgoing');
+// id=10: a reply whose baked enrichment names Carol (the quoted author) and Dave
+// (inside the quoted text), but Nathan only TYPED "sounds good" -> no edge. Scanning
+// the enrichment would falsely mint nathan->carol and nathan->dave.
+insFull.run(10, 10000, 'Nathan', '[re Carol: "Dave is fake"] sounds good', 'carol', 'nathan-sid', 'outgoing');
 
 const resolver = buildResolver([
   { slug: 'bob', name: 'Bob Smith' },
@@ -45,9 +49,9 @@ const resolver = buildResolver([
 const idToSlug = new Map([['carol-sid', 'carol'], ['bob-sid', 'bob'], ['dave-sid', 'dave']]);
 
 let r = rebuildMentions(h, { resolver, idToSlug });
-assert.strictEqual(r.scanned, 9, 'scanned all 9 candidate messages');
+assert.strictEqual(r.scanned, 10, 'scanned all 10 candidate messages');
 assert.strictEqual(r.deleted, 0, 'nothing to clear on first run');
-assert.strictEqual(r.edges, 7, 'the 4 legacy edges + carol->dave, carol->bob, nathan->dave');
+assert.strictEqual(r.edges, 7, 'the 4 legacy edges + carol->dave, carol->bob, nathan->dave (enriched reply mints none)');
 
 const edge = (from, to, srcMsg) => h.prepare(
   'SELECT * FROM mentions WHERE from_slug = ? AND to_slug = ? AND src_msg = ?'
@@ -62,6 +66,7 @@ assert.ok(edge('carol', 'dave', 7), 'group speaker resolved by src: carol->dave,
 assert.strictEqual(edge('bob', 'dave', 7), undefined, 'the ingest contact is NOT credited as speaker');
 assert.ok(edge('carol', 'bob', 8), 'a third party naming the ingest contact makes carol->bob, not a dropped self-edge');
 assert.ok(edge('nathan', 'dave', 9), 'outgoing is attributed to nathan regardless of sender/contact_slug');
+assert.strictEqual(h.prepare('SELECT COUNT(*) n FROM mentions WHERE src_msg = 10').get().n, 0, 'the enriched reply mints no edge -- only typed words are scanned');
 
 const selfEdges = h.prepare('SELECT COUNT(*) n FROM mentions WHERE from_slug = to_slug').get().n;
 assert.strictEqual(selfEdges, 0, 'no self-edges');
