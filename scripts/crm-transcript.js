@@ -54,8 +54,8 @@ const { signalNameMap } = require('../lib/signal-names');
 
 const db = openSignalDb();
 
-// serviceId -> display name (Signal nickname > iPhone contact > phone; profile name
-// never used — see lib/signal-names).
+// serviceId -> display name (Signal nickname > iPhone contact > profile name > phone
+// — see lib/signal-names).
 const nameMap = signalNameMap(db);
 
 let conv;

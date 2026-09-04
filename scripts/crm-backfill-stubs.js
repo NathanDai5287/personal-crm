@@ -16,7 +16,7 @@ const db = openSignalDb();
 
 // Private conversations that have at least one text message, with stats. The name
 // is resolved in JS by THE rule (lib/signal-names: Signal nickname > iPhone contact
-// > phone; profile name never used), so the SQL selects raw name fields + json.
+// > profile name > phone), so the SQL selects raw name fields + json.
 const rows = db.prepare(`
   SELECT c.serviceId, c.e164, c.name, c.json,
          COUNT(*) AS msg_count, MIN(m.sent_at) AS first_at, MAX(m.sent_at) AS last_at,

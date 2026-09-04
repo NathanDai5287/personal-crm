@@ -9,13 +9,15 @@
 // "Katia" in Katia's group. Those frozen rows feed merges, so the wrong name can
 // end up in a profile.
 //
-// THE REPAIR: for every archived GROUP message that still carries a `src`
-// (serviceId), recompute the correct speaker from `src` — exactly as the group
-// sweep would — and rewrite `sender` where it currently names the wrong person.
-// Only the `sender` LABEL column is touched; message bodies, ids, and everything
-// else are left exactly as-is, and DMs are never touched. Rows whose `src` is NULL
-// (legacy, un-inferable) or that already name the right person (by full or first
-// name) are left alone, so this is safe to re-run and is a no-op once clean.
+// THE REPAIR: for every archived message that still carries a `src` (serviceId) —
+// group messages AND DMs — recompute the correct speaker from `src`, exactly as the
+// sweep would, and rewrite `sender` where it currently names the wrong person. A
+// tracked person's own line is written by FIRST name (DM or their words in a group);
+// only an untracked third party in a group keeps their full name. Only the `sender`
+// LABEL column is touched; message bodies, ids, and everything else are left exactly
+// as-is. Rows whose `src` is NULL (legacy, un-inferable) or that already name the
+// right person (by full or first name) are left alone, so this is safe to re-run and
+// is a no-op once clean.
 //
 // SAFE BY DEFAULT — dry-run unless --write. It prints every from→to relabel it
 // would make, grouped by pair, so you can eyeball it before applying. BACK UP
@@ -30,9 +32,9 @@ const { signalNameMap: buildNameMap } = require('../lib/signal-names');
 const WRITE = process.argv.includes('--write');
 
 // Speaker names resolve exactly as the sweep freezes them (lib/signal-names):
-// Signal nickname, then iPhone contact name, then phone number; the Signal PROFILE
-// name is never used. Re-running this after the resolver changed is how the old
-// profile-name labels ("fingersix") get rewritten to the nickname ("Darren Pai").
+// Signal nickname, then iPhone contact name, then their profile name, then phone
+// number. Re-running this after the resolver changed is how the old profile-name
+// labels ("fingersix") get rewritten to the nickname ("Darren Pai").
 
 function main() {
   const cdb = openCrmDb();
@@ -48,6 +50,15 @@ function main() {
   );
   sdb.close();
 
+  // The serviceIds we track. A tracked person's own line is labeled by FIRST name
+  // wherever it appears (their DM, or their own words in a group) so their labels
+  // read uniformly across the archive; only an UNTRACKED third party in a group
+  // keeps their full name. This matches the sweep, which labels a contact's own
+  // line by first name (crm-archive.sweepContact) and a stranger by full name.
+  const trackedSignalIds = new Set(
+    cdb.prepare('SELECT signal_id FROM contacts WHERE signal_id IS NOT NULL').all().map((r) => r.signal_id),
+  );
+
   const firstWord = (s) => String(s).split(' ')[0];
   const rows = cdb.prepare('SELECT id, conv_id, src, sender, type FROM messages WHERE src IS NOT NULL').all();
   const fixes = [];
@@ -59,10 +70,12 @@ function main() {
     if (!full) continue;                                       // src not resolvable — leave it
     // Either the full or the first-name form is an acceptable, already-correct label.
     if (r.sender === full || r.sender === firstWord(full)) continue;
-    // Write it the way the sweep would: DMs (and Nathan) use the first name; a third
-    // party in a group keeps their full name so shared-group lines stay unambiguous.
+    // Write it the way the sweep would: a tracked person's own line (DM or their words
+    // in a group) uses the first name; only an untracked third party in a group keeps
+    // their full name so shared-group lines stay unambiguous.
     const isGroup = groupConvIds.has(r.conv_id);
-    const correct = (isGroup && r.src !== MY_SERVICE_ID) ? full : firstWord(full);
+    const isThirdParty = isGroup && r.src !== MY_SERVICE_ID && !trackedSignalIds.has(r.src);
+    const correct = isThirdParty ? full : firstWord(full);
     if (r.sender === correct) continue;
     fixes.push({ id: r.id, from: r.sender, to: correct });
   }

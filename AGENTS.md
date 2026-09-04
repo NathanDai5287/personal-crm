@@ -102,12 +102,13 @@ handle it returns current structured facts and inbound/outbound mention edges, w
 retaining compatibility fallbacks for identity fields that have not yet been observed
 by the structured pipeline.
 
-The merge reply always includes JSON `[[FACTS]]` and `[[MENTIONS]]` blocks. They never
-go into the profile. `lib/structured-person.js` validates every source message against
-the archive; `lib/schema.js` stores standing, periodic, and snapshot facts with
-supersession and mention edges keyed by stable slugs. Structured writes and the merge
-frontier commit in ONE SQLite transaction. A failure rolls back both and restores the
-pre-merge profile.
+The merge reply always includes a JSON `[[FACTS]]` block. It never goes into the
+profile. `lib/structured-person.js` validates every source message against the archive;
+`lib/schema.js` stores standing, periodic, and snapshot facts with supersession, keyed
+by stable slugs. (Person-to-person mention edges are no longer emitted by the model —
+`scripts/crm-mention-scan.js` builds that graph by a deterministic name scan.)
+Structured writes and the merge frontier commit in ONE SQLite transaction. A failure
+rolls back both and restores the pre-merge profile.
 
 `## What I know` and structured identity fields are deterministic renders of current
 facts after a successful merge. The model may edit its working prose, but that prose is

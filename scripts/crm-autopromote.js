@@ -40,8 +40,8 @@ function main() {
   const cdb = openCrmDb();
   const sdb = openSignalDb();
   // serviceId -> { name, source } under THE rule (Signal nickname > iPhone contact >
-  // phone). No display-name override file any more — the nickname you set in Signal
-  // is the name, so a promoted contact is titled exactly as Signal shows them.
+  // profile name > phone). No display-name override file any more — the nickname you
+  // set in Signal is the name, so a promoted contact is titled exactly as Signal shows them.
   const names = signalNameDetails(sdb);
 
   // Already-tracked serviceIds + slugs.

@@ -32,7 +32,7 @@ const TASKS = require('../lib/tasks');
 const P = require('../lib/nicknames');
 const PERSON = require('../lib/person');
 const { factLabel } = require('../lib/structured-person');
-const { recordFact, retractCurrentFact } = require('../lib/schema');
+const { recordFact, retractCurrentFact, mentionEdges, edgeCitations, recordReassign } = require('../lib/schema');
 const RUN_TOGGLES = require('../lib/run-toggles');
 const RUN_MODELS = require('../lib/run-models');
 const JOBS_DEF = require('../lib/jobs'); // single source of truth for the job set + labels
@@ -108,7 +108,7 @@ function authClear(key) { AUTH_FAILS.delete(key); }
 // Markdown rendering (compact, tuned for the profile format)
 // ---------------------------------------------------------------------------
 function esc(s) {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
 // Inline: **bold**, _italic_, `code`, [text](url), bare URLs, ⟨m…⟩ citations.
@@ -908,6 +908,220 @@ function spanPage(start, end) {
   } finally {
     try { cdb.close(); } catch { /* already closed */ }
   }
+}
+
+// ---- relationship graph -------------------------------------------------------
+// Read-only node-link view of who mentions whom (lib/schema mentionEdges), a
+// per-edge citation panel (edgeCitations), and a correction flow that relinks
+// one citation to a different person (POST /graph/reassign). Everything is
+// server-rendered inline SVG + a table fallback -- no client-side graph library.
+
+// slug -> display name, straight off the contacts table (same lookup crm-web
+// uses everywhere else), plus the synthetic 'nathan' node the scanner also uses.
+function graphNameMap(cdb) {
+  const m = new Map();
+  let rows = [];
+  try { rows = cdb.prepare('SELECT file_path, name FROM contacts').all(); } catch { /* no contacts table yet */ }
+  for (const r of rows) {
+    const slug = String(r.file_path || '').replace('data/contacts/', '').replace(/\.md$/, '');
+    if (slug) m.set(slug, r.name || slug);
+  }
+  m.set(OWNER_SLUG, 'Nathan');
+  return m;
+}
+// Missing slugs fall back to the slug itself so a stale/renamed contact never
+// breaks the render.
+function graphNameFor(nameBySlug, slug) {
+  if (slug === OWNER_SLUG) return 'Nathan';
+  return nameBySlug.get(slug) || slug;
+}
+
+// GET /graph — the diagram + the reliable table fallback below it.
+function graphPage() {
+  let cdb;
+  try { cdb = openCrmDb(); } catch { cdb = null; }
+  let edges = [];
+  let nameBySlug = new Map();
+  try {
+    if (cdb) {
+      edges = mentionEdges(cdb);
+      nameBySlug = graphNameMap(cdb);
+    }
+  } finally {
+    if (cdb) { try { cdb.close(); } catch { /* already closed */ } }
+  }
+
+  const caption = '<p class="sub">Every edge is one person mentioning another, by name, in your archived '
+    + 'messages &middot; click an edge to see the citations.</p>';
+
+  if (!edges.length) {
+    const body = `<div class="profile"><h1>Relationship graph</h1>${caption}`
+      + '<p>No mentions recorded yet &mdash; this fills in after the next sweep runs the mention scan.</p></div>';
+    return page('Relationship graph — personal-crm', body, '/graph');
+  }
+
+  // Node set = every slug touched by an edge, weighted by total citations through
+  // it (either direction) so hubs read as bigger circles.
+  const weight = new Map();
+  const bump = (slug, n) => weight.set(slug, (weight.get(slug) || 0) + n);
+  for (const e of edges) { bump(e.from_slug, e.n); bump(e.to_slug, e.n); }
+  const slugs = [...weight.keys()];
+  // Stable order (degree desc, then slug) so the layout doesn't jitter between
+  // renders of the same data.
+  slugs.sort((a, b) => (weight.get(b) - weight.get(a)) || (a < b ? -1 : a > b ? 1 : 0));
+
+  const W = 900, H = 640, cx = W / 2, cy = H / 2, R = Math.min(W, H) / 2 - 90;
+  const N = slugs.length;
+  const pos = new Map();
+  slugs.forEach((slug, i) => {
+    const theta = N === 1 ? -Math.PI / 2 : (2 * Math.PI * i) / N - Math.PI / 2;
+    pos.set(slug, { x: cx + R * Math.cos(theta), y: cy + R * Math.sin(theta) });
+  });
+
+  const weights = [...weight.values()];
+  const maxW = Math.max(...weights), minW = Math.min(...weights);
+  const nodeR = (slug) => {
+    const w = weight.get(slug);
+    const t = maxW === minW ? 0.5 : (Math.sqrt(w) - Math.sqrt(minW)) / (Math.sqrt(maxW) - Math.sqrt(minW));
+    return 10 + t * 18; // 10..28px, sqrt so AREA tracks weight
+  };
+
+  const ns = edges.map((e) => e.n);
+  const maxN = Math.max(...ns), minN = Math.min(...ns);
+  const strokeW = (n) => {
+    const t = maxN === minN ? 0.5 : (n - minN) / (maxN - minN);
+    return 1.5 + t * 6.5; // 1.5..8px, clamped to stay readable
+  };
+
+  // Edges as gentle quadratic curves. Mentions are split by speaker, so A->B and
+  // B->A can both exist; offset the control point perpendicular to the line, with
+  // the sign fixed by slug order, so the two directions never sit on top of each
+  // other. Endpoints are pulled back to each node's rim so the arrowhead lands
+  // cleanly outside the circle instead of under it.
+  const edgeSvg = edges.map((e) => {
+    const a = pos.get(e.from_slug), b = pos.get(e.to_slug);
+    if (!a || !b) return ''; // defensive: never throw on a row geometry can't place
+    const fromName = graphNameFor(nameBySlug, e.from_slug);
+    const toName = graphNameFor(nameBySlug, e.to_slug);
+    const href = `/graph/edge?from=${encodeURIComponent(e.from_slug)}&to=${encodeURIComponent(e.to_slug)}`;
+    const titleTxt = `${fromName} → ${toName} · ${e.n} mention${e.n === 1 ? '' : 's'}`;
+    let d;
+    if (e.from_slug === e.to_slug) {
+      // Self-mention (rare, but the schema allows it): a small loop above the node.
+      const r0 = nodeR(e.from_slug);
+      d = `M ${(a.x - r0).toFixed(1)} ${a.y.toFixed(1)} C ${(a.x - r0 - 26).toFixed(1)} ${(a.y - 40).toFixed(1)}, `
+        + `${(a.x + r0 + 26).toFixed(1)} ${(a.y - 40).toFixed(1)}, ${(a.x + r0).toFixed(1)} ${a.y.toFixed(1)}`;
+    } else {
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const len = Math.hypot(dx, dy) || 1;
+      const ux = dx / len, uy = dy / len;
+      const sign = e.from_slug < e.to_slug ? 1 : -1;
+      const offset = 18 * sign;
+      const px = (-dy / len) * offset, py = (dx / len) * offset;
+      const ra = nodeR(e.from_slug), rb = nodeR(e.to_slug);
+      const sx = a.x + ux * ra, sy = a.y + uy * ra;
+      const ex = b.x - ux * (rb + 8), ey = b.y - uy * (rb + 8);
+      const mx = (sx + ex) / 2 + px, my = (sy + ey) / 2 + py;
+      d = `M ${sx.toFixed(1)} ${sy.toFixed(1)} Q ${mx.toFixed(1)} ${my.toFixed(1)}, ${ex.toFixed(1)} ${ey.toFixed(1)}`;
+    }
+    return `<a href="${esc(href)}"><path d="${d}" fill="none" stroke="var(--stamp)" `
+      + `stroke-width="${strokeW(e.n).toFixed(1)}" stroke-opacity="0.55" marker-end="url(#arrow)">`
+      + `<title>${esc(titleTxt)}</title></path></a>`;
+  }).join('');
+
+  const nodeSvg = slugs.map((slug) => {
+    const p = pos.get(slug);
+    const r = nodeR(slug);
+    const name = graphNameFor(nameBySlug, slug);
+    const isOwner = slug === OWNER_SLUG;
+    return '<g>'
+      + `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="${r.toFixed(1)}" `
+      + `fill="${isOwner ? 'var(--stamp)' : 'var(--card)'}" stroke="var(--ink)" stroke-width="1.2">`
+      + `<title>${esc(name)}</title></circle>`
+      + `<text x="${p.x.toFixed(1)}" y="${(p.y + r + 14).toFixed(1)}" text-anchor="middle" font-size="11" `
+      + `fill="var(--ink)">${esc(name)}</text></g>`;
+  }).join('');
+
+  const svg = `<svg viewBox="0 0 ${W} ${H}" width="100%" height="auto" role="img" `
+    + 'aria-label="Relationship graph" style="max-width:100%;background:var(--paper);border:1px solid var(--rule);border-radius:8px">'
+    + '<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">'
+    + '<path d="M0,0 L10,5 L0,10 z" fill="var(--stamp)" fill-opacity="0.7"/></marker></defs>'
+    + edgeSvg + nodeSvg + '</svg>';
+
+  // Table fallback: same edges, most-weighted first, every row a link. This is
+  // what makes the feature usable even where SVG hit-testing is fiddly.
+  const rows = [...edges].sort((x, y) => (y.n - x.n) || (y.last - x.last)).map((e) => {
+    const href = `/graph/edge?from=${encodeURIComponent(e.from_slug)}&to=${encodeURIComponent(e.to_slug)}`;
+    return `<tr><td><a href="${esc(href)}">${esc(graphNameFor(nameBySlug, e.from_slug))}</a></td><td>&rarr;</td>`
+      + `<td><a href="${esc(href)}">${esc(graphNameFor(nameBySlug, e.to_slug))}</a></td>`
+      + `<td class="num">${e.n}</td><td>${esc(ptLocal(e.last))}</td></tr>`;
+  }).join('');
+  const table = `<table class="tbl"><tr><th>From</th><th></th><th>To</th><th>mentions</th><th>last</th></tr>${rows}</table>`;
+
+  const body = `<div class="profile"><h1>Relationship graph</h1>${caption}${svg}<h2>All edges</h2>${table}</div>`;
+  return page('Relationship graph — personal-crm', body, '/graph');
+}
+
+// GET /graph/edge?from=&to= — every citation behind one directed edge, newest
+// first, each with a compact "link this citation to someone else" form.
+function edgePage(fromSlug, toSlug) {
+  let cdb;
+  try { cdb = openCrmDb(); } catch { cdb = null; }
+  let cites = [];
+  let nameBySlug = new Map();
+  let allSlugs = [];
+  try {
+    if (cdb) {
+      cites = edgeCitations(cdb, fromSlug, toSlug);
+      nameBySlug = graphNameMap(cdb);
+      allSlugs = [...nameBySlug.keys()];
+      if (!allSlugs.includes(OWNER_SLUG)) allSlugs.push(OWNER_SLUG);
+      allSlugs.sort((a, b) => graphNameFor(nameBySlug, a).localeCompare(graphNameFor(nameBySlug, b)));
+    }
+  } finally {
+    if (cdb) { try { cdb.close(); } catch { /* already closed */ } }
+  }
+
+  const fromName = graphNameFor(nameBySlug, fromSlug);
+  const toName = graphNameFor(nameBySlug, toSlug);
+  const options = allSlugs.map((s) => `<option value="${esc(s)}">${esc(graphNameFor(nameBySlug, s))}</option>`).join('');
+
+  const rows = cites.map((c) => {
+    const when = esc(ptLocal(c.observed_at));
+    const meta = [c.sender, c.conversation].filter(Boolean).map(esc).join(' &middot; ');
+    let snippet;
+    if (c.body) {
+      const s = String(c.body);
+      snippet = esc(s.length > 240 ? `${s.slice(0, 240)}…` : s);
+    } else {
+      snippet = '<em>(message not in archive)</em>';
+    }
+    // Only 'scan' citations are correctable: the reassign machinery (override +
+    // live move) applies to scan rows, and a rebuild would duplicate a corrected
+    // 'model' row onto both edges. Legacy imported rows are shown, not editable.
+    const action = c.source === 'scan'
+      ? '<form method="POST" action="/graph/reassign" style="display:flex;gap:6px;align-items:center;margin:0">'
+        + `<input type="hidden" name="from" value="${esc(fromSlug)}">`
+        + `<input type="hidden" name="orig_to" value="${esc(toSlug)}">`
+        + `<input type="hidden" name="src_msg" value="${esc(c.src_msg)}">`
+        + `<select name="new_to"><option value="" selected disabled>choose a person&hellip;</option>${options}</select>`
+        + '<button type="submit">link to&hellip;</button>'
+        + '</form>'
+      : '<span class="sub">imported edge &middot; not editable</span>';
+    return '<div class="card" style="margin:10px 0;padding:10px 12px">'
+      + `<div class="sub">${when}${meta ? ` &middot; ${meta}` : ''}</div>`
+      + `<div>${snippet}</div>`
+      + '<div style="margin-top:6px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">'
+      + `<a href="/m/${esc(c.src_msg)}" target="_blank" rel="noopener">view thread &rarr;</a>`
+      + action + '</div></div>';
+  }).join('');
+
+  const body = '<div class="back"><a href="/graph">&larr; back to graph</a></div>'
+    + `<div class="profile"><h1>${esc(fromName)} &rarr; ${esc(toName)}</h1>`
+    + `<p class="sub">${cites.length} citation${cites.length === 1 ? '' : 's'}, newest first</p>`
+    + (cites.length ? rows : '<p>No citations recorded for this edge.</p>')
+    + '</div>';
+  return page(`${fromName} → ${toName} — graph`, body, '/graph');
 }
 
 // ---- profile page, with per-unit hand editing --------------------------------
@@ -3461,6 +3675,71 @@ function start() {
             sendJson(200, { ok: true, html: renderNicks(slug) });
           } catch (e) {
             try { sendJson(500, { ok: false, error: String(e.message).slice(0, 200) }); } catch { /* sent */ }
+          }
+        });
+        return;
+      }
+      // Relationship graph: READ (diagram + citations) and CORRECT (relink one
+      // citation to a different person). Sits before the generic /c/<slug> match
+      // below so 'graph' is never mistaken for a contact slug.
+      if (url.pathname === '/graph') { send(200, graphPage()); return; }
+      if (url.pathname === '/graph/edge') {
+        const from = url.searchParams.get('from') || '';
+        const to = url.searchParams.get('to') || '';
+        if (!isSafeSlug(from) || !isSafeSlug(to)) { send(400, page('Bad request', '<p>Bad request.</p>')); return; }
+        send(200, edgePage(from, to));
+        return;
+      }
+      if (url.pathname === '/graph/reassign' && req.method === 'POST') {
+        if (!firstPartyOnly(req)) { send(403, page('Forbidden', '<p>Cross-site request refused.</p>')); return; }
+        readBody(req, (body) => {
+          try {
+            const p = new URLSearchParams(body);
+            const from = p.get('from') || '';
+            const origTo = p.get('orig_to') || '';
+            const newTo = p.get('new_to') || '';
+            const srcMsg = Number(p.get('src_msg'));
+            // new_to === orig_to is a no-op that would delete the citation; new_to ===
+            // from would make a self-edge the rebuild drops. Reject both.
+            if (!isSafeSlug(from) || !isSafeSlug(origTo) || !isSafeSlug(newTo)
+              || !Number.isInteger(srcMsg) || srcMsg <= 0
+              || newTo === origTo || newTo === from) {
+              send(400, page('Bad request', '<p>Bad request.</p>'));
+              return;
+            }
+            const rdb = openCrmDb();
+            try {
+              rdb.exec('BEGIN IMMEDIATE');
+              try {
+                // Only act if a live scan citation actually sits on the original edge.
+                // Absent it (a replay, a stale form, or a non-scan row) this is a no-op
+                // so a double-submit can never delete the just-moved citation.
+                const live = rdb.prepare("SELECT 1 FROM mentions WHERE from_slug=? AND to_slug=? AND kind='mentioned' AND src_msg=? AND source='scan'")
+                  .get(from, origTo, srcMsg);
+                if (live) {
+                  // Persist the correction so the nightly rebuild honors it too...
+                  recordReassign(rdb, { src_msg: srcMsg, from_slug: from, orig_to: origTo, new_to: newTo, created_at: Date.now() });
+                  // ...and move the live row now, so the citation is off the old edge
+                  // before the next sweep. UNIQUE(from_slug,to_slug,kind,src_msg) means
+                  // the target slot may already hold a duplicate scan citation -- clear
+                  // only that (scoped to source='scan'), never a hand-owned model row.
+                  rdb.prepare("DELETE FROM mentions WHERE from_slug=? AND to_slug=? AND kind='mentioned' AND src_msg=? AND source='scan'")
+                    .run(from, newTo, srcMsg);
+                  rdb.prepare("UPDATE mentions SET to_slug=? WHERE from_slug=? AND to_slug=? AND kind='mentioned' AND src_msg=? AND source='scan'")
+                    .run(newTo, from, origTo, srcMsg);
+                }
+                rdb.exec('COMMIT');
+              } catch (e) {
+                rdb.exec('ROLLBACK');
+                throw e;
+              }
+            } finally {
+              try { rdb.close(); } catch { /* already closed */ }
+            }
+            res.writeHead(303, { Location: `/graph/edge?from=${encodeURIComponent(from)}&to=${encodeURIComponent(origTo)}` });
+            res.end();
+          } catch {
+            try { send(400, page('Bad request', '<p>Bad request.</p>')); } catch { /* sent */ }
           }
         });
         return;

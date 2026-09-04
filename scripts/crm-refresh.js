@@ -360,5 +360,16 @@ function main() {
   // only after each chunk's merge succeeds (crash safety; see header).
 }
 
-if (require.main === module) main();
+if (require.main === module) {
+  // Take the shared pipeline lock like every other job (crm-archive/daily/timeline).
+  // planAll() runs a full sweep, and syncContactNames rewrites contact profiles from
+  // the Signal name — without the lock, a manual `crm-refresh` fired during a
+  // scheduled ingest could read-modify-write a profile on top of a concurrent merge
+  // and silently drop the merge's edit. A skip while a run is in progress is the
+  // correct outcome. (acquire() no-ops when a lock is already held, so nesting under
+  // crm-daily's own lock is safe.)
+  const lock = require('../lib/pipeline-lock').acquire('refresh');
+  if (!lock.ok) { console.log(`crm-refresh: skipped, run in progress (${lock.holderDesc}).`); process.exit(0); }
+  try { main(); } finally { lock.release(); }
+}
 module.exports = { planAll, planContact, gateBuckets, writeChunkLedger, chunkSummary, MERGE_BACKFILL_DAYS };

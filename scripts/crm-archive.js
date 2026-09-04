@@ -164,9 +164,9 @@ function atomicWriteJson(file, obj) {
 }
 
 // serviceId -> display name. THE rule lives in lib/signal-names: Signal nickname,
-// then iPhone contact name, then phone number; the Signal PROFILE name (theirs, not
-// yours) is never used. Speaker labels are frozen into the archive from this, so it
-// is the same resolver the /repair path re-runs.
+// then iPhone contact name, then their Signal profile name, then phone number. Speaker
+// labels are frozen into the archive from this, so it is the same resolver the /repair
+// path re-runs.
 const buildNameMap = signalNameMap;
 
 // The incremental bound for one source, shared by contacts and groups so the
@@ -236,7 +236,10 @@ function sweepContact(cdb, sdb, slug, cursors, now, ranAt, deep, nameMap) {
   const q = buildMessageQuery(sources, row.signal_id, bound);
   if (!q) return NOTHING; // no message sources at all (so no call sources either)
 
-  const display = nameMap.get(row.signal_id) || row.name;
+  // `|| slug` guards the rare case where the Signal name resolves to serviceId-only
+  // (so it's absent from nameMap) AND contacts.name is NULL — without it display is
+  // null and .split throws, aborting the whole sweep.
+  const display = nameMap.get(row.signal_id) || row.name || slug;
   const first = display.split(' ')[0];
   const speaker = (m) => {
     if (m.type === 'outgoing' || m.src === MY_SERVICE_ID) return 'Nathan';
@@ -476,11 +479,21 @@ function runSweep(cdb, sdb, opts = {}) {
   //   deepRanAt  last full DEEP sweep — the daily deep-sweep cadence.
   // Each is preserved across sweeps that don't set it, so a deep run advances
   // both while an incremental run advances only `ranAt`.
+
+  // Rebuild the deterministic mention graph from the freshly-updated archive.
+  // Only on a FULL sweep — a single-contact (--only) sweep would waste a full
+  // rebuild. Advisory: a scan failure must not fail the archive sweep.
+  let mentionScan = null;
+  if (!onlySlug) {
+    try { mentionScan = require('./crm-mention-scan').rebuildMentions(cdb); }
+    catch (e) { console.error('crm-archive: mention scan failed (non-fatal): ' + e.message); }
+  }
+
   const out = { cursors, ranAt: onlySlug ? ranAt : now };
   const deepRanAt = (deep && !onlySlug) ? now : (state && state.deepRanAt);
   if (deepRanAt) out.deepRanAt = deepRanAt;
   atomicWriteJson(ARCHIVE_STATE, out);
-  return { seen, inserted, per, collisions, reuse, backfilledMeta, deep, onlySlug };
+  return { seen, inserted, per, collisions, reuse, backfilledMeta, deep, onlySlug, mentionScan };
 }
 
 function main({ deep, only }) {

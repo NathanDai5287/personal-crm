@@ -325,9 +325,11 @@ function mergeContact(slug, opts = {}) {
           return { ok: false, error: 'merge produced no DONE/NO-OP acknowledgment — treated as a failed merge (messages NOT marked merged)', errorClass: 'no_ack', attempts: attempt };
         }
 
-        // STRUCTURED PERSON. Production replies must carry complete FACTS plus new
-        // MENTIONS. Validate every source against the archive, write both tables in
-        // one transaction, then deterministically render What-I-know/identity fields.
+        // STRUCTURED PERSON. Production replies must carry a complete FACTS block
+        // (person-to-person mentions are no longer emitted by the model — the
+        // deterministic name scan, crm-mention-scan.js, writes the graph). Validate
+        // every source against the archive, write the facts in one transaction, then
+        // deterministically render What-I-know/identity fields.
         // Evals use throwaway zero-row archives and score the prose edit itself, so
         // they deliberately skip this production write seam.
         let factsStored = 0;
