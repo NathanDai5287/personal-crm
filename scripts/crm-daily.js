@@ -51,7 +51,7 @@ const { planAll, writeChunkLedger, chunkSummary } = require('./crm-refresh');
 const { validateCitations, markMerged } = require('../lib/archive');
 const { mergeCallUsd, recordCostSample, fitCostModel } = require('../lib/cost');
 const { openCrmDb, openSignalDb } = require('../lib/signal-db');
-const { applyStructuredReply, renderStructuredProfile } = require('../lib/structured-person');
+const { applyStructuredReply, renderStructuredProfile, profileCitationIds } = require('../lib/structured-person');
 const { buildResolver } = require('../lib/people-resolve');
 
 function personResolver(cdb) {
@@ -513,6 +513,10 @@ function main() {
                 const structured = applyStructuredReply(mergeDb, p.slug, result.reply, {
                   required: true, runId: runTag, resolve: personResolver(mergeDb), transaction: false,
                   validMessageIds: chunk.msgs.map((m) => m.rid),
+                  validFactMessageIds: [
+                    ...chunk.msgs.map((m) => m.rid),
+                    ...profileCitationIds(result.profileBefore == null ? profileBeforeStructured : result.profileBefore),
+                  ],
                 });
                 const timeline = profileBeforeStructured.match(/^## Timeline\s*$[\s\S]*/m)?.[0] || null;
                 const rendered = renderStructuredProfile(profileBeforeStructured, structured.facts);

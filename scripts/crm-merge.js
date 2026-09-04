@@ -25,9 +25,9 @@ const { dateKey } = require('../lib/weeks');
 const { sumSessionCostUsd, sessionAssistantText } = require('../lib/cost');
 const { storeNicknameProposals } = require('../lib/nicknames');
 const { buildResolver } = require('../lib/people-resolve');
-const { applyStructuredReply, renderStructuredProfile } = require('../lib/structured-person');
+const { applyStructuredReply, renderStructuredProfile, profileCitationIds } = require('../lib/structured-person');
 const { openCrmDb } = require('../lib/signal-db');
-const { ensureMessagesTable } = require('../lib/archive');
+const { ensureMessagesTable, markMerged } = require('../lib/archive');
 
 // Resolver for nickname TARGETS (feature 2): maps a name the model names in a
 // `target | nickname | ids` line to a contact slug (or Nathan). Built once per
@@ -337,18 +337,32 @@ function mergeContact(slug, opts = {}) {
             const cdb = openCrmDb();
             try {
               ensureMessagesTable(cdb);
-              const structured = applyStructuredReply(cdb, slug, reply, {
-                required: true, runId: opts.runId || null, resolve: nickResolver().resolve,
-              });
-              factsStored = structured.factsStored;
-              mentionsStored = structured.mentionsStored;
               const profilePath = path.join(cwd, 'data', 'contacts', `${slug}.md`);
               const before = fs.readFileSync(profilePath, 'utf8');
-              const timeline = before.match(/^## Timeline\s*$[\s\S]*/m)?.[0] || null;
-              const rendered = renderStructuredProfile(before, structured.facts);
-              const afterTimeline = rendered.match(/^## Timeline\s*$[\s\S]*/m)?.[0] || null;
-              if (timeline !== afterTimeline) throw new Error('structured renderer changed Timeline bytes');
-              fs.writeFileSync(profilePath, rendered);
+              const ledger = fs.readFileSync(ledgerPath, 'utf8');
+              const validMessageIds = [...new Set([...ledger.matchAll(/⟨m(\d+)⟩/g)].map((m) => Number(m[1])))];
+              if (!validMessageIds.length) throw new Error('merge ledger contains no message ids');
+              cdb.exec('BEGIN IMMEDIATE');
+              try {
+                const structured = applyStructuredReply(cdb, slug, reply, {
+                  required: true, runId: opts.runId || null, resolve: nickResolver().resolve,
+                  validMessageIds,
+                  validFactMessageIds: [...validMessageIds, ...profileCitationIds(profileBefore || '')],
+                  transaction: false,
+                });
+                const timeline = before.match(/^## Timeline\s*$[\s\S]*/m)?.[0] || null;
+                const rendered = renderStructuredProfile(before, structured.facts);
+                const afterTimeline = rendered.match(/^## Timeline\s*$[\s\S]*/m)?.[0] || null;
+                if (timeline !== afterTimeline) throw new Error('structured renderer changed Timeline bytes');
+                fs.writeFileSync(profilePath, rendered);
+                markMerged(cdb, slug, validMessageIds, Date.now(), { transaction: false });
+                cdb.exec('COMMIT');
+                factsStored = structured.factsStored;
+                mentionsStored = structured.mentionsStored;
+              } catch (e) {
+                try { cdb.exec('ROLLBACK'); } catch { /* original error wins */ }
+                throw e;
+              }
             } finally { cdb.close(); }
           } catch (e) {
             restoreProfile();

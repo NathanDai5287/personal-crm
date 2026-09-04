@@ -68,6 +68,22 @@ function runRecordFiles() {
   try { return fs.readdirSync(RUNS_DIR).filter((f) => f.endsWith('.json')); } catch { return []; }
 }
 
+// A rebuild clears derived state owned by this profile. Inbound mentions are
+// owned by the other profiles that observed them and therefore remain intact.
+function clearDerivedPerson(db, slug) {
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const facts = db.prepare('DELETE FROM facts WHERE slug = ?').run(slug).changes || 0;
+    const mentions = db.prepare('DELETE FROM mentions WHERE from_slug = ?').run(slug).changes || 0;
+    const frontier = db.prepare('DELETE FROM merged WHERE slug = ?').run(slug).changes || 0;
+    db.exec('COMMIT');
+    return { facts, mentions, frontier };
+  } catch (e) {
+    try { db.exec('ROLLBACK'); } catch { /* original error wins */ }
+    throw e;
+  }
+}
+
 function main() {
   const argv = process.argv.slice(2);
   for (const a of argv) {
@@ -113,6 +129,8 @@ function main() {
   const cdb = openCrmDb();
   ensureMessagesTable(cdb);
   const frontierCount = cdb.prepare('SELECT COUNT(*) n FROM merged WHERE slug = ?');
+  const factCount = cdb.prepare('SELECT COUNT(*) n FROM facts WHERE slug = ?');
+  const mentionCount = cdb.prepare('SELECT COUNT(*) n FROM mentions WHERE from_slug = ?');
 
   // ---- plan ----
   console.log(`crm-wipe: ${write ? 'WRITE' : 'DRY-RUN'}`
@@ -120,9 +138,12 @@ function main() {
     + `${runs ? ` | runs ledger (${runFiles.length} record${runFiles.length === 1 ? '' : 's'}${hasLastRun ? ' + last-run.json' : ''})` : ''}`);
   for (const slug of targets) {
     const nFrontier = frontierCount.get(slug).n;
+    const nFacts = factCount.get(slug).n;
+    const nMentions = mentionCount.get(slug).n;
     const hadTimeline = Object.prototype.hasOwnProperty.call(timelineState, slug);
     const hadLedger = fs.existsSync(path.join(REFRESH_DIR, `${slug}.new.txt`));
     console.log(`  ${slug}: profile -> stub · merge frontier ${nFrontier ? `clear ${nFrontier} row(s) (full re-ingest armed)` : 'none'}`
+      + ` · structured facts ${nFacts ? `clear ${nFacts}` : 'none'} · outbound mentions ${nMentions ? `clear ${nMentions}` : 'none'}`
       + `${hadTimeline ? ' · timeline state removed' : ''}${hadLedger ? ' · pending ledger removed' : ''}`);
   }
   if (runs) console.log(`  runs: remove ${runFiles.length} record(s) from logs/runs/${hasLastRun ? ' + last-run.json' : ''}`);
@@ -149,13 +170,17 @@ function main() {
     }
   }
 
-  const delFrontier = cdb.prepare('DELETE FROM merged WHERE slug = ?');
   let frontierCleared = 0;
+  let factsCleared = 0;
+  let mentionsCleared = 0;
   for (const slug of targets) {
     const file = path.join(CONTACTS_DIR, `${slug}.md`);
     fs.writeFileSync(file, stubProfile(fs.readFileSync(file, 'utf8')));
     // Clear the merge frontier — this is what actually arms the re-ingest.
-    frontierCleared += delFrontier.run(slug).changes || 0;
+    const cleared = clearDerivedPerson(cdb, slug);
+    frontierCleared += cleared.frontier;
+    factsCleared += cleared.facts;
+    mentionsCleared += cleared.mentions;
     // REFRESH_STATE is the retired cursor file the planner no longer reads; kept
     // tidy for any old tooling that still inspects it, but it does nothing here.
     delete refresh.cursors[slug];
@@ -165,7 +190,8 @@ function main() {
   if (targets.length) {
     fs.writeFileSync(REFRESH_STATE, `${JSON.stringify(refresh, null, 2)}\n`);
     fs.writeFileSync(TIMELINE_STATE, `${JSON.stringify(timelineState, null, 2)}\n`);
-    console.log(`\ncrm-wipe: wiped ${targets.length} contact(s); cleared ${frontierCleared} merge-frontier row(s) from crm.db`
+    console.log(`\ncrm-wipe: wiped ${targets.length} contact(s); cleared ${frontierCleared} merge-frontier row(s),`
+      + ` ${factsCleared} fact row(s), and ${mentionsCleared} outbound mention row(s) from crm.db`
       + ' (the append-only message archive is untouched). The next ingest replays their FULL archived history —'
       + ' Ingest on their card, or node scripts/crm-daily.js --only <slug>.');
   }
@@ -182,4 +208,4 @@ function main() {
 }
 
 if (require.main === module) main();
-module.exports = { stubProfile };
+module.exports = { stubProfile, clearDerivedPerson };

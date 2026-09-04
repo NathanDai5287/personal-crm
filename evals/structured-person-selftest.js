@@ -1,10 +1,20 @@
 'use strict';
 const assert = require('assert');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
 const { ensureMessagesTable } = require('../lib/archive');
 const { markMerged } = require('../lib/archive');
-const { currentFacts, factHistory, neighbors, deriveAge } = require('../lib/schema');
-const { parseStructuredReply, applyStructuredReply, renderStructuredProfile } = require('../lib/structured-person');
+const {
+  currentFacts, factHistory, neighbors, deriveAge, recordFact, recordMention, retractCurrentFact,
+} = require('../lib/schema');
+const {
+  parseStructuredReply, applyStructuredReply, renderStructuredProfile, profileCitationIds,
+} = require('../lib/structured-person');
+const { dateKeyToMs } = require('../lib/weeks');
+const { sessionAssistantText } = require('../lib/cost');
+const { clearDerivedPerson } = require('../scripts/crm-wipe');
 
 function db() {
   const h = new DatabaseSync(':memory:');
@@ -21,6 +31,7 @@ function reply(facts, mentions = []) {
 }
 
 assert.throws(() => parseStructuredReply('DONE', { required: true }), /missing required/);
+assert.throws(() => parseStructuredReply('[[FACTS]]\n[]', { required: true }), /unclosed or malformed/);
 assert.deepStrictEqual(parseStructuredReply(reply([])).facts, []);
 assert.strictEqual(deriveAge('2000-01-01', Date.parse('2026-08-24T12:00:00Z')), 26);
 
@@ -72,6 +83,33 @@ assert.throws(() => applyStructuredReply(h, 'alice', reply([
 assert.throws(() => applyStructuredReply(h, 'alice', reply([
   { field: 'birthday', kind: 'standing', value: 'January 1', source_message_id: 999 },
 ]), { resolve }), /missing archive message/);
+assert.throws(() => applyStructuredReply(h, 'alice', reply([
+  { field: 'birthday', kind: 'standing', value: 'January 1', source_message_id: 20 },
+]), { resolve, validMessageIds: [30] }), /outside this chunk/);
+assert.deepStrictEqual([...profileCitationIds('old ⟨m10-m20 @m15⟩')].sort((a, b) => a - b), [10, 15, 20]);
+applyStructuredReply(h, 'alice', reply([
+  { field: 'birthday', kind: 'standing', value: 'January 1', source_message_id: 20 },
+]), { resolve, validMessageIds: [30], validFactMessageIds: [20, 30] });
+
+// An inferred snapshot as-of is the source message's Pacific day boundary, not
+// its raw timestamp.
+applyStructuredReply(h, 'alice', reply([
+  { field: 'weight', kind: 'snapshot', value: '150 lb', source_message_id: 20 },
+]), { resolve });
+assert.strictEqual(currentFacts(h, 'alice').find((f) => f.field === 'weight').as_of, dateKeyToMs('2026-02-01'));
+
+// A manual clear is a timestamped tombstone: later-arriving OLD messages cannot
+// resurrect the field, while a genuinely newer observation still may.
+recordFact(h, { slug: 'alice', field: 'phone', kind: 'standing', value: '555-old', src_msg: 20,
+  observed_at: Date.parse('2026-02-01T20:00:00Z') });
+const clearedAt = Date.parse('2026-04-01T20:00:00Z');
+retractCurrentFact(h, 'alice', 'phone', clearedAt);
+recordFact(h, { slug: 'alice', field: 'phone', kind: 'standing', value: '555-stale', src_msg: 30,
+  observed_at: Date.parse('2026-03-01T20:00:00Z') });
+assert.strictEqual(currentFacts(h, 'alice').some((f) => f.field === 'phone'), false);
+recordFact(h, { slug: 'alice', field: 'phone', kind: 'standing', value: '555-new', src_msg: 30,
+  observed_at: Date.parse('2026-05-01T20:00:00Z') });
+assert.strictEqual(currentFacts(h, 'alice').find((f) => f.field === 'phone').value, '555-new');
 
 const md = '# Alice\n- **Relationship:** friend\n\n## What I know\n\n### Work\nOld prose ⟨m10⟩\n\n## Timeline\n\n- 2024: met ⟨m10⟩\n';
 const timeline = md.slice(md.indexOf('## Timeline'));
@@ -79,6 +117,13 @@ const rendered = renderStructuredProfile(md, currentFacts(h, 'alice'));
 assert.strictEqual(rendered.slice(rendered.indexOf('## Timeline')), timeline);
 assert.match(rendered, /\*\*Employer:\*\* New Co ⟨m20⟩/);
 assert.doesNotMatch(rendered, /Old prose/);
+
+// Replacement strings are data, and multiple identity facts render newest-wins.
+const injected = renderStructuredProfile(md, [
+  { id: 1, field: 'relationship', value: 'old', observed_at: 10 },
+  { id: 2, field: 'relationship', value: "$& $1 $' newest", observed_at: 20 },
+]);
+assert.match(injected, /^- \*\*Relationship:\*\* \$& \$1 \$' newest$/m);
 
 // Facts, mentions, and the merge frontier can share the caller's transaction.
 const h2 = db();
@@ -89,6 +134,36 @@ h2.exec('ROLLBACK');
 assert.strictEqual(currentFacts(h2, 'alice').length, 0);
 assert.strictEqual(h2.prepare('SELECT COUNT(*) n FROM merged').get().n, 0);
 h2.close();
+
+// A rebuild clears facts, outbound mentions, and frontier together, while an
+// inbound edge owned by another profile survives.
+const h3 = db();
+recordFact(h3, { slug: 'alice', field: 'employer', kind: 'standing', value: 'Co', src_msg: 20,
+  observed_at: Date.parse('2026-02-01T20:00:00Z') });
+recordMention(h3, { from_slug: 'alice', to_slug: 'bob', kind: 'mentioned', note: null,
+  src_msg: 30, observed_at: Date.parse('2026-03-01T20:00:00Z'), run_id: null });
+recordMention(h3, { from_slug: 'bob', to_slug: 'alice', kind: 'mentioned', note: null,
+  src_msg: 30, observed_at: Date.parse('2026-03-01T20:00:00Z'), run_id: null });
+markMerged(h3, 'alice', [20], Date.now());
+assert.deepStrictEqual(clearDerivedPerson(h3, 'alice'), { facts: 1, mentions: 1, frontier: 1 });
+assert.strictEqual(currentFacts(h3, 'alice').length, 0);
+assert.strictEqual(neighbors(h3, 'alice').inbound.length, 1);
+h3.close();
+
+// Retry transcripts must use only the newest attempt; cost accounting still
+// scans every attempt separately in sumSessionCostUsd.
+const sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), 'crm-session-'));
+try {
+  const oldFile = path.join(sessionDir, 'old.jsonl');
+  const newFile = path.join(sessionDir, 'new.jsonl');
+  fs.writeFileSync(oldFile, `${JSON.stringify({ message: { role: 'assistant', content: 'FAILED [[FACTS]] old' } })}\n`);
+  fs.writeFileSync(newFile, `${JSON.stringify({ message: { role: 'assistant', content: 'DONE [[FACTS]] new' } })}\n`);
+  fs.utimesSync(oldFile, new Date(1_000), new Date(1_000));
+  fs.utimesSync(newFile, new Date(2_000), new Date(2_000));
+  assert.strictEqual(sessionAssistantText(sessionDir), 'DONE [[FACTS]] new');
+} finally {
+  fs.rmSync(sessionDir, { recursive: true, force: true });
+}
 
 h.close();
 console.log('structured-person selftest: PASS');
