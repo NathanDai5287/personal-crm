@@ -52,13 +52,10 @@ const { validateCitations, markMerged } = require('../lib/archive');
 const { mergeCallUsd, recordCostSample, fitCostModel } = require('../lib/cost');
 const { openCrmDb, openSignalDb } = require('../lib/signal-db');
 const { applyStructuredReply, renderStructuredProfile, profileCitationIds } = require('../lib/structured-person');
-const { buildResolver } = require('../lib/people-resolve');
+const { trackedResolver } = require('../lib/people-resolve');
 
 function personResolver(cdb) {
-  const contacts = cdb.prepare('SELECT file_path, name FROM contacts').all()
-    .map((r) => ({ slug: r.file_path ? r.file_path.replace('data/contacts/', '').replace(/\.md$/, '') : null, name: r.name }))
-    .filter((c) => c.slug);
-  return buildResolver(contacts).resolve;
+  return trackedResolver(cdb).resolve;
 }
 
 // REJECT UNKNOWN FLAGS BEFORE ANYTHING ELSE. Both flags here fail dangerously when

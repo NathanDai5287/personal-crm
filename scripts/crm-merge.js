@@ -24,11 +24,10 @@ const { ROOT, DATA_DIR, PI_CLI, MERGE_MODEL, MERGE_PROMPT, BOT_SERVICE_ID } = re
 const { dateKey } = require('../lib/weeks');
 const { sumSessionCostUsd, sessionAssistantText } = require('../lib/cost');
 const { storeNicknameProposals } = require('../lib/nicknames');
-const { buildResolver } = require('../lib/people-resolve');
+const { trackedResolver } = require('../lib/people-resolve');
 const { applyStructuredReply, renderStructuredProfile, profileCitationIds } = require('../lib/structured-person');
 const { openCrmDb } = require('../lib/signal-db');
 const { ensureMessagesTable, markMerged } = require('../lib/archive');
-const { trackedContacts } = require('../lib/person');
 
 // Resolver for nickname TARGETS (feature 2): maps a name the model names in a
 // `target | nickname | ids` line to a contact slug (or Nathan). Built once per
@@ -40,11 +39,9 @@ function nickResolver() {
   try {
     const { openCrmDb } = require('../lib/signal-db');
     const cdb = openCrmDb();
-    // TRACKED people only (lib/person): an untracked stub is not a resolvable target
-    // and never appears in the referenced-people context block.
-    const contacts = trackedContacts(cdb).map((c) => ({ slug: c.slug, name: c.name }));
+    // TRACKED people only: an untracked stub is not a resolvable nickname target.
+    _resolver = trackedResolver(cdb);
     cdb.close();
-    _resolver = buildResolver(contacts);
   } catch { _resolver = { resolve: () => null }; }
   return _resolver;
 }
