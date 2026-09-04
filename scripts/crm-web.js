@@ -31,6 +31,7 @@ const { decryptByHash } = require('../lib/signal-attachments');
 const TASKS = require('../lib/tasks');
 const P = require('../lib/nicknames');
 const PERSON = require('../lib/person');
+const { listCandidates, promoteOne, untrackSlug, WINDOW_DAYS, MIN_MSGS, MIN_INCOMING } = require('../lib/promote');
 const { factLabel } = require('../lib/structured-person');
 const { recordFact, retractCurrentFact, mentionEdges, edgeCitations, recordReassign } = require('../lib/schema');
 const RUN_TOGGLES = require('../lib/run-toggles');
@@ -703,7 +704,57 @@ const NN_INBOX_JS = `<script>(function(){
 function indexPage() {
   const list = contactList();
   const { suggestions, contacts } = inboxData(list);
-  return page('People — personal-crm', render(V.people(list, { suggestions, contacts }).body) + NN_INBOX_JS);
+  const manageLink = '<div class="sub" style="padding:6px 0 10px"><a href="/people/tracking">Manage tracked people &amp; suggestions &rarr;</a></div>';
+  return page('People — personal-crm', manageLink + render(V.people(list, { suggestions, contacts }).body) + NN_INBOX_JS);
+}
+
+// GET /people/tracking — the tracked/untracked boundary as a UI. Top: people over the
+// activity threshold who are NOT tracked (Track promotes one). Bottom: the tracked set
+// (Untrack removes one). Both go through lib/promote, the same path the CLI uses.
+function manageTrackingPage() {
+  let cands = [];
+  let cdb;
+  let sdb;
+  try {
+    cdb = openCrmDb();
+    sdb = openSignalDb();
+    cands = listCandidates(cdb, sdb);
+  } catch { cands = []; } finally {
+    if (sdb) { try { sdb.close(); } catch { /* closed */ } }
+    if (cdb) { try { cdb.close(); } catch { /* closed */ } }
+  }
+  const tracked = PERSON.allPeople().sort((a, b) => a.name.localeCompare(b.name));
+
+  const sugRows = cands.map((c) => {
+    const meta = `${c.total} msgs, ${c.incoming} from them${c.existingSlug ? ' &middot; already a stub' : ` &middot; ${esc(c.source)}`}`;
+    return '<div class="card" style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin:8px 0;padding:10px 12px">'
+      + `<div><b>${esc(c.name)}</b><div class="sub">${meta}</div></div>`
+      + '<form method="POST" action="/people/track" style="margin:0">'
+      + `<input type="hidden" name="service_id" value="${esc(c.serviceId)}">`
+      + '<button type="submit">Track</button></form></div>';
+  }).join('');
+  const suggestions = cands.length
+    ? sugRows
+    : `<p class="sub">No one over the threshold (${MIN_MSGS} msgs / ${MIN_INCOMING} from them in ${WINDOW_DAYS} days) is untracked.</p>`;
+
+  const trackedRows = tracked.map((p) => (
+    '<div class="card" style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin:6px 0;padding:8px 12px">'
+    + `<div><a href="/c/${encodeURIComponent(p.slug)}">${esc(p.name)}</a> <span class="sub">${esc(p.slug)}</span></div>`
+    + '<form method="POST" action="/people/untrack" style="margin:0" '
+    + `onsubmit="return confirm('Untrack ${esc(p.name)}? This deletes their profile; message history stays in the archive.')">`
+    + `<input type="hidden" name="slug" value="${esc(p.slug)}">`
+    + '<button type="submit">Untrack</button></form></div>'
+  )).join('');
+
+  const body = '<div class="back"><a href="/">&larr; back to people</a></div>'
+    + '<div class="profile"><h1>Tracked people</h1>'
+    + `<h2>Suggested to track <span class="sub">(${cands.length})</span></h2>`
+    + '<p class="sub">People you message often who aren’t tracked yet. Tracking creates a profile and starts folding them into the CRM.</p>'
+    + suggestions
+    + `<h2 style="margin-top:22px">Tracked <span class="sub">(${tracked.length})</span></h2>`
+    + trackedRows
+    + '</div>';
+  return page('Tracked people — personal-crm', body, '/');
 }
 
 // A nickname's citation slips resolve exactly like a fact bullet's: the face is the
@@ -3697,6 +3748,35 @@ function start() {
       // Relationship graph: READ (diagram + citations) and CORRECT (relink one
       // citation to a different person). Sits before the generic /c/<slug> match
       // below so 'graph' is never mistaken for a contact slug.
+      // Tracked/untracked boundary UI (lib/promote): list + Track + Untrack.
+      if (url.pathname === '/people/tracking') { send(200, manageTrackingPage()); return; }
+      if (url.pathname === '/people/track' && req.method === 'POST') {
+        if (!firstPartyOnly(req)) { send(403, page('Forbidden', '<p>Cross-site request refused.</p>')); return; }
+        readBody(req, (raw) => {
+          try {
+            const sid = (new URLSearchParams(raw).get('service_id') || '').replace(/^uuid:/i, '').trim();
+            if (!/^[a-f0-9-]{8,}$/i.test(sid)) { send(400, page('Bad request', '<p>Bad request.</p>')); return; }
+            let cdb;
+            let sdb;
+            try { cdb = openCrmDb(); sdb = openSignalDb(); promoteOne(cdb, sdb, sid); }
+            finally { if (sdb) { try { sdb.close(); } catch { /* closed */ } } if (cdb) { try { cdb.close(); } catch { /* closed */ } } }
+            res.writeHead(303, { Location: '/people/tracking' }); res.end();
+          } catch { try { send(400, page('Bad request', '<p>Bad request.</p>')); } catch { /* sent */ } }
+        });
+        return;
+      }
+      if (url.pathname === '/people/untrack' && req.method === 'POST') {
+        if (!firstPartyOnly(req)) { send(403, page('Forbidden', '<p>Cross-site request refused.</p>')); return; }
+        readBody(req, (raw) => {
+          try {
+            const slug = (new URLSearchParams(raw).get('slug') || '').trim();
+            if (!isSafeSlug(slug)) { send(400, page('Bad request', '<p>Bad request.</p>')); return; }
+            untrackSlug(slug);
+            res.writeHead(303, { Location: '/people/tracking' }); res.end();
+          } catch { try { send(400, page('Bad request', '<p>Bad request.</p>')); } catch { /* sent */ } }
+        });
+        return;
+      }
       // View filters (default off): ?mine=0 hides Nathan's own mentions; ?dm=0 hides
       // naming the other party of your own 1:1.
       const graphOpts = { hideMine: url.searchParams.get('mine') === '0', hideDm: url.searchParams.get('dm') === '0' };
