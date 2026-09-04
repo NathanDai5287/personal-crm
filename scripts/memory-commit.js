@@ -37,9 +37,6 @@ const WT = ROOT;
 //                    deleted in a `finally` within one merge — but `finally` does not run
 //                    on SIGKILL, and `add -f` below would force-add a survivor. It carries
 //                    nothing the uncensored .new.txt doesn't already, so exclude it.
-//   *.people.txt     The referenced-people identity context pi reads mid-merge (Phase 3).
-//                    Profile-derived and regenerated each merge; written and deleted in the
-//                    same `finally` as .pi.txt, so it is transient — exclude it likewise.
 //   _session-tmp     Throwaway pi session dirs (crm-merge cost readback). Gitignored, but
 //                    `add -f` overrides .gitignore, so it needs an explicit exclude too.
 const PATHS = ['data'];
@@ -51,7 +48,6 @@ const EXCLUDE = [
   ':(exclude)data/web-password.txt',
   ':(exclude)data/contacts/_raw',
   ':(exclude)data/contacts/_refresh/*.pi.txt',
-  ':(exclude)data/contacts/_refresh/*.people.txt',
   ':(exclude)data/_session-tmp',
   ':(exclude)data/censor-review',
 ];

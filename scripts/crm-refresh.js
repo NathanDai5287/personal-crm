@@ -52,6 +52,7 @@ const { fmtLocal, planChunks, lastCompleteWeekStart, gateBuckets } = require('..
 const { confirmedNicknames } = require('../lib/nicknames');
 const { renderedBody, formatLine } = require('../lib/message-context');
 const { buildResolver } = require('../lib/people-resolve');
+const { trackedContacts } = require('../lib/person');
 const {
   TRACKED, REFRESH_DIR, CONTACTS_DIR, BOT_SERVICE_ID,
   INGEST_N, INGEST_FLOOR_DAYS, INGEST_CEILING_DAYS,
@@ -65,10 +66,9 @@ const { signalNameMap } = require('../lib/signal-names');
 let _resolver = null;
 function getResolver(cdb) {
   if (_resolver) return _resolver;
-  const contacts = cdb.prepare('SELECT file_path, name FROM contacts').all()
-    .map((r) => ({ slug: r.file_path ? r.file_path.replace('data/contacts/', '').replace(/\.md$/, '') : null, name: r.name }))
-    .filter((c) => c.slug);
-  _resolver = buildResolver(contacts);
+  // TRACKED people only (lib/person): the cast of characters names people the reader
+  // actually tracks; an untracked stub is never injected as context.
+  _resolver = buildResolver(trackedContacts(cdb).map((c) => ({ slug: c.slug, name: c.name })));
   return _resolver;
 }
 

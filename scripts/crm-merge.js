@@ -28,7 +28,7 @@ const { buildResolver } = require('../lib/people-resolve');
 const { applyStructuredReply, renderStructuredProfile, profileCitationIds } = require('../lib/structured-person');
 const { openCrmDb } = require('../lib/signal-db');
 const { ensureMessagesTable, markMerged } = require('../lib/archive');
-const { getPerson, trackedContacts } = require('../lib/person');
+const { trackedContacts } = require('../lib/person');
 
 // Resolver for nickname TARGETS (feature 2): maps a name the model names in a
 // `target | nickname | ids` line to a contact slug (or Nathan). Built once per
@@ -49,39 +49,6 @@ function nickResolver() {
   return _resolver;
 }
 const { detect, redact } = require('../lib/redact');
-
-// PHASE 3 — referenced-people context. Deterministically detect which OTHER tracked
-// people the new messages name (by name or confirmed nickname, case-insensitive and
-// unambiguous-only; lib/people-resolve), and render a compact identity card for each,
-// so the merge model knows who "Vlad" or "Katia" is instead of guessing or inventing.
-// Detection is regex/alias-based — never a model call. Cards are profile-derived (the
-// person's own curated header + facts), so injecting them raises no content concern.
-// Returns '' when nothing is referenced.
-const CARD_SKIP_FIELDS = new Set(['relationship', 'birthday', 'phone', 'signal_id', 'first_contact', 'last_contact']);
-function renderReferencedPeople(cdb, ledgerText, selfSlug) {
-  let slugs;
-  try { slugs = nickResolver().mentionsIn(ledgerText || ''); } catch { return ''; }
-  const others = [...slugs].filter((s) => s && s !== selfSlug && s !== 'nathan').sort();
-  if (!others.length) return '';
-  const cards = [];
-  for (const slug of others) {
-    let p;
-    try { p = getPerson(slug, { cdb }); } catch { p = null; }
-    if (!p) continue; // untracked / no profile -> not injected
-    const bits = [`## ${p.name} (slug: ${slug})`];
-    if (p.nicknames && p.nicknames.length) bits.push(`- also called: ${p.nicknames.join(', ')}`);
-    if (p.relationship) bits.push(`- relationship: ${p.relationship}`);
-    let extra = 0;
-    for (const f of (p.facts || [])) {
-      if (extra >= 3) break;
-      if (f && f.field && f.value && !CARD_SKIP_FIELDS.has(f.field)) { bits.push(`- ${f.field}: ${f.value}`); extra += 1; }
-    }
-    cards.push(bits.join('\n'));
-  }
-  if (!cards.length) return '';
-  return ['# People referenced in these messages (identity context only — who is who; '
-    + 'do not copy verbatim into the profile):', '', ...cards].join('\n') + '\n';
-}
 
 // Bucket a failed pi run so the retry loop knows what to do:
 //   content_filter — a provider rejected the prompt on content grounds; retrying
@@ -141,16 +108,8 @@ function buildArgs(slug, mergePromptText, opts = {}) {
     // .new.txt at merge time (see mergeContact). Censoring is model-egress only; the
     // committed .new.txt stays uncensored — the faithful Rendered record.
     `@data/contacts/_refresh/${slug}.pi.txt`,
-    // Phase 3: identity cards for other tracked people named in these messages. Written
-    // by mergeContact (best-effort) and attached only when present; a transient file
-    // like .pi.txt, deleted in the finally and never committed.
-    ...(peopleContextExists(opts.cwd || ROOT, slug) ? [`@data/contacts/_refresh/${slug}.people.txt`] : []),
     opts.userMessage || DEFAULT_USER_MESSAGE,
   ];
-}
-
-function peopleContextExists(cwd, slug) {
-  try { return fs.existsSync(path.join(cwd, 'data', 'contacts', '_refresh', `${slug}.people.txt`)); } catch { return false; }
 }
 
 // `Last contact` is DERIVED, not judged. It is the latest date in the ledger —
@@ -312,20 +271,6 @@ function mergeContact(slug, opts = {}) {
   const piLedgerPath = path.join(cwd, 'data', 'contacts', '_refresh', `${slug}.pi.txt`);
   const writePiLedger = () => { try { fs.writeFileSync(piLedgerPath, redact(fs.readFileSync(ledgerPath, 'utf8'))); return true; } catch { return false; } };
   writePiLedger();
-
-  // Phase 3: write the referenced-people identity context beside the ledger (best-effort;
-  // detection is deterministic, so a failure here just omits the context, never blocks the
-  // merge). Deleted in the finally like .pi.txt. Detect on the uncensored .new.txt — names
-  // of tracked people are not censored, and this file never leaves data/.
-  const peoplePath = path.join(cwd, 'data', 'contacts', '_refresh', `${slug}.people.txt`);
-  try {
-    let pcdb; try { pcdb = openCrmDb(); } catch { pcdb = null; }
-    let block = '';
-    try { block = renderReferencedPeople(pcdb, fs.readFileSync(ledgerPath, 'utf8'), slug); }
-    finally { if (pcdb) { try { pcdb.close(); } catch { /* already closed */ } } }
-    if (block) fs.writeFileSync(peoplePath, block);
-    else { try { fs.unlinkSync(peoplePath); } catch { /* none to clear */ } }
-  } catch { try { fs.unlinkSync(peoplePath); } catch { /* best-effort */ } }
   const piEnv = { ...process.env, PI_SKIP_VERSION_CHECK: '1', PI_OFFLINE: '1' };
   let attempt = 0;
   let lastError = null;
@@ -494,7 +439,6 @@ function mergeContact(slug, opts = {}) {
     if (tempSession) { try { fs.rmSync(tempSession, { recursive: true, force: true }); } catch { /* best-effort */ } }
     // The censored model-copy is transient — never let it reach the committed history.
     try { fs.unlinkSync(piLedgerPath); } catch { /* already gone */ }
-    try { fs.unlinkSync(peoplePath); } catch { /* already gone */ }
   }
 }
 
