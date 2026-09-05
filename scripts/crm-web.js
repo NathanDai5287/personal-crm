@@ -1017,13 +1017,16 @@ const GRAPH_CSS = `<style>
 #graph-canvas{position:absolute;inset:0}
 .graph-svg{width:100%;height:100%;display:block;touch-action:none;cursor:grab}
 .graph-svg:active{cursor:grabbing}
-.graph-edge{stroke:var(--stamp);stroke-opacity:.5;cursor:pointer;transition:stroke-opacity .12s}
-.graph-edge:hover{stroke-opacity:.95}
+.graph-edge{stroke:var(--stamp);stroke-opacity:.5;pointer-events:none;transition:stroke-opacity .12s}
+.graph-edge.hover{stroke-opacity:.95}
 .graph-edge.dim{stroke-opacity:.07}
+.graph-edge-hit{stroke:transparent;stroke-width:16;fill:none;cursor:pointer}
+.graph-tip{position:absolute;z-index:7;pointer-events:none;background:var(--ink);color:var(--ground);
+  font-size:11px;padding:3px 7px;border-radius:5px;white-space:nowrap;box-shadow:0 2px 6px #0000003a}
 .graph-node{cursor:pointer}
 .graph-node circle{stroke:var(--ink);stroke-width:1.2;transition:opacity .15s}
-.graph-node .graph-label{fill:var(--ink);font-size:11px;paint-order:stroke;stroke:var(--paper);
-  stroke-width:3px;stroke-linejoin:round;pointer-events:none}
+.graph-node .graph-label{fill:var(--ink);font-size:8.5px;paint-order:stroke;stroke:var(--paper);
+  stroke-width:2.5px;stroke-linejoin:round;pointer-events:none}
 .graph-node.dim{opacity:.22}
 .graph-node.sel circle{stroke-width:2.6}
 .graph-panel{position:absolute;top:10px;right:10px;width:236px;max-height:calc(100% - 20px);overflow:auto;
@@ -1043,11 +1046,14 @@ const GRAPH_CSS = `<style>
 // talks to, and a "me" node connected to everyone would just be a hairball that
 // tells you nothing. His mentions of others still count toward how often a person
 // is mentioned (node size), they're simply not drawn as edges.
-function graphPage(opts = {}) {
-  const hideMine = !!opts.hideMine;
-  const hideDm = !!opts.hideDm;
-  // Carried onto every edge link so a filter survives a click into an edge page.
-  const edgeSuffix = (hideMine ? '&mine=0' : '') + (hideDm ? '&dm=0' : '');
+function graphPage() {
+  // These two filters are always on and no longer user-toggleable: the graph is
+  // about who OTHER people talk about, so Nathan's own mentions and the trivial
+  // case of naming the other party in a 1:1 are always excluded. Carried onto every
+  // edge link so the citation page applies the same lens.
+  const hideMine = true;
+  const hideDm = true;
+  const edgeSuffix = '&mine=0&dm=0';
   let cdb;
   try { cdb = openCrmDb(); } catch { cdb = null; }
   let edges = [];
@@ -1060,15 +1066,6 @@ function graphPage(opts = {}) {
   } finally {
     if (cdb) { try { cdb.close(); } catch { /* already closed */ } }
   }
-
-  // Two view filters (default off): hide the mentions Nathan speaks, and hide the trivial
-  // case of naming the other party in your own 1:1. Each link flips one flag.
-  const gq = (m, d) => { const p = []; if (m) p.push('mine=0'); if (d) p.push('dm=0'); return p.length ? `?${p.join('&')}` : ''; };
-  const filters = '<p class="sub">Filters: '
-    + `<a href="/graph${gq(!hideMine, hideDm)}">${hideMine ? 'show' : 'hide'} my mentions</a>`
-    + ` &middot; <a href="/graph${gq(hideMine, !hideDm)}">${hideDm ? 'show' : 'hide'} naming the other person in a 1:1</a>`
-    + ((hideMine || hideDm) ? ' &middot; <a href="/graph">reset</a>' : '')
-    + '</p>';
 
   const caption = '<p class="sub">Each circle is a person you talk to (you are never shown); size tracks how often they’re '
     + 'mentioned, colour groups communities who reference each other. Drag a node to pin it in place (Reset releases pins), '
@@ -1101,7 +1098,7 @@ function graphPage(opts = {}) {
     const empty = (hideMine || hideDm)
       ? '<p>No people match the current filters.</p>'
       : '<p>No mentions recorded yet &mdash; this fills in after the next sweep runs the mention scan.</p>';
-    const body = `<div class="profile"><h1>Relationship graph</h1>${caption}${filters}${empty}${table}</div>`;
+    const body = `<div class="profile"><h1>Relationship graph</h1>${caption}${empty}${table}</div>`;
     return page('Relationship graph — personal-crm', body, '/graph');
   }
 
@@ -1174,7 +1171,7 @@ function graphPage(opts = {}) {
   const stage = '<div class="graph-stage"><div id="graph-canvas"></div>'
     + '<div id="graph-panel" class="graph-panel" hidden></div></div>';
 
-  const body = `<div class="profile">${GRAPH_CSS}<h1>Relationship graph</h1>${caption}${filters}`
+  const body = `<div class="profile">${GRAPH_CSS}<h1>Relationship graph</h1>${caption}`
     + `<div class="graph-wrap">${controls}${stage}</div>`
     + `<script>window.__GRAPH=${payload};</script><script src="/assets/graph.js"></script>`
     + table + '</div>';
@@ -3957,7 +3954,7 @@ function start() {
       // View filters (default off): ?mine=0 hides Nathan's own mentions; ?dm=0 hides
       // naming the other party of your own 1:1.
       const graphOpts = { hideMine: url.searchParams.get('mine') === '0', hideDm: url.searchParams.get('dm') === '0' };
-      if (url.pathname === '/graph') { send(200, graphPage(graphOpts)); return; }
+      if (url.pathname === '/graph') { send(200, graphPage()); return; }
       if (url.pathname === '/graph/edge') {
         const from = url.searchParams.get('from') || '';
         const to = url.searchParams.get('to') || '';
