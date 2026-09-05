@@ -1206,8 +1206,6 @@ function edgePage(fromSlug, toSlug, opts = {}) {
   const options = allSlugs.map((s) => `<option value="${esc(s)}">${esc(graphNameFor(nameBySlug, s))}</option>`).join('');
 
   const rows = cites.map((c) => {
-    const when = esc(ptLocal(c.observed_at));
-    const meta = [c.sender, c.conversation].filter(Boolean).map(esc).join(' &middot; ');
     let snippet;
     if (c.body) {
       const s = String(c.body);
@@ -1215,31 +1213,52 @@ function edgePage(fromSlug, toSlug, opts = {}) {
     } else {
       snippet = '<em>(message not in archive)</em>';
     }
-    // Only 'scan' citations are correctable: the reassign machinery (override +
-    // live move) applies to scan rows, and a rebuild would duplicate a corrected
-    // 'model' row onto both edges. Legacy imported rows are shown, not editable.
-    const action = c.source === 'scan'
-      ? '<form method="POST" action="/graph/reassign" style="display:flex;gap:6px;align-items:center;margin:0">'
+    // The sender is ALWAYS the "from" person on this page, and a "DM with X" label
+    // is noise — so drop both and keep the conversation name only when it's a GROUP
+    // (that's real context: the mention happened in a shared thread, not a 1:1).
+    const conv = (c.conversation && !/^DM with /i.test(c.conversation)
+      && c.conversation !== fromName && c.conversation !== toName) ? c.conversation : '';
+    // The citation component: a blue chip that opens the message in its own view
+    // (/m/<id> highlights it in surrounding context), same affordance as the
+    // ⟨m…⟩ citations everywhere else.
+    const cite = `<a class="slip" href="/m/${esc(c.src_msg)}" target="_blank" rel="noopener" `
+      + `title="open message m${esc(c.src_msg)} in context">m${esc(c.src_msg)}</a>`;
+    const meta = `<span class="sub">${esc(ptLocal(c.observed_at))}${conv ? ` &middot; ${esc(conv)}` : ''}</span>`;
+    // Reassign (only 'scan' rows are correctable — see recordReassign). Tucked into a
+    // "wrong person?" disclosure because it's a rare correction, not a per-message
+    // control: it re-credits THIS message's mention from toName to someone else.
+    const reassign = c.source === 'scan'
+      ? '<details class="reassign"><summary>wrong person?</summary>'
+        + `<div class="sub" style="margin:8px 0 6px">Credited as ${esc(fromName)} mentioning ${esc(toName)}. `
+        + 'If this message is actually about someone else, pick them and it moves to that edge:</div>'
+        + '<form method="POST" action="/graph/reassign" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:0">'
         + `<input type="hidden" name="from" value="${esc(fromSlug)}">`
         + `<input type="hidden" name="orig_to" value="${esc(toSlug)}">`
         + `<input type="hidden" name="src_msg" value="${esc(c.src_msg)}">`
         + (hideMine ? '<input type="hidden" name="mine" value="0">' : '')
         + (hideDm ? '<input type="hidden" name="dm" value="0">' : '')
-        + `<select name="new_to"><option value="" selected disabled>choose a person&hellip;</option>${options}</select>`
-        + '<button type="submit">link to&hellip;</button>'
-        + '</form>'
-      : '<span class="sub">imported edge &middot; not editable</span>';
-    return '<div class="card" style="margin:10px 0;padding:10px 12px">'
-      + `<div class="sub">${when}${meta ? ` &middot; ${meta}` : ''}</div>`
-      + `<div>${snippet}</div>`
-      + '<div style="margin-top:6px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">'
-      + `<a href="/m/${esc(c.src_msg)}" target="_blank" rel="noopener">view thread &rarr;</a>`
-      + action + '</div></div>';
+        + `<select name="new_to"><option value="" selected disabled>choose the right person&hellip;</option>${options}</select>`
+        + '<button type="submit">Reassign</button>'
+        + '</form></details>'
+      : '<span class="sub">imported &middot; not editable</span>';
+    return '<div class="card" style="margin:10px 0;padding:12px 14px">'
+      + `<div style="margin-bottom:8px">${snippet}</div>`
+      + '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">'
+      + cite + meta + reassign + '</div></div>';
   }).join('');
 
+  const reassignCss = '<style>'
+    + '.reassign{display:inline-block}'
+    + '.reassign>summary{cursor:pointer;color:var(--stamp);font-size:13px;list-style:none}'
+    + '.reassign>summary::-webkit-details-marker{display:none}'
+    + '.reassign[open]{display:block;margin-top:6px}'
+    + '.reassign select,.reassign button{font:inherit;padding:3px 8px;background:var(--card);color:var(--ink);border:1px solid var(--rule);border-radius:6px}'
+    + '</style>';
+
   const body = `<div class="back"><a href="/graph${backSuffix ? `?${backSuffix.replace(/^&/, '')}` : ''}">&larr; back to graph</a></div>`
-    + `<div class="profile"><h1>${esc(fromName)} &rarr; ${esc(toName)}</h1>`
-    + `<p class="sub">${cites.length} citation${cites.length === 1 ? '' : 's'}, newest first</p>`
+    + `${reassignCss}<div class="profile"><h1>${esc(fromName)} &rarr; ${esc(toName)}</h1>`
+    + `<p class="sub">${cites.length} message${cites.length === 1 ? '' : 's'} where ${esc(fromName)} named ${esc(toName)}, newest first — `
+    + 'click the <code>m…</code> chip to open one in context.</p>'
     + (cites.length ? rows : '<p>No citations recorded for this edge.</p>')
     + '</div>';
   return page(`${fromName} → ${toName} — graph`, body, '/graph');
