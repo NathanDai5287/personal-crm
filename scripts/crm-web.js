@@ -35,6 +35,7 @@ const { listCandidates, promoteOne, untrackSlug, WINDOW_DAYS, MIN_MSGS, MIN_INCO
 const { writeFileAtomic } = require('../lib/atomic-write');
 const { factLabel } = require('../lib/structured-person');
 const { recordFact, retractCurrentFact, mentionEdges, edgeCitations, recordReassign } = require('../lib/schema');
+const { detectCommunities } = require('../lib/graph-communities');
 const RUN_TOGGLES = require('../lib/run-toggles');
 const RUN_MODELS = require('../lib/run-models');
 const JOBS_DEF = require('../lib/jobs'); // single source of truth for the job set + labels
@@ -48,6 +49,14 @@ const ARCHIVE_STATE_FILE = path.posix.join(path.posix.dirname(TRACKED), 'crm-arc
 const RUNS_DIR = path.join(LOGS_DIR, 'runs');
 const DAY = 86_400_000;
 const BACKFILL_DAYS = 30; // mirror of crm-refresh.js's new-contact window
+
+// The interactive graph's browser code, served verbatim at /assets/graph.js (see
+// lib/view/graph-client.js). Read once at startup; a deploy restarts the process,
+// so there's no live-reload concern. Empty string if the file is somehow missing
+// (the page still renders — the server-side edge table below the canvas is the
+// no-JS fallback and stays functional).
+let GRAPH_CLIENT_JS = '';
+try { GRAPH_CLIENT_JS = fs.readFileSync(path.join(__dirname, '..', 'lib', 'view', 'graph-client.js'), 'utf8'); } catch { /* fallback table still works */ }
 
 // ---------------------------------------------------------------------------
 // Auth
@@ -985,7 +994,55 @@ function graphNameFor(nameBySlug, slug) {
   return nameBySlug.get(slug) || slug;
 }
 
-// GET /graph — the diagram + the reliable table fallback below it.
+// Scoped styling for the interactive canvas. Uses the design-system tokens so it
+// tracks light/dark; community fill colours are set inline by the client.
+const GRAPH_CSS = `<style>
+.graph-wrap{margin:14px 0}
+.graph-controls{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:10px}
+.graph-controls label.inline{display:flex;align-items:center;gap:6px}
+.graph-controls select,.graph-controls input,.graph-controls button,.graph-dd>summary{
+  font:inherit;padding:4px 8px;background:var(--card);color:var(--ink);
+  border:1px solid var(--rule);border-radius:6px}
+.graph-controls button,.graph-dd>summary{cursor:pointer}
+.graph-dd{position:relative}
+.graph-dd>summary{list-style:none;user-select:none}
+.graph-dd>summary::-webkit-details-marker{display:none}
+.graph-dd .graph-dd-body{position:absolute;z-index:6;top:112%;left:0;width:260px;background:var(--card);
+  border:1px solid var(--rule);border-radius:8px;padding:8px;box-shadow:0 3px 10px #00000026}
+.graph-dd .graph-dd-body input{width:100%;box-sizing:border-box;margin-bottom:6px}
+.graph-people{display:flex;flex-direction:column;gap:1px;max-height:220px;overflow:auto}
+.graph-people label{display:flex;align-items:center;gap:6px;font-size:13px;padding:2px 2px;white-space:nowrap}
+.graph-stage{position:relative;border:1px solid var(--rule);border-radius:8px;background:var(--paper);
+  overflow:hidden;height:70vh;min-height:420px}
+#graph-canvas{position:absolute;inset:0}
+.graph-svg{width:100%;height:100%;display:block;touch-action:none;cursor:grab}
+.graph-svg:active{cursor:grabbing}
+.graph-edge{stroke:var(--stamp);stroke-opacity:.5;cursor:pointer;transition:stroke-opacity .12s}
+.graph-edge:hover{stroke-opacity:.95}
+.graph-edge.dim{stroke-opacity:.07}
+.graph-node{cursor:pointer}
+.graph-node circle{stroke:var(--ink);stroke-width:1.2;transition:opacity .15s}
+.graph-node .graph-label{fill:var(--ink);font-size:11px;paint-order:stroke;stroke:var(--paper);
+  stroke-width:3px;stroke-linejoin:round;pointer-events:none}
+.graph-node.dim{opacity:.22}
+.graph-node.sel circle{stroke-width:2.6}
+.graph-panel{position:absolute;top:10px;right:10px;width:236px;max-height:calc(100% - 20px);overflow:auto;
+  background:var(--card);border:1px solid var(--rule);border-radius:8px;padding:12px 14px;box-shadow:0 3px 10px #0000002e}
+.graph-panel h3{margin:0 6px 2px 0}
+.graph-panel h4{margin:12px 0 4px;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--soft,#77796e)}
+.graph-panel .g-list{list-style:none;margin:0;padding:0}
+.graph-panel .g-list li{display:flex;justify-content:space-between;gap:10px;padding:2px 0;border-bottom:1px solid var(--cardline)}
+.graph-panel .g-count{color:var(--soft,#77796e);font-variant-numeric:tabular-nums}
+.graph-panel .g-close{position:absolute;top:6px;right:9px;border:0;background:none;color:var(--ink);
+  font-size:20px;line-height:1;cursor:pointer;padding:0}
+</style>`;
+
+// GET /graph — an interactive force-directed view of who mentions whom, plus the
+// reliable server-rendered edge table below it (the no-JS / accessibility path).
+// The OWNER is deliberately never a node: the graph is about the people Nathan
+// talks to, and a "me" node connected to everyone would just be a hairball that
+// tells you nothing. His mentions of others still count toward how often a person
+// is mentioned (node size), they're simply not drawn as edges.
 function graphPage(opts = {}) {
   const hideMine = !!opts.hideMine;
   const hideDm = !!opts.hideDm;
@@ -1007,122 +1064,120 @@ function graphPage(opts = {}) {
   // Two view filters (default off): hide the mentions Nathan speaks, and hide the trivial
   // case of naming the other party in your own 1:1. Each link flips one flag.
   const gq = (m, d) => { const p = []; if (m) p.push('mine=0'); if (d) p.push('dm=0'); return p.length ? `?${p.join('&')}` : ''; };
-  const controls = '<p class="sub">Filters: '
+  const filters = '<p class="sub">Filters: '
     + `<a href="/graph${gq(!hideMine, hideDm)}">${hideMine ? 'show' : 'hide'} my mentions</a>`
     + ` &middot; <a href="/graph${gq(hideMine, !hideDm)}">${hideDm ? 'show' : 'hide'} naming the other person in a 1:1</a>`
     + ((hideMine || hideDm) ? ' &middot; <a href="/graph">reset</a>' : '')
     + '</p>';
 
-  const caption = '<p class="sub">Every edge is one person mentioning another, by name, in your archived '
-    + 'messages &middot; click an edge to see the citations.</p>';
+  const caption = '<p class="sub">Each circle is a person you talk to (you are never shown); size tracks how often they’re '
+    + 'mentioned, colour groups communities who reference each other. Drag a node to pin it in place (Reset releases pins), '
+    + 'scroll to zoom, drag the background to pan, click a person to see who they mention &middot; click an edge for its citations.</p>';
 
-  if (!edges.length) {
-    const empty = (hideMine || hideDm)
-      ? '<p>No edges match the current filters.</p>'
-      : '<p>No mentions recorded yet &mdash; this fills in after the next sweep runs the mention scan.</p>';
-    const body = `<div class="profile"><h1>Relationship graph</h1>${caption}${controls}${empty}</div>`;
-    return page('Relationship graph — personal-crm', body, '/graph');
-  }
-
-  // Node set = every slug touched by an edge, weighted by total citations through
-  // it (either direction) so hubs read as bigger circles.
-  const weight = new Map();
-  const bump = (slug, n) => weight.set(slug, (weight.get(slug) || 0) + n);
-  for (const e of edges) { bump(e.from_slug, e.n); bump(e.to_slug, e.n); }
-  const slugs = [...weight.keys()];
-  // Stable order (degree desc, then slug) so the layout doesn't jitter between
-  // renders of the same data.
-  slugs.sort((a, b) => (weight.get(b) - weight.get(a)) || (a < b ? -1 : a > b ? 1 : 0));
-
-  const W = 900, H = 640, cx = W / 2, cy = H / 2, R = Math.min(W, H) / 2 - 90;
-  const N = slugs.length;
-  const pos = new Map();
-  slugs.forEach((slug, i) => {
-    const theta = N === 1 ? -Math.PI / 2 : (2 * Math.PI * i) / N - Math.PI / 2;
-    pos.set(slug, { x: cx + R * Math.cos(theta), y: cy + R * Math.sin(theta) });
-  });
-
-  const weights = [...weight.values()];
-  const maxW = Math.max(...weights), minW = Math.min(...weights);
-  const nodeR = (slug) => {
-    const w = weight.get(slug);
-    const t = maxW === minW ? 0.5 : (Math.sqrt(w) - Math.sqrt(minW)) / (Math.sqrt(maxW) - Math.sqrt(minW));
-    return 10 + t * 18; // 10..28px, sqrt so AREA tracks weight
-  };
-
-  const ns = edges.map((e) => e.n);
-  const maxN = Math.max(...ns), minN = Math.min(...ns);
-  const strokeW = (n) => {
-    const t = maxN === minN ? 0.5 : (n - minN) / (maxN - minN);
-    return 1.5 + t * 6.5; // 1.5..8px, clamped to stay readable
-  };
-
-  // Edges as gentle quadratic curves. Mentions are split by speaker, so A->B and
-  // B->A can both exist; offset the control point perpendicular to the line, with
-  // the sign fixed by slug order, so the two directions never sit on top of each
-  // other. Endpoints are pulled back to each node's rim so the arrowhead lands
-  // cleanly outside the circle instead of under it.
-  const edgeSvg = edges.map((e) => {
-    const a = pos.get(e.from_slug), b = pos.get(e.to_slug);
-    if (!a || !b) return ''; // defensive: never throw on a row geometry can't place
-    const fromName = graphNameFor(nameBySlug, e.from_slug);
-    const toName = graphNameFor(nameBySlug, e.to_slug);
-    const href = `/graph/edge?from=${encodeURIComponent(e.from_slug)}&to=${encodeURIComponent(e.to_slug)}${edgeSuffix}`;
-    const titleTxt = `${fromName} → ${toName} · ${e.n} mention${e.n === 1 ? '' : 's'}`;
-    let d;
-    if (e.from_slug === e.to_slug) {
-      // Self-mention (rare, but the schema allows it): a small loop above the node.
-      const r0 = nodeR(e.from_slug);
-      d = `M ${(a.x - r0).toFixed(1)} ${a.y.toFixed(1)} C ${(a.x - r0 - 26).toFixed(1)} ${(a.y - 40).toFixed(1)}, `
-        + `${(a.x + r0 + 26).toFixed(1)} ${(a.y - 40).toFixed(1)}, ${(a.x + r0).toFixed(1)} ${a.y.toFixed(1)}`;
-    } else {
-      const dx = b.x - a.x, dy = b.y - a.y;
-      const len = Math.hypot(dx, dy) || 1;
-      const ux = dx / len, uy = dy / len;
-      const sign = e.from_slug < e.to_slug ? 1 : -1;
-      const offset = 18 * sign;
-      const px = (-dy / len) * offset, py = (dx / len) * offset;
-      const ra = nodeR(e.from_slug), rb = nodeR(e.to_slug);
-      const sx = a.x + ux * ra, sy = a.y + uy * ra;
-      const ex = b.x - ux * (rb + 8), ey = b.y - uy * (rb + 8);
-      const mx = (sx + ex) / 2 + px, my = (sy + ey) / 2 + py;
-      d = `M ${sx.toFixed(1)} ${sy.toFixed(1)} Q ${mx.toFixed(1)} ${my.toFixed(1)}, ${ex.toFixed(1)} ${ey.toFixed(1)}`;
-    }
-    return `<a href="${esc(href)}"><path d="${d}" fill="none" stroke="var(--stamp)" `
-      + `stroke-width="${strokeW(e.n).toFixed(1)}" stroke-opacity="0.55" marker-end="url(#arrow)">`
-      + `<title>${esc(titleTxt)}</title></path></a>`;
-  }).join('');
-
-  const nodeSvg = slugs.map((slug) => {
-    const p = pos.get(slug);
-    const r = nodeR(slug);
-    const name = graphNameFor(nameBySlug, slug);
-    const isOwner = slug === OWNER_SLUG;
-    return '<g>'
-      + `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="${r.toFixed(1)}" `
-      + `fill="${isOwner ? 'var(--stamp)' : 'var(--card)'}" stroke="var(--ink)" stroke-width="1.2">`
-      + `<title>${esc(name)}</title></circle>`
-      + `<text x="${p.x.toFixed(1)}" y="${(p.y + r + 14).toFixed(1)}" text-anchor="middle" font-size="11" `
-      + `fill="var(--ink)">${esc(name)}</text></g>`;
-  }).join('');
-
-  const svg = `<svg viewBox="0 0 ${W} ${H}" width="100%" height="auto" role="img" `
-    + 'aria-label="Relationship graph" style="max-width:100%;background:var(--paper);border:1px solid var(--rule);border-radius:8px">'
-    + '<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">'
-    + '<path d="M0,0 L10,5 L0,10 z" fill="var(--stamp)" fill-opacity="0.7"/></marker></defs>'
-    + edgeSvg + nodeSvg + '</svg>';
-
-  // Table fallback: same edges, most-weighted first, every row a link. This is
-  // what makes the feature usable even where SVG hit-testing is fiddly.
+  // Table fallback / full index: EVERY edge (owner rows included), most-weighted
+  // first, each row a link into the citations. Built up-front so it's shown even in
+  // the degenerate case below where there are edges but nothing to plot.
   const rows = [...edges].sort((x, y) => (y.n - x.n) || (y.last - x.last)).map((e) => {
     const href = `/graph/edge?from=${encodeURIComponent(e.from_slug)}&to=${encodeURIComponent(e.to_slug)}${edgeSuffix}`;
     return `<tr><td><a href="${esc(href)}">${esc(graphNameFor(nameBySlug, e.from_slug))}</a></td><td>&rarr;</td>`
       + `<td><a href="${esc(href)}">${esc(graphNameFor(nameBySlug, e.to_slug))}</a></td>`
       + `<td class="num">${e.n}</td><td>${esc(ptLocal(e.last))}</td></tr>`;
   }).join('');
-  const table = `<table class="tbl"><tr><th>From</th><th></th><th>To</th><th>mentions</th><th>last</th></tr>${rows}</table>`;
+  const table = edges.length
+    ? `<h2>All edges</h2><table class="tbl"><tr><th>From</th><th></th><th>To</th><th>mentions</th><th>last</th></tr>${rows}</table>`
+    : '';
 
-  const body = `<div class="profile"><h1>Relationship graph</h1>${caption}${controls}${svg}<h2>All edges</h2>${table}</div>`;
+  // Owner is never a node. Node set = every non-owner slug appearing in any edge,
+  // so someone Nathan talks ABOUT but who no peer names still appears (unlinked).
+  const nodeSlugs = new Set();
+  for (const e of edges) {
+    if (e.from_slug !== OWNER_SLUG) nodeSlugs.add(e.from_slug);
+    if (e.to_slug !== OWNER_SLUG) nodeSlugs.add(e.to_slug);
+  }
+
+  // Nothing plottable. Still show the table if any edges exist (e.g. only owner
+  // self-mentions) — it's the reliable index and must never be silently withheld.
+  if (!nodeSlugs.size) {
+    const empty = (hideMine || hideDm)
+      ? '<p>No people match the current filters.</p>'
+      : '<p>No mentions recorded yet &mdash; this fills in after the next sweep runs the mention scan.</p>';
+    const body = `<div class="profile"><h1>Relationship graph</h1>${caption}${filters}${empty}${table}</div>`;
+    return page('Relationship graph — personal-crm', body, '/graph');
+  }
+
+  // Node size basis: how often each person is mentioned by ANYONE (including the
+  // owner), so someone Nathan names a lot reads as a big node even if peers don't.
+  const mentioned = new Map();
+  for (const e of edges) {
+    if (e.to_slug === OWNER_SLUG) continue;
+    mentioned.set(e.to_slug, (mentioned.get(e.to_slug) || 0) + e.n);
+  }
+  // Drawn edges: person↔person only (drop anything touching the owner, and self-loops).
+  const ppEdges = edges.filter((e) => e.from_slug !== OWNER_SLUG && e.to_slug !== OWNER_SLUG && e.from_slug !== e.to_slug);
+
+  const slugList = [...nodeSlugs];
+  const { community } = detectCommunities(
+    slugList, ppEdges.map((e) => ({ from_slug: e.from_slug, to_slug: e.to_slug, n: e.n })),
+  );
+
+  // Collapse SINGLETON communities (people with no peer ties \u2014 typically someone
+  // Nathan mentions but no one else names) into one shared "Ungrouped" bucket.
+  // Otherwise a realistic archive fills the dropdown and palette with dozens of
+  // fake one-person "communities". Real (size>1) communities keep contiguous ids
+  // 0..m-1; the ungrouped bucket, if any, is id m.
+  const sizeByCom = new Map();
+  for (const s of slugList) { const c = community.get(s); sizeByCom.set(c, (sizeByCom.get(c) || 0) + 1); }
+  const realComs = [...sizeByCom.keys()].filter((c) => sizeByCom.get(c) > 1).sort((a, b) => a - b);
+  const remap = new Map();
+  realComs.forEach((c, i) => remap.set(c, i));
+  const realCount = realComs.length;
+  const hasUngrouped = realCount < sizeByCom.size;
+  const ungroupedId = hasUngrouped ? realCount : -1;
+  const communityOf = (slug) => {
+    const c = community.get(slug);
+    return remap.has(c) ? remap.get(c) : ungroupedId;
+  };
+  let ungroupedCount = 0;
+  for (const s of slugList) { if (!remap.has(community.get(s))) ungroupedCount += 1; }
+
+  const nodesJson = slugList.map((slug) => ({
+    slug,
+    name: graphNameFor(nameBySlug, slug),
+    size: mentioned.get(slug) || 0,
+    community: communityOf(slug),
+  }));
+  const edgesJson = ppEdges.map((e) => ({ from: e.from_slug, to: e.to_slug, n: e.n, last: e.last }));
+
+  // Escape only what breaks out of a <script> block; JSON is otherwise inert here.
+  const payload = JSON.stringify({
+    nodes: nodesJson, edges: edgesJson, edgeSuffix, ungroupedId: hasUngrouped ? ungroupedId : null,
+  }).replace(/</g, '\\u003c').replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
+
+  const comOptions = ['<option value="all">All communities</option>']
+    .concat(Array.from({ length: realCount }, (_, i) => `<option value="${i}">Community ${i + 1}</option>`))
+    .concat(hasUngrouped ? [`<option value="${ungroupedId}">Ungrouped (${ungroupedCount})</option>`] : [])
+    .join('');
+  const peopleBoxes = [...nodesJson].sort((a, b) => a.name.localeCompare(b.name))
+    .map((n) => `<label><input type="checkbox" value="${esc(n.slug)}"> ${esc(n.name)}</label>`).join('');
+
+  const controls = '<div class="graph-controls">'
+    + `<label class="inline">Community <select id="graph-community">${comOptions}</select></label>`
+    + '<details class="graph-dd"><summary>Choose people ▾</summary>'
+    + '<div class="graph-dd-body">'
+    + '<input id="graph-search" type="text" placeholder="filter names…" autocomplete="off">'
+    + `<div id="graph-people" class="graph-people">${peopleBoxes}</div>`
+    + '</div></details>'
+    + '<button id="graph-fit" type="button">Fit view</button>'
+    + '<button id="graph-reset" type="button">Reset</button>'
+    + '</div>';
+
+  const stage = '<div class="graph-stage"><div id="graph-canvas"></div>'
+    + '<div id="graph-panel" class="graph-panel" hidden></div></div>';
+
+  const body = `<div class="profile">${GRAPH_CSS}<h1>Relationship graph</h1>${caption}${filters}`
+    + `<div class="graph-wrap">${controls}${stage}</div>`
+    + `<script>window.__GRAPH=${payload};</script><script src="/assets/graph.js"></script>`
+    + table + '</div>';
   return page('Relationship graph — personal-crm', body, '/graph');
 }
 
@@ -3502,6 +3557,14 @@ function start() {
           res.writeHead(200, { 'Content-Type': 'font/woff2', 'Cache-Control': 'public, max-age=31536000, immutable' });
           res.end(buf);
         } catch { res.writeHead(404); res.end(); }
+        return;
+      }
+
+      // The interactive graph's client script (see graphPage). no-cache so a
+      // redeploy is picked up on the next load without a stale cached copy.
+      if (url.pathname === '/assets/graph.js') {
+        res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-cache' });
+        res.end(GRAPH_CLIENT_JS);
         return;
       }
 
