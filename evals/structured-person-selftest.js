@@ -136,10 +136,12 @@ h2.close();
 const h3 = db();
 recordFact(h3, { slug: 'alice', field: 'employer', kind: 'standing', value: 'Co', src_msg: 20,
   observed_at: Date.parse('2026-02-01T20:00:00Z') });
+// source:'scan' — the only source the graph reads (neighbors/mentionEdges/edgeCitations
+// are scoped to it; a legacy source='model' row is intentionally invisible to the graph).
 recordMention(h3, { from_slug: 'alice', to_slug: 'bob', kind: 'mentioned', note: null,
-  src_msg: 30, observed_at: Date.parse('2026-03-01T20:00:00Z'), run_id: null });
+  src_msg: 30, observed_at: Date.parse('2026-03-01T20:00:00Z'), run_id: null, source: 'scan' });
 recordMention(h3, { from_slug: 'bob', to_slug: 'alice', kind: 'mentioned', note: null,
-  src_msg: 30, observed_at: Date.parse('2026-03-01T20:00:00Z'), run_id: null });
+  src_msg: 30, observed_at: Date.parse('2026-03-01T20:00:00Z'), run_id: null, source: 'scan' });
 markMerged(h3, 'alice', [20], Date.now());
 assert.deepStrictEqual(clearDerivedPerson(h3, 'alice'), { facts: 1, mentions: 1, frontier: 1 });
 assert.strictEqual(currentFacts(h3, 'alice').length, 0);

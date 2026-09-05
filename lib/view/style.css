@@ -512,6 +512,21 @@ tr.runrow.live .tw{border-left:3px solid var(--amber)}
 .q .orig{display:block;margin-top:3px;font-family:"Courier Prime",monospace;font-size:10.5px}
 .q .orig a{color:var(--soft);text-decoration:none;margin-right:8px}
 .q .orig a:hover{color:var(--ink);text-decoration:underline}
+/* Per-attachment media panel: the file itself beside what the pipeline extracted
+   from it (caption/OCR/transcript), first-class rather than folded into the body. */
+.mediae{display:flex;flex-direction:column;gap:8px;margin-top:6px}
+.media{display:flex;gap:10px;align-items:flex-start;flex-wrap:wrap}
+.media-thumb{max-width:200px;max-height:200px;object-fit:cover;border-radius:6px;border:1px solid var(--rule);cursor:pointer}
+.media-el{max-width:320px}
+.mtext{display:flex;flex-direction:column;gap:2px;flex:1 1 160px;min-width:160px}
+.mx{font-size:12px;line-height:1.4}
+.mx a{color:var(--soft);text-decoration:none}
+.mx a:hover{color:var(--ink);text-decoration:underline}
+/* Media-panel extraction label chip. NOT `.mk` — that's the dashboard run-stamp class
+   (see ~line 315); reusing it collided and broke both. */
+.mlabel{display:inline-block;font-size:10px;letter-spacing:.05em;text-transform:uppercase;
+  background:var(--card2);color:var(--soft);padding:1px 6px;border-radius:6px;margin-right:6px}
+.muted{color:var(--faint)}
 /* The key line reads as a marked passage, not a boxed one: warm flag wash,
    oxblood edge, and the who-line names it. */
 .q.hit{background:var(--flag-bg);border-color:var(--ox-soft)}

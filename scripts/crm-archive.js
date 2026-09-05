@@ -40,12 +40,21 @@ const { mirrorMessages, ensureMessagesTable, SYNTH_BAND } = require('../lib/arch
 const { resolveSources, buildMessageQuery } = require('../lib/sources');
 const M = require('../lib/media');
 
-// Downloaded image/audio/video attachments carry a plaintextHash; they become OCR/STT
-// work. `ocr` for images; `stt` for audio (voice notes) AND video — a video's audio
-// track is transcribed (ffmpeg pulls it out before whisper).
+// Downloaded image/audio/video attachments carry a plaintextHash; they become
+// decomposition jobs per THE DECOMPOSITION CONTRACT (lib/media.js header):
+//   image/* -> ocr(0) + caption(0)          (a still: OCR + a scene caption)
+//   audio/* -> stt(0)                       (just a transcript)
+//   video/* -> stt(0) + caption(0)          (caption(0) is the worker's cue to
+//                                             expand into per-frame ocr/caption —
+//                                             NOT ocr(0), which would race that expansion)
 const MEDIA_CT = /^(image|audio|video)\//i;
 const mediaAtts = (list) => (list || []).filter((a) => a.path && a.plaintextHash && MEDIA_CT.test(a.contentType || ''));
-const mediaKind = (ct) => (/^(audio|video)\//i.test(ct || '') ? 'stt' : 'ocr');
+function mediaJobs(hash, contentType) {
+  const ct = contentType || '';
+  if (/^audio\//i.test(ct)) return [{ hash, kind: 'stt', contentType: ct }];
+  if (/^video\//i.test(ct)) return [{ hash, kind: 'stt', contentType: ct }, { hash, kind: 'caption', contentType: ct }];
+  return [{ hash, kind: 'ocr', contentType: ct }, { hash, kind: 'caption', contentType: ct }];
+}
 function enqueueMedia(cdb, entries) {
   if (!entries || !entries.length) return;
   M.ensureMediaTable(cdb);
@@ -274,7 +283,7 @@ function sweepContact(cdb, sdb, slug, cursors, now, ranAt, deep, nameMap) {
   const mediaEntries = [];
   const items = msgs.map((m) => {
     const mAtts = mediaAtts(att.get(m.mid));
-    for (const a of mAtts) mediaEntries.push({ hash: a.plaintextHash, kind: mediaKind(a.contentType), contentType: a.contentType });
+    for (const a of mAtts) mediaEntries.push(...mediaJobs(a.plaintextHash, a.contentType));
     return {
       id: m.rid,
       convId: m.cid,
@@ -337,7 +346,7 @@ function sweepGroup(cdb, sdb, group, cursors, now, ranAt, nameMap, deep) {
   const mediaEntries = [];
   const items = msgs.map((m) => {
     const mAtts = mediaAtts(att.get(m.mid));
-    for (const a of mAtts) mediaEntries.push({ hash: a.plaintextHash, kind: mediaKind(a.contentType), contentType: a.contentType });
+    for (const a of mAtts) mediaEntries.push(...mediaJobs(a.plaintextHash, a.contentType));
     return {
       id: m.rid,
       convId: conv.id,

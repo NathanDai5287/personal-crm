@@ -26,7 +26,7 @@ const { estIngestFromRows, isFree, fmtUsd } = require('../lib/cost');
 const { dateKey: ptDateKey, fmtLocal: ptLocal, weekStart, nextWeekStart, nextPacificDaily } = require('../lib/weeks');
 const { resolveSources, buildMessageQuery, buildArchiveQuery } = require('../lib/sources');
 const { validateCitations, ensureMessagesTable } = require('../lib/archive');
-const { renderedBody } = require('../lib/message-context');
+const { dedupeFrames } = require('../lib/media'); // same frame-dedup rule the fold uses, so the panel and the ledger line agree
 const { decryptByHash } = require('../lib/signal-attachments');
 const TASKS = require('../lib/tasks');
 const P = require('../lib/nicknames');
@@ -770,13 +770,84 @@ function applyNickEdit(slug, action, payload) {
 // `hitId` is the server-known highlight (the single message of /m/<id>).
 // `dimIds` is the surrounding-context rows: rendered readable but faded, so the
 // cited message(s) are what the eye lands on.
-// Per-attachment "open the original" links (the Layer-1 escape hatch). Each hash
-// resolves through /media/<hash>, which decrypts and serves the real file.
-function mediaLinks(attHashes) {
+// For each attachment on a message: the media itself INLINE (thumbnail / audio /
+// video player, via the already-auth-gated /media/<hash> route) alongside what the
+// pipeline EXTRACTED from it (caption/OCR/transcript), as first-class labeled lines
+// rather than folded into the bubble's body text. `renderedBody` still folds that
+// text for the model-facing ledger (lib/message-context.js) — this is a separate,
+// UI-only read of media_text so a provenance-view reader can see the artifacts
+// without the fold's per-attachment truncation, and see pending/failed jobs too.
+// Queried directly (not through lib/media's foldSuffix) because the fold only
+// returns DONE text; here we also want pending/processing/skip/error to shape the
+// status hint. Wrapped in try/catch: media_text may not exist on a fresh DB.
+function mediaPanel(cdb, attHashes) {
   const hashes = String(attHashes || '').split(/\s+/).filter((h) => /^[0-9a-f]{16,}$/i.test(h));
   if (!hashes.length) return '';
-  return `<span class="orig">` + hashes.map((h) =>
-    `<a href="/media/${h}" target="_blank" rel="noopener" title="open the original attachment">↗ original</a>`).join(' ') + `</span>`;
+  const origLink = (h) =>
+    `<a href="/media/${h}" target="_blank" rel="noopener" title="open the original attachment">↗ original</a>`;
+  // Cap any single extracted string in the panel — a long OCR dump shouldn't dominate
+  // the provenance view (the raw text is always one click away via ↗ original).
+  const clip = (t) => { const s = String(t); return s.length > 500 ? `${s.slice(0, 500)}…` : s; };
+
+  const blocks = hashes.map((h) => {
+    let rows = [];
+    try {
+      rows = cdb.prepare('SELECT kind, part, status, content_type, text FROM media_text WHERE hash = ? ORDER BY kind, part').all(h);
+    } catch { rows = []; } // no media_text table yet — fall back to just the original link
+    if (!rows.length) return `<div class="mx">${origLink(h)}</div>`;
+
+    // The inline element itself, keyed off any row's content_type (every row for
+    // a hash shares one file).
+    const ct = (rows.find((r) => r.content_type) || {}).content_type || '';
+    let mediaEl;
+    // Only inline the raster image types the /media route actually serves INLINE (its
+    // INLINE_OK allowlist). An SVG/other type is served as a download by that route, so
+    // an <img> would just be a broken thumbnail — fall through to the ↗ original link.
+    if (/^image\/(png|jpe?g|gif|webp|bmp|avif|heic|heif)$/i.test(ct)) {
+      mediaEl = `<a href="/media/${h}" target="_blank" rel="noopener"><img class="media-thumb" src="/media/${h}" loading="lazy" alt="attachment"></a>`;
+    } else if (/^audio\//i.test(ct)) {
+      mediaEl = `<audio class="media-el" controls preload="none" src="/media/${h}"></audio>`;
+    } else if (/^video\//i.test(ct)) {
+      mediaEl = `<video class="media-el" controls preload="none" src="/media/${h}"></video>`;
+    } else {
+      mediaEl = origLink(h);
+    }
+
+    // Extracted lines — only finished, non-empty text. ESCAPED: OCR/caption/
+    // transcript text is sender-derived (a photographed sign, a dictated note),
+    // never trusted enough to interpolate raw into HTML.
+    const done = rows.filter((r) => r.status === 'done' && r.text && String(r.text).trim());
+    const lines = [];
+    const capWhole = done.find((r) => r.kind === 'caption' && r.part === 0);
+    if (capWhole) lines.push(`<div class="mx"><span class="mlabel">caption</span> ${esc(clip(capWhole.text))}</div>`);
+    const ocrWhole = done.find((r) => r.kind === 'ocr' && r.part === 0);
+    if (ocrWhole) lines.push(`<div class="mx"><span class="mlabel">text</span> ${esc(clip(ocrWhole.text))}</div>`);
+    const stt = done.find((r) => r.kind === 'stt');
+    if (stt) lines.push(`<div class="mx"><span class="mlabel">transcript</span> ${esc(clip(stt.text))}</div>`);
+    // Video frames (part > 0): sorted, then deduped with the same rule
+    // lib/media's fold uses, so the panel and the folded ledger line agree on
+    // what counts as "the same" caption repeated frame after frame.
+    const scenes = dedupeFrames(
+      done.filter((r) => r.kind === 'caption' && r.part > 0).sort((a, b) => a.part - b.part).map((r) => r.text),
+    );
+    if (scenes.length) lines.push(`<div class="mx"><span class="mlabel">scenes</span> ${scenes.map((t) => esc(clip(t))).join(' · ')}</div>`);
+    const onscreen = dedupeFrames(
+      done.filter((r) => r.kind === 'ocr' && r.part > 0).sort((a, b) => a.part - b.part).map((r) => r.text),
+    );
+    if (onscreen.length) lines.push(`<div class="mx"><span class="mlabel">on-screen</span> ${onscreen.map((t) => esc(clip(t))).join(' · ')}</div>`);
+
+    // Status hints: still queued, or a job that FAILED (surfaced separately from a
+    // clean "nothing there" — a down tesseract/Ollama must not read as a blank photo).
+    const pendingKinds = [...new Set(rows.filter((r) => r.status === 'pending' || r.status === 'processing').map((r) => r.kind))];
+    if (pendingKinds.length) lines.push(`<div class="mx muted">⏳ ${esc(pendingKinds.join(', '))} pending</div>`);
+    const errorKinds = [...new Set(rows.filter((r) => r.status === 'error').map((r) => r.kind))];
+    if (errorKinds.length) lines.push(`<div class="mx muted">⚠ ${esc(errorKinds.join(', '))} failed</div>`);
+    if (!lines.length) lines.push(`<div class="mx muted">nothing extracted</div>`);
+    lines.push(`<div class="mx">${origLink(h)}</div>`); // the raw file stays reachable regardless
+
+    return `<div class="media">${mediaEl}<div class="mtext">${lines.join('')}</div></div>`;
+  });
+  return `<div class="mediae">${blocks.join('')}</div>`;
 }
 
 function msgBubbles(cdb, rows, hitId, dimIds) {
@@ -786,10 +857,15 @@ function msgBubbles(cdb, rows, hitId, dimIds) {
     const mine = /^nathan$/i.test(m.sender);
     const hit = m.id === hitId ? ' hit' : '';
     const dim = dimIds && dimIds.has(m.id) ? ' dim' : '';
-    // Layer 2 (Rendered): the stored body + OCR/STT fold. UNCENSORED — the UI default;
-    // the "↗ original" links reveal the raw file (Layer 1).
+    // Layer 2 (Rendered): the stored body, UNFOLDED — mediaPanel shows the
+    // OCR/caption/transcript extraction as first-class artifacts below instead, so
+    // it isn't shown twice. (`renderedBody`, body + fold, is still what the
+    // model-facing ledger reads; this bubble is UI-only and diverges from it.)
+    // UNCENSORED — the UI default; the "↗ original" links reveal the raw file
+    // (Layer 1).
+    const body = mdInline(String(m.body == null ? '' : m.body).replace(/\s+/g, ' ').trim());
     return `<div class="q ${mine ? 'me' : 'them'}${hit}${dim}" id="m${m.id}">` +
-      `<span class="who">${esc(m.sender)} · ${esc(fmt(m.sent_at))}</span>${mdInline(renderedBody(cdb, m))}${mediaLinks(m.att_hashes)}</div>`;
+      `<span class="who">${esc(m.sender)} · ${esc(fmt(m.sent_at))}</span>${body}${mediaPanel(cdb, m.att_hashes)}</div>`;
   }).join('');
 }
 
