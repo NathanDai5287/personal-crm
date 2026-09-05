@@ -71,6 +71,7 @@ const {
   ARCHIVE_ID_OFFSET, ROOT, CONTACTS_DIR,
 } = require('../lib/config');
 const { signalNameMap } = require('../lib/signal-names');
+const { writeFileAtomic } = require('../lib/atomic-write');
 
 // AUTO-DERIVED, READ-ONLY TITLE. A contact's display name is the resolved Signal
 // name (lib/signal-names) — never hand-edited in the CRM. This rewrites the profile
@@ -98,7 +99,7 @@ function syncContactNames(cdb, slugs, nameMap) {
     if (current === want) continue; // heading already right
     if (idx === -1) lines.unshift(`# ${want}`, '');
     else lines[idx] = `# ${want}`;
-    try { fs.writeFileSync(file, lines.join('\n')); } catch { /* non-fatal */ }
+    try { writeFileAtomic(file, lines.join('\n')); } catch { /* non-fatal */ }
   }
 }
 

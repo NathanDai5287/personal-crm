@@ -32,6 +32,7 @@ const TASKS = require('../lib/tasks');
 const P = require('../lib/nicknames');
 const PERSON = require('../lib/person');
 const { listCandidates, promoteOne, untrackSlug, WINDOW_DAYS, MIN_MSGS, MIN_INCOMING } = require('../lib/promote');
+const { writeFileAtomic } = require('../lib/atomic-write');
 const { factLabel } = require('../lib/structured-person');
 const { recordFact, retractCurrentFact, mentionEdges, edgeCitations, recordReassign } = require('../lib/schema');
 const RUN_TOGGLES = require('../lib/run-toggles');
@@ -2038,7 +2039,7 @@ function applyManualEdit(slug, payload) {
     const message = String(payload.message || '').replace(/\r/g, '').trim().slice(0, 500);
     let out = lines.join('\n');
     if (!out.endsWith('\n')) out += '\n';
-    fs.writeFileSync(file, out);
+    writeFileAtomic(file, out);
     // Hand-owned Person fields write through to the structured store in the same
     // save. A cleared/TBD value retracts the current fact; a real value becomes a
     // provenance-free manual standing fact. Roll the file back if this write fails.
@@ -2057,7 +2058,7 @@ function applyManualEdit(slug, payload) {
         personDb.exec('COMMIT');
       } catch (e) {
         if (personDb) { try { personDb.exec('ROLLBACK'); } catch { /* original wins */ } }
-        try { fs.writeFileSync(file, md); } catch { /* surfaced below */ }
+        try { writeFileAtomic(file, md); } catch { /* surfaced below */ }
         return { ok: false, status: 500, error: `structured person write failed; profile restored: ${e.message}` };
       } finally { if (personDb) try { personDb.close(); } catch { /* closed */ } }
     }
@@ -2566,6 +2567,87 @@ function runsPage() {
   // into a completed row on its own once the run lands its record.
   const refresh = job && job.running ? '<script>setTimeout(function(){location.reload();},5000);</script>' : '';
   return page('Runs — personal-crm', render(V.runs(rows).body) + RUNS_FILTER_JS + refresh);
+}
+
+// GET /health — the one place every SILENT failure surfaces: media jobs that errored or
+// are stuck, contacts parked after repeated merge failures or held for censor review, and a
+// media backlog that isn't draining (a symptom of a dead worker — which, with the merge
+// media-gate, also stalls merges). Everything here is normally empty; a non-empty section is
+// a thing to look at.
+function healthPage() {
+  const MEDIA = require('../lib/media');
+  const CENSOR = require('../lib/censor-hold');
+  const MERGE = require('../lib/merge-hold');
+  const now = Date.now();
+  const ageStr = (ms) => {
+    if (ms == null) return '—';
+    const mins = Math.max(0, Math.round((now - ms) / 60000));
+    if (mins < 60) return `${mins}m`;
+    const hrs = Math.round(mins / 60);
+    return hrs < 48 ? `${hrs}h` : `${Math.round(hrs / 24)}d`;
+  };
+
+  let mh = { errors: [], stuck: [], oldestPendingMs: null, counts: {} };
+  const cdb = openCrmDb();
+  try { mh = MEDIA.health(cdb); } catch (e) { mh.error = String(e.message || e); } finally { try { cdb.close(); } catch { /* closed */ } }
+
+  const parts = [];
+  const section = (title, inner) => `<h2 style="margin:18px 0 6px;font-size:15px">${esc(title)}</h2>${inner}`;
+  const ok = (msg) => `<p class="sub" style="margin:2px 0">✓ ${esc(msg)}</p>`;
+
+  // Media queue counts + backlog age.
+  const c = mh.counts || {};
+  const countLine = ['done', 'pending', 'processing', 'skip', 'error']
+    .map((k) => `${k}: <strong>${Number(c[k] || 0)}</strong>`).join(' · ');
+  const backlogWarn = mh.oldestPendingMs != null && (now - mh.oldestPendingMs) > 2 * 3600 * 1000;
+  let media = `<p style="margin:2px 0">${countLine}</p>`;
+  media += `<p class="sub" style="margin:2px 0">oldest pending: ${esc(ageStr(mh.oldestPendingMs))}`
+    + `${backlogWarn ? ' <strong style="color:#b00">— backlog not draining; is the media worker running?</strong>' : ''}</p>`;
+  parts.push(section('Media queue', media));
+
+  // Media errors.
+  if (mh.errors && mh.errors.length) {
+    const rows = mh.errors.map((r) => `<tr><td>${esc(r.hash.slice(0, 12))}</td><td>${esc(r.kind)}${r.part ? `#${r.part}` : ''}</td>`
+      + `<td>${esc(r.content_type || '')}</td><td>${esc(String(r.error || '').slice(0, 160))}</td><td>${esc(ageStr(r.updated_at))}</td></tr>`).join('');
+    parts.push(section(`Media errors (${mh.errors.length})`,
+      `<p class="sub" style="margin:2px 0">Retry with <code>node scripts/crm-media-worker.js --retry-errors</code>.</p>`
+      + `<table class="tbl"><tr><th>hash</th><th>kind</th><th>type</th><th>error</th><th>age</th></tr>${rows}</table>`));
+  } else parts.push(ok('No media errors.'));
+
+  // Media stuck in processing past the stale window.
+  if (mh.stuck && mh.stuck.length) {
+    const rows = mh.stuck.map((r) => `<tr><td>${esc(r.hash.slice(0, 12))}</td><td>${esc(r.kind)}${r.part ? `#${r.part}` : ''}</td>`
+      + `<td>${esc(r.content_type || '')}</td><td>${esc(ageStr(r.updated_at))}</td></tr>`).join('');
+    parts.push(section(`Media stuck in processing (${mh.stuck.length})`,
+      `<p class="sub" style="margin:2px 0">A worker died mid-item; the next worker start reclaims these (age-gated).</p>`
+      + `<table class="tbl"><tr><th>hash</th><th>kind</th><th>type</th><th>stuck for</th></tr>${rows}</table>`));
+  }
+
+  // Contacts parked after repeated merge failures.
+  const parked = MERGE.held();
+  if (parked.length) {
+    const rows = parked.map((p) => `<tr><td>${esc(p.slug)}</td><td>${Number(p.fails || 0)}</td>`
+      + `<td>${esc(p.chunkLabel || '')}</td><td>${esc(String(p.lastError || '').slice(0, 160))}</td><td>${esc(p.since || '')}</td></tr>`).join('');
+    parts.push(section(`Parked after repeated merge failures (${parked.length})`,
+      `<p class="sub" style="margin:2px 0">Frontier untouched — re-merges once released: <code>node -e "require('./lib/merge-hold').release('&lt;slug&gt;')"</code>.</p>`
+      + `<table class="tbl"><tr><th>slug</th><th>fails</th><th>chunk</th><th>last error</th><th>since</th></tr>${rows}</table>`));
+  } else parts.push(ok('No contacts parked for merge failures.'));
+
+  // Contacts held for censor review.
+  const censored = CENSOR.held();
+  if (censored.length) {
+    parts.push(section(`Held for censor review (${censored.length})`,
+      `<p class="sub" style="margin:2px 0">Resolve with <code>node scripts/crm-censor.js list</code>.</p>`
+      + `<ul>${censored.map((s) => `<li>${esc(s)}</li>`).join('')}</ul>`));
+  } else parts.push(ok('No contacts held for censor review.'));
+
+  const style = '<style>'
+    + '.tbl{border-collapse:collapse;width:100%;margin:4px 0 8px;font-size:13px}'
+    + '.tbl th,.tbl td{border:1px solid rgba(128,128,128,.3);padding:4px 8px;text-align:left;vertical-align:top}'
+    + '.tbl th{font-weight:600;background:rgba(128,128,128,.08)}'
+    + '.tbl td{word-break:break-word}'
+    + '</style>';
+  return page('Health — personal-crm', style + parts.join(''), '/health');
 }
 
 // Client-side filtering for the runs ledger: kind chips (click to hide a kind)
@@ -3122,7 +3204,19 @@ function shutdown() {
   shuttingDown = true;
   try {
     if (job && job.running && job.child && job.child.pid) {
-      try { process.kill(-job.child.pid, 'SIGTERM'); } catch { try { job.child.kill('SIGTERM'); } catch { /* already gone */ } }
+      // Kill the WHOLE child tree, cross-platform, BEFORE releasing the lock — otherwise a
+      // `pi` grandchild can outlive the lock and keep editing a profile while a restarted
+      // server begins a new run. On Windows `process.kill(-pid)` throws (no process groups)
+      // and the old fallback killed only the direct child, orphaning the tree; taskkill /T
+      // is synchronous and reaps the whole tree first. On POSIX the negative-pid group
+      // signal already covers the tree.
+      const pid = job.child.pid;
+      if (process.platform === 'win32') {
+        try { require('child_process').spawnSync('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore' }); }
+        catch { try { job.child.kill('SIGTERM'); } catch { /* already gone */ } }
+      } else {
+        try { process.kill(-pid, 'SIGTERM'); } catch { try { job.child.kill('SIGTERM'); } catch { /* already gone */ } }
+      }
     }
     if (job && job.lock) { try { job.lock.release(); } catch { /* ok */ } job.lock = null; }
   } finally {
@@ -3523,6 +3617,7 @@ function start() {
       }
       if (url.pathname === '/status' || url.pathname === '/admin') { send(200, statusPage()); return; }
       if (url.pathname === '/runs' || url.pathname === '/admin/runs') { send(200, runsPage()); return; }
+      if (url.pathname === '/health') { send(200, healthPage()); return; }
       const rdiff = url.pathname.match(/^\/runs\/([^/]+)\/diff\/([^/]+)$/);
       if (rdiff) {
         const id = decodeURIComponent(rdiff[1]);
@@ -3758,10 +3853,21 @@ function start() {
           try {
             const sid = (new URLSearchParams(raw).get('service_id') || '').replace(/^uuid:/i, '').trim();
             if (!/^[a-f0-9-]{8,}$/i.test(sid)) { send(400, page('Bad request', '<p>Bad request.</p>')); return; }
+            // Serialise against the pipeline. promoteOne writes a contacts row + profile +
+            // tracked.json; a sweep's reconcileContacts running concurrently could prune the
+            // freshly-inserted row before its profile lands, stranding a tracked slug with no
+            // row (invisible, never ingested). The lock + job.running guard prevent the overlap.
+            if (job && job.running) { send(409, page('Busy', '<p>A run is in progress — try again when it finishes.</p>')); return; }
+            const lock = require('../lib/pipeline-lock').acquire('people-track');
+            if (!lock.ok) { send(409, page('Busy', `<p>A run is in progress (${esc(lock.holderDesc || '')}) — try again shortly.</p>`)); return; }
             let cdb;
             let sdb;
             try { cdb = openCrmDb(); sdb = openSignalDb(); promoteOne(cdb, sdb, sid); }
-            finally { if (sdb) { try { sdb.close(); } catch { /* closed */ } } if (cdb) { try { cdb.close(); } catch { /* closed */ } } }
+            finally {
+              if (sdb) { try { sdb.close(); } catch { /* closed */ } }
+              if (cdb) { try { cdb.close(); } catch { /* closed */ } }
+              lock.release();
+            }
             res.writeHead(303, { Location: '/people/tracking' }); res.end();
           } catch { try { send(400, page('Bad request', '<p>Bad request.</p>')); } catch { /* sent */ } }
         });
@@ -3773,7 +3879,13 @@ function start() {
           try {
             const slug = (new URLSearchParams(raw).get('slug') || '').trim();
             if (!isSafeSlug(slug)) { send(400, page('Bad request', '<p>Bad request.</p>')); return; }
-            untrackSlug(slug);
+            // Same serialisation as /people/track: untrackSlug deletes the profile while a
+            // concurrent ingest could be mid-merge on it (the ingest's rollback would then
+            // resurrect the file, diverging from tracked.json).
+            if (job && job.running) { send(409, page('Busy', '<p>A run is in progress — try again when it finishes.</p>')); return; }
+            const lock = require('../lib/pipeline-lock').acquire('people-untrack');
+            if (!lock.ok) { send(409, page('Busy', `<p>A run is in progress (${esc(lock.holderDesc || '')}) — try again shortly.</p>`)); return; }
+            try { untrackSlug(slug); } finally { lock.release(); }
             res.writeHead(303, { Location: '/people/tracking' }); res.end();
           } catch { try { send(400, page('Bad request', '<p>Bad request.</p>')); } catch { /* sent */ } }
         });

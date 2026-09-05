@@ -35,7 +35,7 @@ const {
   TESSERACT_BIN, FFMPEG_BIN, WHISPER_CLI, WHISPER_MODEL, DATA_DIR,
   CRM_OLLAMA_URL, CRM_CAPTION_MODEL, CRM_VIDEO_FRAME_SEC, CRM_VIDEO_MAX_FRAMES,
 } = require('../lib/config');
-const { decryptableByHash, decryptRow } = require('../lib/signal-attachments');
+const { decryptableByHash, decryptByHash } = require('../lib/signal-attachments');
 const M = require('../lib/media');
 
 const args = process.argv.slice(2);
@@ -48,13 +48,23 @@ const argVal = (f, d) => { const i = args.indexOf(f); return i !== -1 && args[i 
 // enforced. A pidfile with O_EXCL; a dead holder's lock is stolen, a live one makes
 // this process exit quietly. Released on exit.
 const WORKER_LOCK = path.join(DATA_DIR, 'media-worker.lock');
-function pidAlive(pid) { if (!Number.isInteger(pid)) return false; try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } }
+// pid <= 0 is NEVER a real holder. This guard is load-bearing: an empty/torn lock file
+// reads back as Number('') === 0, and on Linux process.kill(0, 0) targets the caller's own
+// process GROUP and succeeds — so without the `pid <= 0` reject, pidAlive(0) returned true
+// and every future worker concluded "a live worker is draining" and exited, wedging the
+// whole media queue forever (silently) until someone deleted the pidfile by hand.
+function pidAlive(pid) { if (!Number.isInteger(pid) || pid <= 0) return false; try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } }
 function acquireWorkerLock() {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      const fd = fs.openSync(WORKER_LOCK, 'wx');
-      fs.writeSync(fd, String(process.pid));
-      fs.closeSync(fd);
+      // ATOMIC, ALREADY-POPULATED create (write a temp file, hard-link it into place) so
+      // the lock file is never observed EMPTY. The old openSync('wx')+writeSync form left a
+      // window in which a crash produced a 0-byte lock — see the pidAlive note above for why
+      // that permanently wedged the queue.
+      const tmp = `${WORKER_LOCK}.tmp-${process.pid}-${Date.now()}`;
+      fs.writeFileSync(tmp, String(process.pid));
+      try { fs.linkSync(tmp, WORKER_LOCK); }
+      finally { try { fs.unlinkSync(tmp); } catch { /* already gone */ } }
       const release = () => { try { if (Number(fs.readFileSync(WORKER_LOCK, 'utf8')) === process.pid) fs.unlinkSync(WORKER_LOCK); } catch { /* gone */ } };
       process.on('exit', release);
       return true;
@@ -62,7 +72,7 @@ function acquireWorkerLock() {
       if (e.code !== 'EEXIST') throw e;
       let holder = 0; try { holder = Number(fs.readFileSync(WORKER_LOCK, 'utf8')); } catch { /* unreadable */ }
       if (pidAlive(holder)) return false;                 // a live worker is draining — defer to it
-      try { fs.unlinkSync(WORKER_LOCK); } catch { /* raced */ } // stale (dead holder) — steal and retry
+      try { fs.unlinkSync(WORKER_LOCK); } catch { /* raced */ } // stale (dead/empty holder) — steal and retry
     }
   }
   return false;
@@ -239,10 +249,14 @@ function alreadyDone(cdb, k) {
 // already 'done' are skipped (alreadyDone), so only the missing ones re-run. Since
 // claimNext only ever offers a kind whose engine is available, a re-claimed frame's
 // kind can always run, so this reaches a terminal state and cannot loop.
-async function expandVideoFrames(cdb, claim, row, tmpDir, kinds) {
+async function expandVideoFrames(cdb, sdb, claim, tmpDir, kinds) {
   const triggerKey = { hash: claim.hash, kind: 'caption', part: 0 };
   const label = claim.hash.slice(0, 12);
-  let videoBuf = decryptRow(row);
+  // Try EVERY candidate row for this hash (decryptByHash), not just the first: identical
+  // files share a plaintextHash, and one row's blob can be purged while a sibling's is
+  // still on disk. The first-candidate-only form errored the whole item when a sibling
+  // would have decrypted.
+  let videoBuf = decryptByHash(sdb, claim.hash).buf;
   const videoTmp = writeTemp(tmpDir, videoBuf, claim.content_type);
   videoBuf = null; // the bytes are on disk now; don't pin ~100 MB across minutes of per-frame captioning
   const frameDir = fs.mkdtempSync(path.join(tmpDir, 'frames-'));
@@ -353,7 +367,7 @@ async function processOne(cdb, sdb, kinds, tmpDir) {
         console.log(`  ${claim.kind} ${label}… -> skipped (too long)`);
         return true;
       }
-      const buf = decryptRow(row);
+      const buf = decryptByHash(sdb, claim.hash).buf;
       tmp = writeTemp(tmpDir, buf, ct);
       const text = runStt(tmp, tmpDir);
       if (!text) M.setSkip(cdb, key, 'no text extracted');
@@ -363,7 +377,7 @@ async function processOne(cdb, sdb, kinds, tmpDir) {
     }
 
     if (claim.kind === 'ocr' && claim.part === 0 && isImage) {
-      const buf = decryptRow(row);
+      const buf = decryptByHash(sdb, claim.hash).buf;
       tmp = writeTemp(tmpDir, buf, ct);
       const text = runOcr(tmp);
       if (!text) M.setSkip(cdb, key, 'no text extracted');
@@ -373,7 +387,7 @@ async function processOne(cdb, sdb, kinds, tmpDir) {
     }
 
     if (claim.kind === 'caption' && claim.part === 0 && isImage) {
-      const buf = decryptRow(row);
+      const buf = decryptByHash(sdb, claim.hash).buf;
       tmp = writeTemp(tmpDir, buf, ct);
       const text = await runCaption(tmp);
       if (!text) M.setSkip(cdb, key, 'no text extracted');
@@ -383,7 +397,7 @@ async function processOne(cdb, sdb, kinds, tmpDir) {
     }
 
     if (claim.kind === 'caption' && claim.part === 0 && isVideo) {
-      await expandVideoFrames(cdb, claim, row, tmpDir, kinds);
+      await expandVideoFrames(cdb, sdb, claim, tmpDir, kinds);
       return true;
     }
 
@@ -394,7 +408,7 @@ async function processOne(cdb, sdb, kinds, tmpDir) {
     // The claimed kind's engine is available by construction (claimNext gates on it),
     // so this terminates rather than looping.
     if (claim.part > 0 && isVideo && (claim.kind === 'caption' || claim.kind === 'ocr')) {
-      await expandVideoFrames(cdb, { ...claim, kind: 'caption', part: 0 }, row, tmpDir, kinds);
+      await expandVideoFrames(cdb, sdb, { ...claim, kind: 'caption', part: 0 }, tmpDir, kinds);
       return true;
     }
 

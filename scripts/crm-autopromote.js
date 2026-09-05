@@ -35,4 +35,4 @@ function main() {
   return { promoted: promoted.length, promotedSlugs: promoted };
 }
 
-main();
+if (require.main === module) main();

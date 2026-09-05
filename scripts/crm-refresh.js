@@ -51,6 +51,7 @@ const { resolveSources, buildArchiveQuery } = require('../lib/sources');
 const { fmtLocal, planChunks, lastCompleteWeekStart, gateBuckets } = require('../lib/weeks');
 const { confirmedNicknames } = require('../lib/nicknames');
 const { renderedBody, formatLine } = require('../lib/message-context');
+const { hasPendingMedia } = require('../lib/media');
 const { trackedResolver } = require('../lib/people-resolve');
 const {
   TRACKED, REFRESH_DIR, CONTACTS_DIR, BOT_SERVICE_ID,
@@ -141,6 +142,24 @@ function planContact(cdb, sdb, slug, opts) {
   if (!q) return null;
   const msgs = cdb.prepare(q.sql).all(...q.params);
   if (msgs.length === 0) return null;
+
+  // MEDIA GATE. Hold a message — and, to keep the merge chronological, everything after
+  // it — until its attachments' caption/OCR/transcript reach a TERMINAL state. A message
+  // merged before its media finishes would enter the `merged` frontier without that text
+  // (foldSuffix folds only status='done' rows) and never be re-fed, losing the caption
+  // from the profile forever. This truncates `msgs` to the mergeable chronological prefix;
+  // the held tail is retried next run. 'done'/'skip'/'error' are terminal, so only a live,
+  // resolvable job blocks — a healthy media worker drains it within the hour, and a stalled
+  // backlog shows on the /health page. (Ordering holds: archive mirrors + enqueues media
+  // under the same pipeline lock that serialises a later merge, so a message present here
+  // already has its media rows.)
+  let heldForMedia = 0;
+  const firstPending = msgs.findIndex((m) => hasPendingMedia(cdb, m.att_hashes));
+  if (firstPending !== -1) {
+    heldForMedia = msgs.length - firstPending;
+    msgs.length = firstPending; // keep only the prefix whose media is settled
+    if (msgs.length === 0) return null; // the oldest unmerged message is still processing
+  }
   // Build each message's RENDERED body (Layer 2: stored body + OCR/transcript fold),
   // uncensored, once here (planContact has cdb) so it rides into every chunk. The
   // ledger written from it is uncensored — censoring is applied at model egress

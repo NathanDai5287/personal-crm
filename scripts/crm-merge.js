@@ -450,7 +450,14 @@ if (require.main === module) {
     console.error('usage: node scripts/crm-merge.js <slug> [--dry-run]');
     process.exit(1);
   }
-  const result = mergeContact(slug, { dryRun });
+  // Cross-process pipeline lock: a direct CLI invocation must not overlap a
+  // scheduled run. In-process calls (crm-daily calling mergeContact() directly)
+  // already run under crm-daily's own lock and never reach this branch.
+  const lock = require('../lib/pipeline-lock').acquire('merge');
+  if (!lock.ok) { console.log(`crm-merge: skipped, run in progress (${lock.holderDesc}).`); process.exit(0); }
+  let result;
+  try { result = mergeContact(slug, { dryRun }); }
+  finally { lock.release(); }
   process.exit(result.ok ? 0 : 1);
 }
 

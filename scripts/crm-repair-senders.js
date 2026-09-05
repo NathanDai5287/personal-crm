@@ -105,4 +105,11 @@ function main() {
   cdb.close();
 }
 
-main();
+if (require.main === module) {
+  // Cross-process pipeline lock: this rewrites crm.db's messages table and must
+  // not overlap a sweep or ingest run.
+  const lock = require('../lib/pipeline-lock').acquire('repair-senders');
+  if (!lock.ok) { console.log(`crm-repair-senders: skipped, run in progress (${lock.holderDesc}).`); process.exit(0); }
+  try { main(); }
+  finally { lock.release(); }
+}

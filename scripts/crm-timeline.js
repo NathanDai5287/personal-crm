@@ -57,6 +57,7 @@ const { renderedBody, formatLine, forModel } = require("../lib/message-context")
 // Monday-04:00-Pacific week boundary, so the Timeline's tiers bucket the same way every
 // other ledger in the system does.
 const { dateKey, fmtLocal, weekStart, nextWeekStart, dayStart } = require("../lib/weeks");
+const { writeJsonAtomic } = require("../lib/atomic-write");
 const {
   DATA_DIR,
   TRACKED,
@@ -530,7 +531,18 @@ function buildConversationTimeline({ cdb, convs, who, file, stateKey, state, now
   const GROUP_TRUNC = 'older group-activity lines omitted — see the group’s own timeline';
   if (includeGroup) {
     t.group = t.group.filter((l) => !l.includes(GROUP_TRUNC));
-    const combined = foldLines && foldLines.length ? [...foldLines, ...t.group] : t.group;
+    const merged = foldLines && foldLines.length ? [...foldLines, ...t.group] : t.group;
+    // DEDUPE by the "- YYYY-MM-DD [Group]:" key, keeping the first occurrence (fresh fold
+    // lines come first). This makes fold application IDEMPOTENT: re-applying a pending fold
+    // after a crash (see the durable pending-folds queue in main) can't double a line, and a
+    // group day already present in the profile is never appended twice.
+    const seen = new Set();
+    const combined = [];
+    for (const l of merged) {
+      const k = (l.match(/^- \d{4}-\d{2}-\d{2} \[[^\]]*\]:/) || [null])[0];
+      if (k) { if (seen.has(k)) continue; seen.add(k); }
+      combined.push(l);
+    }
     t.group = combined.slice(0, GROUP_ACTIVITY_MAX);
     if (combined.length > GROUP_ACTIVITY_MAX) {
       t.group.push(`- _(${combined.length - GROUP_ACTIVITY_MAX} ${GROUP_TRUNC})_`);
@@ -704,8 +716,24 @@ function main() {
     } catch { SESSION_CAPTURE = null; }
   }
 
+  // Atomic + INCREMENTAL state persistence. Bare writeFileSync (the old form) could tear
+  // TIMELINE_STATE on a crash → loadState reads {} → since=now → every day older than the
+  // corruption is skipped forever (a permanent tier hole) and every era re-folds. Writing
+  // atomically after EACH group/contact (not only at the end) also means a mid-run crash
+  // keeps the state of everything already done.
+  const writeState = () => { if (WRITE) writeJsonAtomic(TIMELINE_STATE, state); };
+
   // Phase 1: groups first, so their new day-summaries can fold into participant profiles.
+  // DURABLE FOLD QUEUE (H4). A crash between a group's day being written (here) and that day
+  // being folded into participants (Phase 2) used to lose the fold line forever: the next
+  // run's group build saw the day already present and emitted no newDailies, so nothing
+  // re-folded. So each group's fold lines are mirrored into state._pendingFolds and persisted
+  // ATOMICALLY TOGETHER with the group's state advance; Phase 2 clears a contact's entry only
+  // once it has absorbed the lines. A crash just replays them next run — idempotently, thanks
+  // to the dedupe in buildConversationTimeline.
   const foldByContact = new Map(); // slug -> [ "- YYYY-MM-DD [Group]: summary", ... ]
+  // Seed from any folds a previous (crashed) run persisted but never applied.
+  for (const [slug, lines] of Object.entries(state._pendingFolds || {})) foldByContact.set(slug, [...lines]);
   for (const g of groups) {
     const r = buildGroupTimeline(cdb, sdb, g, state, now);
     if (r.skipped) {
@@ -716,18 +744,28 @@ function main() {
     if (r.changed) changedCount += 1;
     summariesCount += r.summaries || 0;
     console.log(`- group ${g.slug} (${r.name}): summaries=${r.summaries}/${r.attempts} participants=[${r.participants.join(", ")}] changed=${r.changed}`);
-    if (WRITE) state[`group:${g.slug}`] = { since: r.since, foldedTo: r.foldedTo || undefined, ranAt: now };
-    for (const [date, summary] of r.newDailies || []) {
-      const line = `- ${date} [${r.name}]: ${summary}`;
+    const groupLines = (r.newDailies || []).map(([date, summary]) => `- ${date} [${r.name}]: ${summary}`);
+    for (const line of groupLines) {
       for (const slug of r.participants) {
         if (!foldByContact.has(slug)) foldByContact.set(slug, []);
         foldByContact.get(slug).push(line);
       }
     }
+    if (WRITE) {
+      state[`group:${g.slug}`] = { since: r.since, foldedTo: r.foldedTo || undefined, ranAt: now };
+      // Mirror this group's folds into the durable queue, then persist state + queue together.
+      state._pendingFolds = state._pendingFolds || {};
+      for (const line of groupLines) {
+        for (const slug of r.participants) {
+          (state._pendingFolds[slug] = state._pendingFolds[slug] || []).push(line);
+        }
+      }
+      writeState();
+    }
     if (!WRITE && r.next && groupArg) printTimeline(r.next);
   }
 
-  // Phase 2: contacts (with any folded group activity).
+  // Phase 2: contacts (with any folded group activity, including replayed pending folds).
   for (const slug of slugs) {
     const r = buildContactTimeline(cdb, sdb, slug, state, now, foldByContact.get(slug) || [], nameMap);
     if (r.skipped) {
@@ -738,13 +776,19 @@ function main() {
     if (r.changed) changedCount += 1;
     summariesCount += r.summaries || 0;
     console.log(`- ${slug} (${r.name}): summaries=${r.summaries}/${r.attempts} changed=${r.changed}`);
-    if (WRITE) state[slug] = { since: r.since, foldedTo: r.foldedTo || undefined, ranAt: now };
+    if (WRITE) {
+      state[slug] = { since: r.since, foldedTo: r.foldedTo || undefined, ranAt: now };
+      // This contact has absorbed its group-activity folds into its own profile — drop them
+      // from the durable queue so they aren't replayed.
+      if (state._pendingFolds) delete state._pendingFolds[slug];
+      writeState();
+    }
     if (!WRITE && r.next && slugArg) printTimeline(r.next);
   }
 
   sdb.close();
   cdb.close();
-  if (WRITE) fs.writeFileSync(TIMELINE_STATE, JSON.stringify(state, null, 2));
+  writeState();
 
   // Record real (write) passes in the /admin/runs ledger. Dry-runs are
   // inspections, not passes, so they leave no row — matching crm-daily, which

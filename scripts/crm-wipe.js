@@ -41,6 +41,7 @@ const {
 } = require('../lib/config');
 const { openCrmDb } = require('../lib/signal-db');
 const { ensureMessagesTable } = require('../lib/archive');
+const { writeJsonAtomic } = require('../lib/atomic-write');
 
 const STUB_BODY = '## What I know\n_Not yet enriched._\n\n## Timeline\n';
 const KNOWN_FLAGS = new Set(['--write', '--all', '--backfill', '--runs']);
@@ -188,8 +189,8 @@ function main() {
     try { fs.unlinkSync(path.join(REFRESH_DIR, `${slug}.new.txt`)); } catch { /* no pending ledger */ }
   }
   if (targets.length) {
-    fs.writeFileSync(REFRESH_STATE, `${JSON.stringify(refresh, null, 2)}\n`);
-    fs.writeFileSync(TIMELINE_STATE, `${JSON.stringify(timelineState, null, 2)}\n`);
+    writeJsonAtomic(REFRESH_STATE, refresh);
+    writeJsonAtomic(TIMELINE_STATE, timelineState);
     console.log(`\ncrm-wipe: wiped ${targets.length} contact(s); cleared ${frontierCleared} merge-frontier row(s),`
       + ` ${factsCleared} fact row(s), and ${mentionsCleared} outbound mention row(s) from crm.db`
       + ' (the append-only message archive is untouched). The next ingest replays their FULL archived history —'
@@ -207,5 +208,12 @@ function main() {
   cdb.close();
 }
 
-if (require.main === module) main();
+if (require.main === module) {
+  // Cross-process pipeline lock: never wipe crm.db / profiles while another run
+  // (a scheduled sweep, a web-triggered job, a manual CLI run) is writing them.
+  const lock = require('../lib/pipeline-lock').acquire('wipe');
+  if (!lock.ok) { console.log(`crm-wipe: skipped, run in progress (${lock.holderDesc}).`); process.exit(0); }
+  try { main(); }
+  finally { lock.release(); }
+}
 module.exports = { stubProfile, clearDerivedPerson };

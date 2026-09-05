@@ -133,6 +133,7 @@ function main() {
   }));
 
   const db = new DatabaseSync(CRM_DB, { readOnly: true });
+  db.exec('PRAGMA busy_timeout = 15000'); // consistency with every other opener
   const built = [];
   for (const c of cases) {
     const f = buildFixture(db, c);

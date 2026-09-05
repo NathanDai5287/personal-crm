@@ -49,6 +49,7 @@ const {
 const { mergeContact } = require('./crm-merge');
 const { planAll, writeChunkLedger, chunkSummary } = require('./crm-refresh');
 const { validateCitations, markMerged } = require('../lib/archive');
+const { writeFileAtomic } = require('../lib/atomic-write');
 const { mergeCallUsd, recordCostSample, fitCostModel } = require('../lib/cost');
 const { openCrmDb, openSignalDb } = require('../lib/signal-db');
 const { applyStructuredReply, renderStructuredProfile, profileCitationIds } = require('../lib/structured-person');
@@ -392,6 +393,19 @@ function main() {
         logLines.push(`[3] held for censor review (skipped): ${heldSlugs.join(', ')} — resolve with 'node scripts/crm-censor.js list'`);
         warnings.push(`${heldSlugs.length} contact(s) held for censor review: ${heldSlugs.join(', ')}`);
       }
+
+      // PARKED AFTER REPEATED MERGE FAILURES (lib/merge-hold.js). A contact whose
+      // structured/frontier commit has failed the same way MAX_FAILS runs in a row (e.g. a
+      // model that keeps malforming one contact's facts) is parked so we stop re-planning and
+      // re-paying for a chunk that deterministically fails. Frontier untouched → re-merges
+      // automatically once released. Skip them here alongside censor holds.
+      const MHOLD = require('../lib/merge-hold');
+      const parkedSlugs = plans.filter((p) => MHOLD.isHeld(p.slug)).map((p) => p.slug);
+      if (parkedSlugs.length) {
+        plans = plans.filter((p) => !MHOLD.isHeld(p.slug));
+        logLines.push(`[3] parked after repeated merge failures (skipped): ${parkedSlugs.join(', ')} — inspect data/merge-holds.json; release with 'node -e "require(\\'./lib/merge-hold\\').release(\\'<slug>\\')"'`);
+        warnings.push(`${parkedSlugs.length} contact(s) parked after repeated merge failures: ${parkedSlugs.join(', ')}`);
+      }
       totalChunks = plans.reduce((n, p) => n + p.chunks.length, 0);
       const note = plans.length === 0
         ? 'no unmerged messages for any tracked contact'
@@ -519,14 +533,14 @@ function main() {
                 const rendered = renderStructuredProfile(profileBeforeStructured, structured.facts);
                 const afterTimeline = rendered.match(/^## Timeline\s*$[\s\S]*/m)?.[0] || null;
                 if (timeline !== afterTimeline) throw new Error('structured renderer changed Timeline bytes');
-                fs.writeFileSync(profilePath, rendered);
+                writeFileAtomic(profilePath, rendered);
                 markMerged(mergeDb, p.slug, chunk.msgs.map((m) => m.rid), Date.now(), { transaction: false });
                 mergeDb.exec('COMMIT');
                 result.factsStored = structured.factsStored;
                 result.mentionsStored = structured.mentionsStored;
               } catch (e) {
                 try { mergeDb.exec('ROLLBACK'); } catch { /* original error wins */ }
-                try { fs.writeFileSync(profilePath, result.profileBefore == null ? profileBeforeStructured : result.profileBefore); } catch { /* surfaced in failure */ }
+                try { writeFileAtomic(profilePath, result.profileBefore == null ? profileBeforeStructured : result.profileBefore); } catch { /* surfaced in failure */ }
                 throw e;
               }
               state.ranAt = Date.now();
@@ -536,7 +550,11 @@ function main() {
               const err = `structured/frontier commit failed after a successful model call: ${e.message}`;
               mergeFailures.push({ slug: p.slug, chunk: chunk.label, chunkIndex: i + 1, chunkTotal: total, error: err, errorClass: 'frontier_write' });
               detail.error = err;
-              logLines.push(`[4] merge ${p.slug} ${i + 1}/${total} (${chunk.label}): ${err} — stopping this contact`);
+              // Count this deterministic failure; after MAX_FAILS in a row the contact is
+              // parked (skipped next run) instead of re-planning + re-paying forever.
+              let parked = false;
+              try { parked = require('../lib/merge-hold').recordFailure(p.slug, err, chunk.label).held; } catch { /* hold store is best-effort */ }
+              logLines.push(`[4] merge ${p.slug} ${i + 1}/${total} (${chunk.label}): ${err} — stopping this contact${parked ? ' (now PARKED after repeated failures)' : ''}`);
               contactDetails.push(detail);
               continue;
             }
@@ -591,7 +609,12 @@ function main() {
           }
           contactDetails.push(detail);
         }
-        if (!contactFailed) merged.push(p.slug);
+        if (!contactFailed) {
+          merged.push(p.slug);
+          // Contact merged cleanly this run — reset any accumulated deterministic-failure
+          // count so a past wobble doesn't count toward a future park.
+          try { require('../lib/merge-hold').clear(p.slug); } catch { /* best-effort */ }
+        }
       }
       mergeDb.close();
     }

@@ -13,6 +13,47 @@ Newest first.
 
 ---
 
+## 2026-09-05
+
+### DECISION — crm.db moved from rollback-journal to WAL
+Closes off the alternative logged 2026-08-05 (rollback mode + a 15s busy_timeout as the
+*only* serialization). That kept SQLITE_BUSY from killing runs, but readers and the writer
+still contended: any open reader (a page render) blocked the writer and vice-versa, because
+rollback mode locks the whole file for a write. WAL appends commits to a `crm.db-wal` sidecar
+and readers read the main file + the log as of their own snapshot, so the reader/writer half
+of the BUSY class is gone entirely (verified: a writer committed in ~1ms while a reader held
+an open snapshot; the same write blocks the full busy_timeout under rollback). WAL is still
+single-writer, so writer-vs-writer (a sweep INSERT racing a web task-write) still serializes
+on busy_timeout — that half is unchanged. `synchronous=FULL` (the SQLite default, kept
+explicit) over NORMAL: the archive holds Signal-deleted messages and is irreplaceable, so a
+power-loss window that drops committed transactions is not acceptable, and at hourly-sweep
+volume FULL costs nothing. Set on every open (lib/signal-db.js openCrmDb, and now
+lib/nicknames.js) so a restore self-heals; a one-time stderr warning fires if the switch
+returns a non-WAL mode (read-only dir / network mount — WAL is unsafe on network fs).
+
+Reviewed by two independent agents (kimi-k3-high, cursor-grok-4.6-high). Consequences they
+surfaced, now handled:
+- **Restore is no longer `cp`.** A backup is delete-mode (VACUUM INTO output); if a stale
+  `crm.db-wal` survives next to the file you overwrite, SQLite replays it and silently
+  reverts the restore. Runbook written into scripts/crm-backup.js header: stop writers,
+  delete crm.db + -wal + -shm, then copy the backup.
+- **File-copy backups are now silently stale** (committed rows may live only in -wal). The
+  `VACUUM INTO` rationale in crm-backup.js now says so; VACUUM INTO itself is WAL-correct
+  (snapshots main + WAL). Its census verify was changed from exact-equality to a
+  before/after **bracket**, because WAL lets a writer land mid-backup and a plain equality
+  check would spuriously mark a good backup FAILED.
+- **SURPRISE:** a plain `VACUUM` does NOT reset journal_mode to rollback on this runtime
+  (node:sqlite) — verified it preserves WAL. The real way the file loses WAL is a restore of
+  a delete-mode backup, not a VACUUM. (An earlier code comment claimed the VACUUM mechanism;
+  corrected.)
+- **nicknames.db** had the identical exposure (long-lived web singleton handle + pipeline
+  writers) and was converted too. crm-import-archive.js now routes through openCrmDb().
+
+Sidecars (`crm.db-wal`, `crm.db-shm`) were already excluded from both git histories
+(.gitignore ignores all of data/; memory-commit.js excludes them explicitly).
+
+---
+
 ## 2026-09-03
 
 ### DECISION — the Signal nickname is the single source of truth for a person's name

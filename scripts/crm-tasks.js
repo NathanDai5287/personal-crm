@@ -199,7 +199,13 @@ function extractFor(slug, ledgerPath, opts = {}) {
   for (const d of dropped) {
     rejected.push(`DROPPED a trigger — model returned nothing for ⟨m${d.msgId}⟩: "${d.body.slice(0, 60)}"`);
   }
-  return { ok: true, tasks, rejected, scanned: total, triggers: windows.length, nearMisses, costUsd };
+  // `dropped` is returned STRUCTURALLY (not only as rejected strings) so the caller can
+  // decline to advance its cursor past a trigger the model silently dropped — otherwise
+  // an explicit "make sure"/"eod" commitment is lost the moment the cursor steps past it.
+  return {
+    ok: true, tasks, rejected, scanned: total, triggers: windows.length, nearMisses, costUsd,
+    dropped: dropped.map((d) => ({ msgId: d.msgId, body: String(d.body || '').slice(0, 120) })),
+  };
 }
 
 function main() {

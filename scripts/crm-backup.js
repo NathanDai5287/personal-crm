@@ -20,11 +20,24 @@
 // CRM_BACKUP_DIR if you have somewhere better (an external disk, a synced folder).
 //
 // WHY `VACUUM INTO` RATHER THAN A FILE COPY: a copy taken while a write is in
-// flight yields a torn database that looks fine until the day you need it.
-// VACUUM INTO runs inside a read transaction, so the output is always a consistent
-// snapshot, and it defragments on the way out. node:sqlite's incremental backup()
-// would also be correct but is async and does not compact; for 20MB the simpler
-// synchronous statement is the better trade.
+// flight yields a torn database that looks fine until the day you need it. And
+// since crm.db moved to WAL (2026-09-05), a file copy is worse still: up to a
+// checkpoint's worth of COMMITTED transactions live only in the `crm.db-wal`
+// sidecar, so `cp crm.db` — even with no writer active — silently drops recent
+// messages and still passes integrity_check. VACUUM INTO runs inside a read
+// transaction that sees the main file PLUS the WAL as one snapshot, so the output
+// is always consistent and complete, and it defragments on the way out. The output
+// is a fresh rollback-mode ("delete") db — see the RESTORE note below.
+//
+// HOW TO RESTORE (read this before you need it): the backup file is delete-mode, so
+// restoring is NOT just `cp backup crm.db`. If a stale `crm.db-wal` from the old
+// (crashed or still-running) database survives next to the file you overwrite,
+// SQLite REPLAYS those WAL frames onto your fresh restore on next open and silently
+// reverts it to the old generation's data — no error. Correct restore:
+//   1. stop everything that opens crm.db (web app, media worker, pipeline);
+//   2. delete data/crm.db, data/crm.db-wal AND data/crm.db-shm;
+//   3. copy the chosen backup to data/crm.db;
+//   4. the next openCrmDb() re-asserts WAL (lib/signal-db.js), converting it back.
 //
 // RETENTION IS TIERED, not "keep the last N". The threat is not only "the file died
 // today" but "the file has been quietly wrong for a while and I just noticed" — a
@@ -82,6 +95,7 @@ function listBackups(dest) {
 // it would silently satisfy every other check here.
 function census(file) {
   const db = new DatabaseSync(file, { readOnly: true });
+  db.exec('PRAGMA busy_timeout = 15000');
   try {
     const out = {};
     for (const t of ['messages', 'contacts', 'tasks']) {
@@ -150,7 +164,7 @@ function backup(dest, now) {
   if (!fs.existsSync(CRM_DB)) throw new Error(`no database at ${CRM_DB}`);
   fs.mkdirSync(dest, { recursive: true });
 
-  const src = census(CRM_DB);
+  const srcBefore = census(CRM_DB);
   const out = path.posix.join(dest, stamp(now));
   // VACUUM INTO refuses to overwrite, which is the behaviour we want — but a leftover
   // file from a crashed run would then block every retry within the same minute.
@@ -158,6 +172,7 @@ function backup(dest, now) {
   for (const f of [out, tmp]) if (fs.existsSync(f)) fs.unlinkSync(f);
 
   const db = new DatabaseSync(CRM_DB, { readOnly: true });
+  db.exec('PRAGMA busy_timeout = 15000');
   try {
     db.exec(`VACUUM INTO '${tmp.replace(/'/g, "''")}'`);
   } finally {
@@ -169,16 +184,31 @@ function backup(dest, now) {
   // older, healthy one prunable.
   if (!integrityOk(tmp)) { fs.unlinkSync(tmp); throw new Error('integrity_check failed on the copy'); }
   const copy = census(tmp);
-  for (const t of Object.keys(src)) {
-    if (src[t] !== copy[t]) {
+  // BRACKET, don't equate. Under WAL a writer can commit between the snapshot the
+  // backup captured and this verification read (that concurrency is the whole point
+  // of WAL), so a plain `src === copy` check would spuriously fail — and mark a
+  // perfectly good backup FAILED — whenever a web or pipeline write lands mid-run.
+  // Re-census the source and accept a copy count that falls within the range the
+  // source spanned during the backup. A truncated or corrupt copy still lands
+  // outside the range and still fails loudly.
+  const srcAfter = census(CRM_DB);
+  for (const t of Object.keys(srcBefore)) {
+    const a = srcBefore[t], b = srcAfter[t], c = copy[t];
+    if (a == null && b == null) {
+      if (c != null) { fs.unlinkSync(tmp); throw new Error(`table ${t} absent in source but present in copy (${c})`); }
+      continue;
+    }
+    const lo = Math.min(a ?? b, b ?? a);
+    const hi = Math.max(a ?? b, b ?? a);
+    if (c == null || c < lo || c > hi) {
       fs.unlinkSync(tmp);
-      throw new Error(`row count mismatch in ${t}: source ${src[t]}, copy ${copy[t]}`);
+      throw new Error(`row count for ${t} outside source range [${lo},${hi}] during backup: copy ${c}`);
     }
   }
   fs.renameSync(tmp, out);
 
   const size = fs.statSync(out).size;
-  console.log(`wrote ${path.basename(out)}  ${mb(size)}  (messages ${src.messages}, contacts ${src.contacts}, tasks ${src.tasks})  verified`);
+  console.log(`wrote ${path.basename(out)}  ${mb(size)}  (messages ${copy.messages}, contacts ${copy.contacts}, tasks ${copy.tasks})  verified`);
 
   const surplus = planPrune(listBackups(dest), now);
   for (const s of surplus) { fs.unlinkSync(s.full); console.log(`   pruned ${s.file}`); }

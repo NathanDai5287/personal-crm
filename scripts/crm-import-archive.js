@@ -32,6 +32,7 @@
 const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
 const { CRM_DB } = require('../lib/config');
+const { openCrmDb } = require('../lib/signal-db');
 const { ensureMessagesTable } = require('../lib/archive');
 
 function main() {
@@ -41,7 +42,7 @@ function main() {
   if (!src) { console.error('usage: node scripts/crm-import-archive.js <source-crm.db> [--write]'); process.exit(2); }
 
   const srcDb = new DatabaseSync(src, { readOnly: true });
-  const tgt = new DatabaseSync(CRM_DB); // read-write
+  const tgt = openCrmDb(); // read-write; sets busy_timeout + WAL + synchronous=FULL
   ensureMessagesTable(tgt);
 
   // 1. Target's sent_at set (dedup) and sent_at -> conv_id (for the conv remap).
@@ -102,7 +103,7 @@ function main() {
     'INSERT INTO messages (id, conv_id, conversation, contact_slug, sent_at, sender, body, src, type, att_hashes) VALUES (?,?,?,?,?,?,?,?,?,?)',
   );
   try {
-    tgt.exec('BEGIN');
+    tgt.exec('BEGIN IMMEDIATE');
     for (const r of missing) {
       id += 1;
       const conv = r.conv_id != null ? (convMap.get(r.conv_id) ?? null) : null;

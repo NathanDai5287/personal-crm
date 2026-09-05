@@ -43,6 +43,12 @@ const FREE_PREFIX = 'anthropic/';
 // scan still resolves. Only the TRIGGER has to be new; its context does not.
 const CONTEXT_LOOKBACK = 60;
 
+// How many runs to retry a trigger the model SILENTLY DROPPED (findTriggers flagged it,
+// extraction returned no task for it) before giving up. Retrying recovers a transient
+// truncation/refusal (this is a plan model — retries are free), while the cap stops a
+// deterministically-dropped trigger from blocking that contact's cursor forever.
+const DROP_MAX_RETRIES = 3;
+
 // SETTLE MARGIN. A trigger is not extracted until it is at least this old, so the AFTER
 // window (lib/task-trigger.js) has time to fill with an immediate discharge ("nvm") before
 // the once-only extraction runs. Without it, a "make sure" swept and scanned in the same
@@ -111,6 +117,10 @@ function main() {
   // thing you need to be told.
   const firstRun = !Object.keys(state.cursors || {}).length;
   const db = new DatabaseSync(CRM_DB, { readOnly: true });
+  // crm.db is WAL now, so a pure reader like this scan never sees SQLITE_BUSY from a
+  // writer at all. busy_timeout is kept as belt-and-suspenders (covers the pre-WAL
+  // failure mode if the file were ever restored un-WAL'd, and costs nothing).
+  db.exec('PRAGMA busy_timeout = 15000');
   const slugs = (onlySlug ? [onlySlug] : contactsToScan(db)).filter(Boolean);
 
   // PASS 1 — free. Find every new trigger before deciding whether any model call is
@@ -227,6 +237,9 @@ function main() {
   // as an additions-only diff (a todo run has no profile to diff, but this is the
   // equivalent record of what it produced).
   const captured = [];
+  // Triggers the model dropped DROP_MAX_RETRIES runs in a row and we've now stopped
+  // retrying — reported at the end so a persistently-lost commitment stays visible.
+  const givenUpDrops = [];
   // ACTUAL billed cost, summed across the model calls this run made — tracked on the
   // run record, but NEVER fed to the cost estimator (no recordCostSample here) and
   // computed independently of the fitted model. null until a paid call is captured.
@@ -266,15 +279,44 @@ function main() {
           console.log(`   = already had: ${t.title}`);
         }
       }
-      // Only advance past a conversation whose extraction actually succeeded, so a failure
-      // is retried rather than silently skipped.
-      state.cursors[f.slug] = f.hi;
+      // DROPPED-TRIGGER GUARD (F5). findTriggers flagged these ("make sure"/"eod") but the
+      // model returned no task for them — advancing the cursor past a dropped trigger loses
+      // an explicit commitment forever. Retry each up to DROP_MAX_RETRIES runs (recovers a
+      // transient truncation/refusal for free), holding the cursor just below the earliest
+      // still-retriable dropped trigger so it — and everything after — is reconsidered next
+      // run. A trigger dropped that many runs in a row is given up on (cursor allowed past)
+      // but reported LOUDLY, so it is surfaced rather than silently lost or permanently
+      // blocking the contact.
+      state.droppedRetries = state.droppedRetries || {};
+      const dr = state.droppedRetries[f.slug] || {};
+      const droppedNow = (res.dropped || []).map((d) => d.msgId).filter((id) => id > cursor);
+      const droppedSet = new Set(droppedNow);
+      for (const k of Object.keys(dr)) { if (!droppedSet.has(Number(k))) delete dr[k]; } // recovered / below cursor
+      let blockingId = null;
+      for (const id of droppedNow) {
+        dr[id] = (dr[id] || 0) + 1;
+        if (dr[id] < DROP_MAX_RETRIES) blockingId = blockingId == null ? id : Math.min(blockingId, id);
+        else {
+          console.log(`   !! ${f.slug}: giving up on dropped trigger ⟨m${id}⟩ after ${dr[id]} tries — NOT captured`);
+          givenUpDrops.push({ slug: f.slug, msgId: id });
+          delete dr[id];
+        }
+      }
+      if (Object.keys(dr).length) state.droppedRetries[f.slug] = dr; else delete state.droppedRetries[f.slug];
+      // Advance only up to (not past) the earliest still-retriable dropped trigger; a clean
+      // run with no retriable drops advances fully. A hard failure above already `continue`d,
+      // so reaching here means the extraction itself succeeded.
+      state.cursors[f.slug] = blockingId != null ? Math.min(f.hi, blockingId - 1) : f.hi;
     }
   } finally {
     if (cdb) try { cdb.close(); } catch { /* closed */ }
   }
   saveState(state);
   console.log(`\ninserted ${inserted} task(s)${actualUsd != null ? ` · actual cost $${actualUsd.toFixed(4)}` : ''}`);
+  if (givenUpDrops.length) {
+    console.log(`!! ${givenUpDrops.length} trigger(s) given up after ${DROP_MAX_RETRIES} dropped runs (NOT captured): `
+      + givenUpDrops.map((d) => `${d.slug}#m${d.msgId}`).join(', '));
+  }
   if (write) recordTodoRun(startedAt, scanned, slugs.length, total, inserted, model, captured, actualUsd);
 }
 
