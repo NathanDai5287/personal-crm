@@ -133,28 +133,44 @@ async function captionOk() {
 // ask for more structure.
 async function runCaption(imgPath) {
   const b64 = fs.readFileSync(imgPath).toString('base64');
-  const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), CAPTION_GENERATE_MS);
-  try {
-    const res = await fetch(`${CRM_OLLAMA_URL}/api/generate`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        model: CRM_CAPTION_MODEL,
-        prompt: 'Describe this image.',
-        images: [b64],
-        stream: false,
-        options: { temperature: 0, num_ctx: 8192 },
-      }),
-      signal: ac.signal,
-    });
-    if (!res.ok) throw new Error(`ollama HTTP ${res.status}`);
-    const json = await res.json();
-    if (json && json.error) throw new Error(String(json.error));
-    return String((json && json.response) || '').trim();
-  } finally {
-    clearTimeout(timer);
+  // In-call retry for the momentary blips that dominated the first backfill: Ollama
+  // dropping a connection ("fetch failed") or a transient 5xx while the model reloads.
+  // A few quick tries absorb those at the source. A 180s TIMEOUT or a 4xx (permanent)
+  // is NOT retried here — the queue-level backoff (M.noteFailure) owns those, so a slow
+  // image doesn't burn 3×180s in one claim.
+  const TRIES = 3;
+  let lastErr;
+  for (let attempt = 1; attempt <= TRIES; attempt += 1) {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), CAPTION_GENERATE_MS);
+    try {
+      const res = await fetch(`${CRM_OLLAMA_URL}/api/generate`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: CRM_CAPTION_MODEL,
+          prompt: 'Describe this image.',
+          images: [b64],
+          stream: false,
+          options: { temperature: 0, num_ctx: 8192 },
+        }),
+        signal: ac.signal,
+      });
+      if (!res.ok) throw new Error(`ollama HTTP ${res.status}`);
+      const json = await res.json();
+      if (json && json.error) throw new Error(String(json.error));
+      return String((json && json.response) || '').trim();
+    } catch (e) {
+      lastErr = e;
+      const isTimeout = e && e.name === 'AbortError';
+      const is4xx = /ollama HTTP 4\d\d/.test(e && e.message ? e.message : '');
+      if (isTimeout || is4xx || attempt === TRIES) throw e;
+      await new Promise((r) => { setTimeout(r, 1500 * attempt); });  // 1.5s, then 3s
+    } finally {
+      clearTimeout(timer);
+    }
   }
+  throw lastErr;
 }
 
 const EXT = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp', 'image/gif': '.gif',
@@ -291,8 +307,8 @@ async function expandVideoFrames(cdb, sdb, claim, tmpDir, kinds) {
             if (!text) M.setSkip(cdb, key, 'no text extracted');
             else M.setDone(cdb, key, text, engineFor('caption'));
           } catch (e) {
-            M.setError(cdb, key, e.message, engineFor('caption'));
-            console.log(`  caption ${label}…#${part} -> ERROR ${e.message}`);
+            const r = M.noteFailure(cdb, key, e.message, engineFor('caption'));
+            console.log(`  caption ${label}…#${part} -> ${r.retrying ? `will retry (${r.attempts}/${M.MAX_ATTEMPTS})` : 'ERROR, gave up'}: ${e.message}`);
           }
         }
       }
@@ -305,8 +321,8 @@ async function expandVideoFrames(cdb, sdb, claim, tmpDir, kinds) {
             if (!text) M.setSkip(cdb, key, 'no text extracted');
             else M.setDone(cdb, key, text, engineFor('ocr'));
           } catch (e) {
-            M.setError(cdb, key, e.message, engineFor('ocr'));
-            console.log(`  ocr ${label}…#${part} -> ERROR ${e.message}`);
+            const r = M.noteFailure(cdb, key, e.message, engineFor('ocr'));
+            console.log(`  ocr ${label}…#${part} -> ${r.retrying ? `will retry (${r.attempts}/${M.MAX_ATTEMPTS})` : 'ERROR, gave up'}: ${e.message}`);
           }
         }
       }
@@ -424,8 +440,11 @@ async function processOne(cdb, sdb, kinds, tmpDir) {
       M.setSkip(cdb, key, 'no audio track');
       console.log(`  ${claim.kind} ${label}… -> skipped (no audio track)`);
     } else {
-      M.setError(cdb, key, e.message, engineFor(claim.kind));
-      console.log(`  ${claim.kind} ${label}${partSuffix} -> ERROR ${e.message}`);
+      // Assume transient: noteFailure re-queues with backoff and only lands on a
+      // terminal 'error' once the retry schedule is exhausted, so the queue self-heals
+      // across sweeps without anyone running --retry-errors.
+      const r = M.noteFailure(cdb, key, e.message, engineFor(claim.kind));
+      console.log(`  ${claim.kind} ${label}${partSuffix} -> ${r.retrying ? `will retry (attempt ${r.attempts}/${M.MAX_ATTEMPTS})` : `ERROR, gave up after ${r.attempts}`}: ${e.message}`);
     }
     return true;
   } finally {
