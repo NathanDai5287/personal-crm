@@ -108,11 +108,29 @@ function syncContactNames(cdb, slugs, nameMap) {
 // sweep's lifetime. A deep sweep also refills from the whole archive. Best-effort:
 // it renices itself and idle-exits when the queue is empty.
 function kickMediaWorker(deep) {
+  const wArgs = [path.join(__dirname, 'crm-media-worker.js')];
+  if (deep) wArgs.push('--enqueue-existing');
+  const plain = () => {
+    try { spawn(process.execPath, wArgs, { cwd: ROOT, env: process.env, detached: true, stdio: 'ignore' }).unref(); } catch { /* best-effort */ }
+  };
+  // WHY NOT JUST detached+unref: under systemd (crm-sweep.service), a plain detached
+  // child still lives in the SWEEP's cgroup, and KillMode=control-group SIGKILLs the
+  // whole cgroup the moment crm-archive.js (the unit's main process) exits. Fast
+  // OCR/STT finish inside that window; slow captions (a local VLM over Ollama, many
+  // seconds each) get reaped mid-run — so the caption backlog never drains. INVOCATION_ID
+  // is set only when we are a systemd unit; then launch the worker as its OWN transient
+  // user service (systemd-run), which lives in a separate cgroup and survives to drain
+  // the queue. Run by hand (no INVOCATION_ID), a normal detached spawn is correct.
+  if (!process.env.INVOCATION_ID) { plain(); return; }
   try {
-    const wArgs = [path.join(__dirname, 'crm-media-worker.js')];
-    if (deep) wArgs.push('--enqueue-existing');
-    spawn(process.execPath, wArgs, { cwd: ROOT, env: process.env, detached: true, stdio: 'ignore' }).unref();
-  } catch { /* worker is best-effort */ }
+    const fwd = Object.keys(process.env)
+      .filter((k) => k === 'PATH' || k === 'HOME' || /^(CRM_|OLLAMA|XDG_)/.test(k))
+      .map((k) => `--setenv=${k}=${process.env[k]}`);
+    const runArgs = ['--user', '--collect', '--quiet', `--working-directory=${ROOT}`, ...fwd, '--', process.execPath, ...wArgs];
+    const child = spawn('systemd-run', runArgs, { cwd: ROOT, env: process.env, detached: true, stdio: 'ignore' });
+    child.on('error', plain);   // systemd-run missing or refused → fall back to a plain spawn
+    child.unref();
+  } catch { plain(); }
 }
 
 const DAY = 86_400_000;
