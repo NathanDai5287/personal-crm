@@ -59,6 +59,23 @@ const git = (...args) => execFileSync(
   { cwd: WT, encoding: 'utf8' },
 );
 
+// Self-init the bare history repo when it's missing (a fresh machine has never had
+// one — it lives outside the public repo, so cloning/pulling never brings it). Without
+// this, the very first git call below fails with "not a git repository" and crm-daily
+// treats that as fatal-before-mutating, so no ingest can ever run on that machine. A
+// bare repo used with --work-tree behaves like a normal one for add/commit; the first
+// commit lands on init.defaultBranch. Idempotent: a valid repo already present is left
+// untouched. Uses ROOT-relative GITDIR under cwd=WT to match every other git call here.
+function ensureRepo() {
+  try {
+    execFileSync('git', ['--git-dir', GITDIR, 'rev-parse', '--git-dir'],
+      { cwd: WT, encoding: 'utf8', stdio: 'ignore' });
+    return; // already a valid repo
+  } catch { /* missing or broken — (re)create below */ }
+  execFileSync('git', ['init', '--bare', GITDIR], { cwd: WT, encoding: 'utf8', stdio: 'ignore' });
+}
+ensureRepo();
+
 // Anything excluded above that is ALREADY tracked keeps getting committed
 // forever, because exclusion only governs `add`. Untrack them once; the blobs
 // stay in past commits (harmless — this history has no remote) but stop being
