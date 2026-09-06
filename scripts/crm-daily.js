@@ -229,7 +229,7 @@ function loadRefreshState() {
 let EMERGENCY = null;
 function writeEmergencyRecord(err) {
   if (DRY_RUN || !EMERGENCY) return;
-  const { startedAt, runTag, logLines, warnings } = EMERGENCY;
+  const { startedAt, runTag, logLines, warnings, progress } = EMERGENCY;
   const stack = String((err && err.stack) || err).slice(0, 8000);
   logLines.push(`\n[FATAL] the run threw before completing:\n${stack}`);
   warnings.push(`FATAL: ${String((err && err.message) || err).slice(0, 300)}`);
@@ -237,9 +237,18 @@ function writeEmergencyRecord(err) {
   try {
     const runsDir = path.join(LOGS_DIR, 'runs');
     fs.mkdirSync(runsDir, { recursive: true });
+    const p = progress || {};
     const rec = {
-      id: runTag, kind: 'ingest', startedAt, endedAt, durationMs: endedAt - startedAt,
-      fatal: true, error: stack, mergeFailures: [], warnings, steps: [], chunks: [],
+      id: runTag, kind: 'ingest', complete: false, startedAt, endedAt, durationMs: endedAt - startedAt,
+      fatal: true, error: stack, mergeFailures: [], warnings, steps: [],
+      // Preserve the cost/chunks the run had already incurred before the throw, so a
+      // crashed run is billed-accurate in the ledger, not blank (matches SIGKILL path).
+      costUsd: p.mergeCostKnown === false ? null : (p.mergeCostUsd ?? null),
+      actualCostUsd: p.actualCostSeen ? p.actualCostUsd : null,
+      costModel: p.costModel,
+      chunksMerged: p.chunksMerged ?? 0,
+      messagesMerged: p.messagesMerged ?? 0,
+      chunks: p.chunks || [],
     };
     atomicWriteJson(path.join(runsDir, `${runTag}.json`), rec);
     atomicWriteJson(path.join(LOGS_DIR, 'last-run.json'), rec);
@@ -451,6 +460,45 @@ function main() {
   // the record distinguishes "nothing merged / not captured" from "$0".
   let actualCostUsd = 0;
   let actualCostSeen = false;
+  // Persisted after every chunk so a run ALWAYS leaves a ledger record carrying the
+  // cost incurred SO FAR — the one case step 7's write and writeEmergencyRecord's
+  // throw-path both miss is an uncatchable SIGKILL (the crm-web watchdog kills the
+  // whole process group at the step-timeout; the model is billed for chunks already
+  // done, but nothing recorded it). This overwrites ${runTag}.json each chunk with
+  // an incomplete record; step 7 replaces it with the complete one on a clean finish.
+  const writeProgressRecord = () => {
+    if (DRY_RUN) return;
+    try {
+      const now = Date.now();
+      const rec = {
+        id: runTag, kind: 'ingest', complete: false,
+        startedAt, endedAt: now, durationMs: now - startedAt,
+        dryRun: false, only: ONLY,
+        models: { merge: MERGE_MODEL_EFF, timeline: MERGE_MODEL_EFF },
+        costUsd: mergeCostKnown ? mergeCostUsd : null,
+        actualCostUsd: actualCostSeen ? actualCostUsd : null,
+        costModel: MERGE_MODEL_EFF,
+        contactsWithActivity: plans.length,
+        totalChunks,
+        chunksMerged: contactDetails.filter((c) => c.ok).length,
+        messagesMerged: contactDetails.filter((c) => c.ok).reduce((n, c) => n + c.count, 0),
+        merged: [...merged],
+        mergeFailures,
+        warnings,
+        chunks: contactDetails,
+      };
+      const runsDir = path.join(LOGS_DIR, 'runs');
+      fs.mkdirSync(runsDir, { recursive: true });
+      atomicWriteJson(path.join(runsDir, `${runTag}.json`), rec);
+      atomicWriteJson(path.join(LOGS_DIR, 'last-run.json'), rec);
+      // Keep the throw-path record (writeEmergencyRecord) honest about spend too.
+      EMERGENCY.progress = {
+        actualCostUsd, actualCostSeen, mergeCostUsd, mergeCostKnown,
+        costModel: MERGE_MODEL_EFF, chunksMerged: rec.chunksMerged,
+        messagesMerged: rec.messagesMerged, chunks: contactDetails,
+      };
+    } catch { /* best-effort insurance; never fail the run over the ledger */ }
+  };
   if (!fatal && plans.length > 0) {
     if (DRY_RUN) {
       logLines.push('[4] merge PLANNING (--dry-run, pi not invoked):');
@@ -608,6 +656,8 @@ function main() {
               `remaining ${total - i - 1} chunk(s) deferred to the next run: ${result.error}`);
           }
           contactDetails.push(detail);
+          // Land the cost-so-far on disk before the next (long, kill-prone) chunk.
+          writeProgressRecord();
         }
         if (!contactFailed) {
           merged.push(p.slug);
@@ -751,6 +801,9 @@ function main() {
       // ingest runs, so crm-web defaults undefined → 'ingest'. Stamp it going
       // forward so the default only ever covers the pre-kind history.
       kind: 'ingest',
+      // Reached step 7 — overwrites any per-chunk partial (complete:false) left by
+      // writeProgressRecord for this same runId. A killed run's partial keeps false.
+      complete: true,
       ...summary,
       steps,
       // One entry per CHUNK (was per contact before week-aligned chunking).

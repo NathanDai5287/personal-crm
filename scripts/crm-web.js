@@ -2690,16 +2690,24 @@ function rowForRun(r) {
   }
   // ingest (also the default for legacy records written before `kind` existed)
   const failures = (r.mergeFailures || []).length;
+  // A record left at complete:false never reached step 7 — the process was
+  // SIGKILLed by the watchdog or threw (r.fatal). It still carries the cost of the
+  // chunks it finished (writeProgressRecord / writeEmergencyRecord). Legacy records
+  // predate the flag (undefined) and must NOT be treated as interrupted.
+  const interrupted = r.complete === false;
   return {
     t, kind: 'ingest',
     pass: r.dryRun ? 'plan' : (r.only ? 'ingest (one)' : 'daily'),
     scope: r.only || 'everyone',
     examined: String(r.messagesMerged ?? r.contactsWithActivity ?? ''),
     held: `${(r.merged || []).length} ppl`,
-    cost: r.dryRun ? 'free' : costCell(r), actual: r.dryRun ? 'free' : actualCell(r), took, ok: failures === 0,
-    note: failures
-      ? `${failures} merge failure(s)`
-      : ((r.warnings || []).length ? `${r.warnings.length} warning(s)` : `${r.chunksMerged ?? 0} chunk(s) ingested`),
+    cost: r.dryRun ? 'free' : costCell(r), actual: r.dryRun ? 'free' : actualCell(r), took,
+    ok: !interrupted && failures === 0,
+    note: interrupted
+      ? `${r.fatal ? 'crashed' : 'killed (timeout)'} after ${r.chunksMerged ?? 0} chunk(s) — partial cost`
+      : (failures
+        ? `${failures} merge failure(s)`
+        : ((r.warnings || []).length ? `${r.warnings.length} warning(s)` : `${r.chunksMerged ?? 0} chunk(s) ingested`)),
   };
 }
 
