@@ -25,7 +25,9 @@ const { dateKey } = require('../lib/weeks');
 const { sumSessionCostUsd, sessionAssistantText } = require('../lib/cost');
 const { storeNicknameProposals } = require('../lib/nicknames');
 const { trackedResolver } = require('../lib/people-resolve');
-const { applyStructuredReply, renderStructuredProfile, profileCitationIds } = require('../lib/structured-person');
+const {
+  applyStructuredReply, renderStructuredProfile, profileCitationIds, stripFactsSection,
+} = require('../lib/structured-person');
 const { openCrmDb } = require('../lib/signal-db');
 const { ensureMessagesTable, markMerged } = require('../lib/archive');
 
@@ -275,6 +277,19 @@ function mergeContact(slug, opts = {}) {
     if (profileBefore == null) return;
     try { fs.writeFileSync(profileFilePath, profileBefore); } catch { /* caller still sees failure */ }
   };
+  // Hide the machine-owned `## Facts` section from the model. It is regenerated from
+  // crm.db after every merge (renderStructuredProfile re-adds it), so the model must
+  // neither see nor edit it — leaving it in the input risks nudging the model back
+  // toward flat-bullet What-I-know. profileBefore keeps the FULL version (with Facts)
+  // for citation validation and restoreProfile; only the on-disk copy pi reads is
+  // stripped. On success the model's edited (Facts-free) file is what the structured
+  // render re-adds Facts to; on any failure restoreProfile puts the full original back.
+  if (profileBefore != null && !dryRun) {
+    const modelView = stripFactsSection(profileBefore);
+    if (modelView !== profileBefore) {
+      try { fs.writeFileSync(profileFilePath, modelView); } catch { /* model reads whatever is on disk */ }
+    }
+  }
   // CENSOR AT MODEL EGRESS (lib/message-context): the committed ledger (.new.txt) is
   // the uncensored Rendered record; pi reads a censored copy (.pi.txt) written from
   // it here and re-written by the content-filter path below. Deleted in the finally

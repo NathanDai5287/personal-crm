@@ -11,6 +11,7 @@ const {
 } = require('../lib/schema');
 const {
   parseStructuredReply, applyStructuredReply, renderStructuredProfile, profileCitationIds,
+  stripFactsSection,
 } = require('../lib/structured-person');
 const { dateKeyToMs } = require('../lib/weeks');
 const { sessionAssistantText } = require('../lib/cost');
@@ -124,6 +125,17 @@ const dupRender = renderStructuredProfile('# D\n\n## What I know\n\nprose\n\n## 
 assert.strictEqual((dupRender.match(/\*\*Gpa:\*\*/g) || []).length, 1);
 // Re-rendering an already-rendered profile is idempotent — no second ## Facts section.
 assert.strictEqual((renderStructuredProfile(dupRender, []).match(/## Facts/g) || []).length, 1);
+
+// The model never sees ## Facts: it is stripped from the model's input, then the render
+// re-adds an identical section. strip -> re-render must be a faithful round-trip.
+const oneFact = [{ id: 1, field: 'employer', kind: 'standing', value: 'Acme', src_msg: 20, observed_at: 100 }];
+const withFacts = renderStructuredProfile(
+  '# R\n\n## What I know\n\nprose ⟨m20⟩\n\n## Talking points\n\n- x ⟨m20⟩\n\n## Timeline\n', oneFact);
+assert.match(withFacts, /## Facts\n\n- \*\*Employer:\*\* Acme ⟨m20⟩/);
+const stripped = stripFactsSection(withFacts);
+assert.doesNotMatch(stripped, /## Facts/);
+assert.match(stripped, /prose ⟨m20⟩/); // What I know prose untouched by the strip
+assert.strictEqual(renderStructuredProfile(stripped, oneFact), withFacts); // faithful round-trip
 
 // Replacement strings are data, and multiple identity facts render newest-wins.
 const injected = renderStructuredProfile(md, [
