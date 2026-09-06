@@ -77,14 +77,14 @@ assert.throws(() => applyStructuredReply(h, 'alice', reply([
 ]), { resolve }), /derived/);
 assert.strictEqual(currentFacts(h, 'alice').some((f) => f.field === 'age'), false);
 assert.throws(() => applyStructuredReply(h, 'alice', reply([
-  { field: 'birthday', kind: 'standing', value: 'January 1', source_message_id: 999 },
+  { field: 'birthday', kind: 'standing', value: '--01-01', source_message_id: 999 },
 ]), { resolve }), /missing archive message/);
 assert.throws(() => applyStructuredReply(h, 'alice', reply([
-  { field: 'birthday', kind: 'standing', value: 'January 1', source_message_id: 20 },
+  { field: 'birthday', kind: 'standing', value: '--01-01', source_message_id: 20 },
 ]), { resolve, validMessageIds: [30] }), /outside this chunk/);
 assert.deepStrictEqual([...profileCitationIds('old ⟨m10-m20 @m15⟩')].sort((a, b) => a - b), [10, 15, 20]);
 applyStructuredReply(h, 'alice', reply([
-  { field: 'birthday', kind: 'standing', value: 'January 1', source_message_id: 20 },
+  { field: 'birthday', kind: 'standing', value: '--01-01', source_message_id: 20 },
 ]), { resolve, validMessageIds: [30], validFactMessageIds: [20, 30] });
 
 // An inferred snapshot as-of is the source message's Pacific day boundary, not
@@ -162,6 +162,56 @@ try {
 } finally {
   fs.rmSync(sessionDir, { recursive: true, force: true });
 }
+
+// Identity fields with a canonical form are normalised, and malformed values are
+// rejected (fail-loud, like the derived/message-id guards above).
+const h5 = db();
+applyStructuredReply(h5, 'alice', reply([
+  { field: 'birthday', kind: 'standing', value: '--03-14', source_message_id: 20 },
+  { field: 'email', kind: 'standing', value: 'Alice@EXAMPLE.com', source_message_id: 20 },
+]), { resolve });
+assert.strictEqual(currentFacts(h5, 'alice').find((f) => f.field === 'birthday').value, '--03-14');
+assert.strictEqual(currentFacts(h5, 'alice').find((f) => f.field === 'email').value, 'Alice@example.com');
+// A malformed identity value from the MODEL is DROPPED, not thrown: the chunk still
+// succeeds and the good facts around it are kept (no merge-retry token burn).
+const kept = applyStructuredReply(h5, 'alice', reply([
+  { field: 'birthday', kind: 'standing', value: 'March 1', source_message_id: 20 },
+  { field: 'email', kind: 'standing', value: 'not-an-email', source_message_id: 20 },
+  { field: 'school', kind: 'standing', value: 'Cal', source_message_id: 20 },
+]), { resolve });
+assert.strictEqual(kept.factsStored, 1); // only 'school' survived
+assert.strictEqual(currentFacts(h5, 'alice').find((f) => f.field === 'birthday').value, '--03-14'); // unchanged
+assert.strictEqual(currentFacts(h5, 'alice').find((f) => f.field === 'school').value, 'Cal');
+// An EMPTY identity value is dropped too (not thrown) — the sibling fact survives.
+const kept2 = applyStructuredReply(h5, 'alice', reply([
+  { field: 'birthday', kind: 'standing', value: '   ', source_message_id: 20 },
+  { field: 'major', kind: 'standing', value: 'EECS', source_message_id: 20 },
+]), { resolve });
+assert.strictEqual(kept2.factsStored, 1); // only 'major'
+assert.strictEqual(currentFacts(h5, 'alice').find((f) => f.field === 'birthday').value, '--03-14'); // still unchanged
+// A model SNAPSHOT/periodic identity fact is dropped (it would carry a different
+// identity_key and bypass the human-override guard, then win the header).
+const kept3 = applyStructuredReply(h5, 'alice', reply([
+  { field: 'birthday', kind: 'snapshot', value: '1991-05-05', source_message_id: 20 },
+]), { resolve });
+assert.strictEqual(kept3.factsStored, 0);
+assert.strictEqual(currentFacts(h5, 'alice').filter((f) => f.field === 'birthday').length, 1);
+assert.strictEqual(currentFacts(h5, 'alice').find((f) => f.field === 'birthday').value, '--03-14');
+h5.close();
+
+// THE MODEL MAY NOT OVERRIDE A HUMAN. A manual fact (src_msg NULL) holds the field
+// against a later model fact (src_msg set); the model may still fill a field the
+// human never set, and a human may always correct their own value.
+const h6 = db();
+recordFact(h6, { slug: 'alice', field: 'birthday', kind: 'standing', value: '1990-03-14', src_msg: null, observed_at: 1000 });
+const blocked = recordFact(h6, { slug: 'alice', field: 'birthday', kind: 'standing', value: '1991-05-05', src_msg: 20, observed_at: 5000 });
+assert.strictEqual(blocked.blockedByHuman, true);
+assert.strictEqual(currentFacts(h6, 'alice').find((f) => f.field === 'birthday').value, '1990-03-14');
+recordFact(h6, { slug: 'alice', field: 'birthday', kind: 'standing', value: '1990-04-01', src_msg: null, observed_at: 9000 });
+assert.strictEqual(currentFacts(h6, 'alice').find((f) => f.field === 'birthday').value, '1990-04-01');
+recordFact(h6, { slug: 'alice', field: 'email', kind: 'standing', value: 'a@b.co', src_msg: 20, observed_at: 1000 });
+assert.strictEqual(currentFacts(h6, 'alice').find((f) => f.field === 'email').value, 'a@b.co');
+h6.close();
 
 h.close();
 console.log('structured-person selftest: PASS');

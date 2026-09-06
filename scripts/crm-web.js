@@ -34,7 +34,10 @@ const PERSON = require('../lib/person');
 const { listCandidates, promoteOne, untrackSlug, WINDOW_DAYS, MIN_MSGS, MIN_INCOMING } = require('../lib/promote');
 const { writeFileAtomic } = require('../lib/atomic-write');
 const { factLabel } = require('../lib/structured-person');
-const { recordFact, retractCurrentFact, mentionEdges, edgeCitations, recordReassign } = require('../lib/schema');
+const {
+  recordFact, retractCurrentFact, mentionEdges, edgeCitations, recordReassign,
+  normalizeBirthday, normalizeEmail,
+} = require('../lib/schema');
 const { detectCommunities } = require('../lib/graph-communities');
 const RUN_TOGGLES = require('../lib/run-toggles');
 const RUN_MODELS = require('../lib/run-models');
@@ -1326,7 +1329,22 @@ function msgDates() {
 
 // ---- header helpers ---------------------------------------------------------
 const MON3 = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const MON_FULL = ['January', 'February', 'March', 'April', 'May', 'June', 'July',
+  'August', 'September', 'October', 'November', 'December'];
 const fmtN = (n) => Number(n).toLocaleString('en-US');
+// Canonical birthday ('YYYY-MM-DD' or '--MM-DD') → a human line: "March 14, 1990"
+// or, year unknown, "March 14". A legacy freeform value renders as-is. The client
+// (PROFILE_EDIT_JS.fmtBdayJS) mirrors this so the display matches after an edit.
+function fmtBday(v) {
+  const s = String(v == null ? '' : v).trim();
+  if (!s || s === '_TBD_') return null;
+  const mo = (n) => n >= 1 && n <= 12;
+  let m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+  if (m && mo(Number(m[2]))) return `${MON_FULL[Number(m[2]) - 1]} ${Number(m[3])}, ${m[1]}`;
+  m = /^--(\d{2})-(\d{2})$/.exec(s);
+  if (m && mo(Number(m[1]))) return `${MON_FULL[Number(m[1]) - 1]} ${Number(m[2])}`;
+  return s; // legacy / out-of-range: show verbatim, never "undefined ..."
+}
 // "+18587538808" reads as a machine string; group it the way a person dials it.
 function fmtPhone(p) {
   const m = String(p).match(/^\+1(\d{3})(\d{3})(\d{4})$/);
@@ -1337,6 +1355,7 @@ function fmtPhone(p) {
 // phone; decorative, so aria-hidden (the pencil already labels the field).
 const CAKE_IC = '<svg class="cl-ic" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 20h18"/><path d="M5 20v-7a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v7"/><path d="M5 14.4c1.4 1.1 2.6 1.1 4 0s2.6-1.1 4 0 2.6 1.1 4 0"/><path d="M12 8V5.2"/><circle cx="12" cy="3.4" r=".95" fill="currentColor" stroke="none"/></svg>';
 const PHONE_IC = '<svg class="cl-ic" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.8 3.5H4.5A1.5 1.5 0 0 0 3 5.2C3 13.4 10.6 21 18.8 21a1.5 1.5 0 0 0 1.7-1.5v-2.3a1 1 0 0 0-.86-1l-2.9-.4a1 1 0 0 0-1 .43l-.8 1.1a12.5 12.5 0 0 1-5.3-5.3l1.1-.8a1 1 0 0 0 .43-1l-.4-2.9a1 1 0 0 0-1-.86Z"/></svg>';
+const MAIL_IC = '<svg class="cl-ic" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3.5 7 8.5 6 8.5-6"/></svg>';
 // The runway: one bar per Pacific calendar month, from the first archived
 // message's month through the current month (Nathan settled on monthly bars,
 // 2026-08-11 — the count grows with the history). Buckets are computed in JS
@@ -1431,7 +1450,7 @@ function profilePage(slug) {
   // stored value (the phone renders grouped but is stored as one token).
   const fieldHtml = (label, key, cur, show) =>
     `<span class="efield-val">${show ?? mdInline(cur == null ? '_TBD_' : cur)}</span>`
-    + `<textarea class="efield-input" hidden maxlength="120" rows="1" aria-label="${esc(label)}">${esc(cur == null || cur === '_TBD_' ? '' : cur)}</textarea>`
+    + `<textarea class="efield-input" hidden maxlength="254" rows="1" aria-label="${esc(label)}">${esc(cur == null || cur === '_TBD_' ? '' : cur)}</textarea>`
     + pencil(label);
 
   const now = Date.now();
@@ -1443,13 +1462,40 @@ function profilePage(slug) {
   const rel = `<div class="rel efield" data-key="relationship" data-label="Relationship">`
     + fieldHtml('Relationship', 'relationship', meta.get('Relationship') ?? null) + '</div>';
   const phoneRaw = meta.get('Phone') ?? null;
+  const emailRaw = meta.get('Email') ?? null;
+  // Birthday edits through a calendar (a native date input) plus a "no year" toggle
+  // for the very common yearless case ("my birthday's March 14"). The hidden
+  // .efield-input still holds the CANONICAL stored value ('YYYY-MM-DD' or '--MM-DD')
+  // and is what dirty-tracking, assemble() and the save all read — the picker only
+  // drives it — so the whole edit machinery is unchanged. .efield-val shows the
+  // human form (fmtBday); the client mirrors it after an edit.
+  const curBraw = meta.get('Birthday') ?? null;
+  // Placeholder detection mirrors person.js real(): strip wrapping _*()[] then match.
+  const bdayBare = String(curBraw == null ? '' : curBraw).trim().replace(/^[_*([\s]+|[_*)\]\s]+$/g, '');
+  const bdayPlaceholder = curBraw == null
+    || /^(unknown|tbd|n\/?a|none|not set|not provided|unset)$/i.test(bdayBare);
+  // The hidden input carries only a CANONICAL stored date, so the picker opens on a
+  // clean state for a placeholder or a legacy freeform value; a non-canonical value
+  // on disk is left untouched (the field stays non-dirty) unless the picker rewrites
+  // it. The display still shows a legacy value verbatim, and a placeholder shows TBD.
+  const curBcanon = normalizeBirthday(curBraw) || '';
+  const bdayShow = bdayPlaceholder ? null : fmtBday(curBraw);
+  const bdayField = `<span class="efield-val">${bdayShow ? esc(bdayShow) : '<em>TBD</em>'}</span>`
+    + '<span class="bday-edit" hidden>'
+      + '<input type="date" class="bday-date" min="1900-01-01" max="2100-12-31" aria-label="Birthday">'
+      + '<label class="bday-noyear"><input type="checkbox" class="bday-noyear-cb"> no year</label>'
+    + '</span>'
+    + `<textarea class="efield-input" hidden maxlength="120" rows="1" aria-label="Birthday">${esc(curBcanon)}</textarea>`
+    + pencil('Birthday');
   const clines = [
-    `<div class="cline">${CAKE_IC}<span class="efield" data-key="birthday" data-label="Birthday">`
-      + fieldHtml('Birthday', 'birthday', meta.get('Birthday') ?? null) + '</span></div>',
+    `<div class="cline">${CAKE_IC}<span class="efield efield-bday" data-key="birthday" data-label="Birthday">`
+      + bdayField + '</span></div>',
     `<div class="cline">${PHONE_IC}<span class="efield" data-key="phone" data-label="Phone">`
       + fieldHtml('Phone', 'phone', phoneRaw, phoneRaw == null ? null : esc(fmtPhone(phoneRaw))) + '</span></div>',
+    `<div class="cline">${MAIL_IC}<span class="efield" data-key="email" data-label="Email">`
+      + fieldHtml('Email', 'email', emailRaw) + '</span></div>',
   ];
-  const PLACED = new Set(['Relationship', 'Birthday', 'First contact', 'Last contact', 'Messages', 'Phone', 'Signal ID']);
+  const PLACED = new Set(['Relationship', 'Birthday', 'First contact', 'Last contact', 'Messages', 'Phone', 'Email', 'Signal ID']);
   for (const [label, v] of meta) if (!PLACED.has(label)) {
     clines.push(`<div class="cline"><span>${esc(label.toLowerCase())} <b>${mdInline(v)}</b></span></div>`);
   }
@@ -1617,7 +1663,7 @@ const PROFILE_EDIT_JS = `<script>(function(){
   var mode=window.matchMedia('(min-width: 980px)').matches?'split':'inline';
 
   function normSec(v){return v.replace(/\\r/g,'').replace(/^\\n+/,'').replace(/\\n+$/,'');}
-  function normFld(v){return v.replace(/[\\r\\n]+/g,' ').trim().slice(0,120);}
+  function normFld(v){return v.replace(/[\\r\\n]+/g,' ').trim().slice(0,254);}
   function dirtyUnits(){return units.filter(function(u){var ta=u.querySelector('.esrc');return normSec(ta.value)!==ta.defaultValue;});}
   function dirtyFlds(){return flds.filter(function(f){var inp=f.querySelector('.efield-input');return normFld(inp.value)!==inp.defaultValue;});}
 
@@ -1673,11 +1719,37 @@ const PROFILE_EDIT_JS = `<script>(function(){
     ta.addEventListener('keydown',function(e){if(e.key==='Escape'){e.stopPropagation();closeUnit(u);}});
   });
   function escText(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML;}
+  function isBday(f){return f.classList.contains('efield-bday');}
+  // Client mirror of fmtBday (server): canonical 'YYYY-MM-DD'/'--MM-DD' -> human line.
+  // Out-of-range months fall through to the raw string (never "undefined 1, 1990").
+  var MONF=['January','February','March','April','May','June','July','August','September','October','November','December'];
+  function fmtBdayJS(v){
+    v=(v||'').trim();if(!v)return '';
+    var m=/^(\\d{4})-(\\d{2})-(\\d{2})$/.exec(v);
+    if(m&&+m[2]>=1&&+m[2]<=12)return MONF[+m[2]-1]+' '+(+m[3])+', '+m[1];
+    m=/^--(\\d{2})-(\\d{2})$/.exec(v);
+    if(m&&+m[1]>=1&&+m[1]<=12)return MONF[+m[1]-1]+' '+(+m[2]);
+    return v;
+  }
+  function lcEmail(v){var at=v.lastIndexOf('@');return at>0?(v.slice(0,at+1)+v.slice(at+1).toLowerCase()):v;}
   function closeFld(f){
     var inp=f.querySelector('.efield-input'),val=f.querySelector('.efield-val');
     f.classList.remove('editing');inp.hidden=true;val.hidden=false;
-    var v=normFld(inp.value);
-    val.innerHTML=v?escText(v):'<em>TBD</em>';
+    if(isBday(f)){
+      var pk=f.querySelector('.bday-edit');if(pk)pk.hidden=true;
+      if(f._bdayDown){document.removeEventListener('pointerdown',f._bdayDown,true);f._bdayDown=null;}
+      // Not dirty -> restore the server-rendered display verbatim, so a legacy/freeform
+      // birthday ("March 14", or an out-of-range ISO) is never blanked to TBD just by
+      // opening or Cancelling. Dirty -> render the new canonical value.
+      if(inp.value===inp.defaultValue){val.innerHTML=f.dataset.origval||'<em>TBD</em>';}
+      else{var bv=normFld(inp.value);val.innerHTML=bv?escText(fmtBdayJS(bv)):'<em>TBD</em>';}
+    }else{
+      // Email: lowercase the domain on close so the Diff overlay and the saved file
+      // match normalizeEmail (which lowercases the domain server-side).
+      if(f.dataset.key==='email'&&inp.value){inp.value=lcEmail(normFld(inp.value));}
+      var v=normFld(inp.value);
+      val.innerHTML=v?escText(v):'<em>TBD</em>';
+    }
     refresh();
   }
   // The field editors are single-value textareas: they grow in height (never
@@ -1687,6 +1759,60 @@ const PROFILE_EDIT_JS = `<script>(function(){
   function sizeFld(inp){inp.style.height='auto';inp.style.height=inp.scrollHeight+'px';}
   flds.forEach(function(f){
     var inp=f.querySelector('.efield-input'),val=f.querySelector('.efield-val');
+    // Birthday: a calendar (native date input) + a "no year" toggle drive the hidden
+    // canonical .efield-input; everything downstream (dirty/assemble/save) reads that
+    // input unchanged. The date input is never edited as text, so no textarea path.
+    if(isBday(f)){
+      f.dataset.origval=val.innerHTML; // server-rendered display, restored when not dirty
+      var dt=f.querySelector('.bday-date'),ny=f.querySelector('.bday-noyear-cb'),pk=f.querySelector('.bday-edit');
+      var openB=function(){
+        f.classList.add('editing');val.hidden=true;pk.hidden=false;
+        var v=(inp.value||'').trim();
+        var mF=/^(\\d{4})-(\\d{2})-(\\d{2})$/.exec(v),mY=/^--(\\d{2})-(\\d{2})$/.exec(v);
+        // f.dataset.bsent='1' marks the year in the box as an INJECTED sentinel (we
+        // padded a yearless value with 2000 just so the calendar can show month/day).
+        // It must never be persisted as a real birth year.
+        if(mF){dt.value=v;ny.checked=false;f.dataset.bsent='';}
+        else if(mY){dt.value='2000-'+mY[1]+'-'+mY[2];ny.checked=true;f.dataset.bsent='1';}
+        else{dt.value='';ny.checked=false;f.dataset.bsent='';}
+        // Register the outside-click closer here (deferred so this open click doesn't
+        // immediately trigger it). Capture phase; the native calendar popup is not a
+        // page node, so clicking inside it does NOT fire this — fixing the old
+        // focusout bug that closed the picker when the calendar took focus.
+        if(!f._bdayDown){
+          f._bdayDown=function(e){if(!f.contains(e.target)&&f.classList.contains('editing'))closeFld(f);};
+          setTimeout(function(){document.addEventListener('pointerdown',f._bdayDown,true);},0);
+        }
+        dt.focus();
+      };
+      // Live-commit into the canonical input: '' when cleared, '--MM-DD' when the year
+      // is unknown, else 'YYYY-MM-DD'. Only slice a value we've confirmed is canonical
+      // (a text-fallback control could hold anything); a non-canonical value passes
+      // through for the server to validate rather than being sliced into garbage.
+      var commitB=function(){
+        var d=dt.value;
+        if(!d)inp.value='';
+        else if(/^\\d{4}-\\d{2}-\\d{2}$/.test(d))inp.value=ny.checked?('--'+d.slice(5)):d;
+        else inp.value=d;
+        refresh();
+      };
+      f.querySelector('.ebtn').addEventListener('click',openB);
+      val.addEventListener('click',openB);
+      // Touching the date box means the year is now the user's choice, not the sentinel.
+      dt.addEventListener('input',function(){f.dataset.bsent='';commitB();});
+      dt.addEventListener('change',function(){f.dataset.bsent='';commitB();});
+      ny.addEventListener('change',function(){
+        // Unchecking "no year" on an injected sentinel must NOT persist year 2000 —
+        // clear the box so the user picks a real full date deliberately.
+        if(!ny.checked&&f.dataset.bsent==='1'){dt.value='';f.dataset.bsent='';}
+        commitB();
+      });
+      pk.addEventListener('keydown',function(e){
+        if(e.key==='Enter'){e.preventDefault();e.stopPropagation();closeFld(f);}
+        else if(e.key==='Escape'){e.stopPropagation();inp.value=inp.defaultValue;closeFld(f);}
+      });
+      return;
+    }
     var open=function(){f.classList.add('editing');val.hidden=true;inp.hidden=false;inp.focus();sizeFld(inp);};
     f.querySelector('.ebtn').addEventListener('click',open);
     val.addEventListener('click',open);
@@ -2016,6 +2142,7 @@ const EDITABLE_FIELDS = [
   ['relationship', 'Relationship'],
   ['birthday', 'Birthday'],
   ['phone', 'Phone'],
+  ['email', 'Email'],
 ];
 
 // Added/removed line counts for a section edit's step label. A multiset diff,
@@ -2080,7 +2207,19 @@ function applyManualEdit(slug, payload) {
     for (const f of (Array.isArray(payload.fields) ? payload.fields : [])) {
       const label = byKey.get(f && f.key);
       if (!label) continue;
-      const value = String(f.value == null ? '' : f.value).replace(/[\r\n]+/g, ' ').trim().slice(0, 120) || '_TBD_';
+      let value = String(f.value == null ? '' : f.value).replace(/[\r\n]+/g, ' ').trim().slice(0, 254) || '_TBD_';
+      // Canonicalise (and reject) the two format-owned fields before anything is
+      // written. A cleared value ('_TBD_') skips this — clearing is always allowed.
+      if (value !== '_TBD_' && f.key === 'birthday') {
+        const norm = normalizeBirthday(value);
+        if (!norm) return { ok: false, status: 400, error: 'Birthday must be a full date (YYYY-MM-DD) or, when the year is unknown, month & day only (--MM-DD).' };
+        value = norm;
+      }
+      if (value !== '_TBD_' && f.key === 'email') {
+        const norm = normalizeEmail(value);
+        if (!norm) return { ok: false, status: 400, error: 'Email must be a valid address like name@example.com.' };
+        value = norm;
+      }
       let headerEnd = lines.findIndex((l) => /^## /.test(l));
       if (headerEnd === -1) headerEnd = lines.length;
       const re = new RegExp(`^- \\*\\*${label}:\\*\\* (.*)$`);
@@ -3297,6 +3436,51 @@ function shutdown() {
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
 
+// USER STOP (the Stop button on the job monitor). Kill the running job's whole
+// process tree exactly as the shutdown handler does — but keep the SERVER up. The
+// child's 'close' handler then records the SIGTERM exit, releases the lock, and
+// stops the queue, so no further per-person steps launch. An aborted ingest is
+// crash-safe (per-chunk merge frontier), so the partial work already committed
+// stands and the rest simply re-runs next time. Idempotent; a no-op when idle.
+function stopJob(id) {
+  if (!job || !job.running) return { ok: false, error: 'no run in progress' };
+  // Bind the stop to a specific job id: a confirm dialog left open in one tab must
+  // never kill a DIFFERENT run that was started meanwhile (from another tab).
+  if (id && job.id !== id) {
+    return { ok: false, error: 'that run already ended — a different run is now active' };
+  }
+  // Mark the queue halted FIRST. Even if the current step already exited 0 and its
+  // `close` is about to fire, runQueue now sees this flag and tears down as stopped
+  // instead of launching the next person. This is the real stop for a multi-person
+  // ingest — the kill below only ends the step that is still live.
+  job.stopping = true;
+  job.buf += '\n[stop requested — terminating run]';
+  const child = job.child;
+  // Only kill a child that is actually still alive. If the step already finished (its
+  // `close` is queued but not yet delivered), its pid may be dead or REUSED — on
+  // Windows `taskkill /T /F` on a recycled pid would kill an unrelated process tree.
+  // The stopping flag alone halts the queue in that case.
+  if (child && child.pid && child.exitCode == null && child.signalCode == null) {
+    const pid = child.pid;
+    if (process.platform === 'win32') {
+      try { require('child_process').spawnSync('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore' }); }
+      catch { try { child.kill('SIGTERM'); } catch { /* already gone */ } }
+    } else {
+      try { process.kill(-pid, 'SIGTERM'); } catch { try { child.kill('SIGTERM'); } catch { /* already gone */ } }
+      // Backstop: a `pi` grandchild that ignores SIGTERM must not outlive the run and
+      // overlap the next one (the lock frees when the leader's `close` fires). SIGKILL
+      // the whole process group shortly after. -pid stays valid while any member is
+      // alive; a fully-reaped group yields ESRCH, swallowed. Windows' taskkill /T /F is
+      // already synchronous + forced, so this backstop is POSIX-only.
+      const t = setTimeout(() => {
+        try { process.kill(-pid, 'SIGKILL'); } catch { /* group already gone */ }
+      }, 2000);
+      if (t.unref) t.unref();
+    }
+  }
+  return { ok: true };
+}
+
 const ARCHIVE_JS = path.join(ROOT, 'scripts', 'crm-archive.js');
 const DAILY_JS = path.join(ROOT, 'scripts', 'crm-daily.js');
 const TODO_JS = path.join(ROOT, 'scripts', 'crm-todo-scan.js');
@@ -3379,6 +3563,19 @@ function startJob(spec) {
 }
 
 function runQueue(cmds, i) {
+  // A user Stop (stopJob sets job.stopping) halts the queue between steps: tear down
+  // as a stopped run rather than launching the next person. This catches the race
+  // where the current step exited 0 (so its `close` took the success branch and
+  // called us) after Stop was pressed — without this, the queue would march on.
+  if (job.stopping && job.running) {
+    job.running = false;
+    job.child = null;
+    job.endedAt = Date.now();
+    if (job.exit == null) job.exit = -1;
+    job.buf += `\n[stopped by user — ${job.done} of ${cmds.length} step(s) completed]`;
+    if (job.lock) { job.lock.release(); job.lock = null; }
+    return;
+  }
   if (i >= cmds.length) {
     job.running = false;
     job.child = null;
@@ -3521,7 +3718,28 @@ function jobPage() {
     }
     setTimeout(tick,1200);
   })();</script>`;
-  return page(`${j.kind} — job ${j.id}`, render(V.job(j).body) + poll);
+  // Stop control — only while the run is live. Confirms, POSTs to /admin/jobs/stop,
+  // then reloads to the final (stopped) stamp. Work already committed is kept.
+  const stop = j.status === 'running'
+    ? '<div class="jobstop"><button type="button" id="btnStopRun" class="stopbtn">Stop run</button>'
+      + '<span class="stopnote" id="stopNote"></span></div>'
+    : '';
+  const stopJs = j.status === 'running' ? `<script>(function(){
+    var b=document.getElementById('btnStopRun'),n=document.getElementById('stopNote');if(!b)return;
+    var JOB_ID=${JSON.stringify(j.id)};
+    b.addEventListener('click',function(){
+      if(!confirm('Stop this run? Work already committed is kept — the rest simply re-runs next time.'))return;
+      b.disabled=true;b.textContent='Stopping…';
+      var opts={method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:JOB_ID})};
+      // Time the request out so a hung stop never leaves the button stuck disabled.
+      try{if(AbortSignal&&AbortSignal.timeout)opts.signal=AbortSignal.timeout(6000);}catch(e){}
+      fetch('/admin/jobs/stop',opts).then(function(r){return r.json();}).then(function(d){
+        if(d&&d.ok){if(n)n.textContent='stopping…';setTimeout(function(){location.reload();},1200);}
+        else{b.disabled=false;b.textContent='Stop run';if(n)n.textContent=(d&&d.error)||'could not stop';}
+      }).catch(function(){b.disabled=false;b.textContent='Stop run';if(n)n.textContent='could not reach server — try again';});
+    });
+  })();</script>` : '';
+  return page(`${j.kind} — job ${j.id}`, render(V.job(j).body) + stop + poll + stopJs);
 }
 
 function readBody(req, cb, limit = 64_000) {
@@ -3745,6 +3963,18 @@ function start() {
           } catch {
             try { send(400, page('Bad request', '<p>Bad request.</p>')); } catch { /* sent */ }
           }
+        });
+        return;
+      }
+      // STOP the running job (the monitor's Stop button). Kills the child tree but
+      // leaves the server up; the partial ingest already committed is crash-safe.
+      if (url.pathname === '/admin/jobs/stop' && req.method === 'POST') {
+        if (!firstPartyOnly(req)) { sendJson(403, { ok: false, error: 'cross-site request refused' }); return; }
+        readBody(req, (body) => {
+          let id = null;
+          try { id = (JSON.parse(body || '{}') || {}).id || null; } catch { /* no id — stop whatever runs */ }
+          const r = stopJob(id);
+          sendJson(r.ok ? 200 : 409, r);
         });
         return;
       }

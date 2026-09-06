@@ -420,6 +420,24 @@ tr.runrow.live .tw{border-left:3px solid var(--amber)}
    value's baseline (scoped: the global .ebtn is shared across the profile). */
 .cline .ebtn{position:relative;top:2.9px;margin-left:6px}
 .profile .efield-val{cursor:pointer}
+/* Birthday picker: a native date box + a "no year" toggle, sized and coloured to
+   sit in the mono contact line without shouting. Shown only while editing. */
+.bday-edit{display:inline-flex;align-items:center;gap:10px}
+.bday-edit[hidden]{display:none}
+.bday-date{font-family:"Courier Prime",monospace;font-size:12.5px;color:var(--ink);
+  padding:1px 4px;border:1px solid var(--rule);border-radius:4px;background:var(--paper);
+  color-scheme:light dark}
+.bday-noyear{display:inline-flex;align-items:center;gap:4px;font-family:"Courier Prime",monospace;
+  font-size:11.5px;color:var(--soft);cursor:pointer;user-select:none}
+.bday-noyear input{margin:0;cursor:pointer}
+/* Stop-run control on the job monitor: oxblood (the "needs a human" ink) so it
+   reads as the one interrupting action on the page without a loud fill. */
+.jobstop{display:flex;align-items:center;gap:12px;margin:16px 0 4px}
+.stopbtn{font-family:"Courier Prime",monospace;font-size:12.5px;color:var(--ox);
+  background:none;border:1px solid var(--ox);border-radius:5px;padding:5px 14px;cursor:pointer}
+.stopbtn:hover:not(:disabled){background:var(--ox);color:var(--paper)}
+.stopbtn:disabled{opacity:.55;cursor:default}
+.stopnote{font-family:"Courier Prime",monospace;font-size:11.5px;color:var(--soft)}
 /* Header pencils and editors wear stamp-blue (the design's edit affordance);
    sections keep the ox pencil. */
 .phead-id .ebtn{color:var(--stamp)}

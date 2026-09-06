@@ -94,7 +94,7 @@ The file's section order is fixed. Most profiles are missing one or both optiona
 ## Open questions     <- create immediately AFTER ## Timeline, at end of file
 ```
 
-**Metadata block (top of file).** Set `Last contact` to the latest date in the ledger — always, even on a week with nothing worth recording. Fill `Relationship` or `Birthday` only if it currently reads `_TBD_` or `_unknown_` **and** the messages state it clearly and unambiguously — any other value is Nathan's own entry and is never changed. Change no other field.
+**Metadata block (top of file).** Set `Last contact` to the latest date in the ledger — always, even on a week with nothing worth recording. Fill `Relationship` or `Birthday` only if it currently reads `_TBD_` or `_unknown_` **and** the messages state it clearly and unambiguously — any other value is Nathan's own entry and is never changed. Write `Birthday` as `YYYY-MM-DD`, or `--MM-DD` when the year was never stated — never a guessed year, never prose like "March 14". Change no other field.
 
 **`## What I know`** — durable facts worth remembering in a year, organized as one `###` section per topic. The **first-class topics** — school and career, money, health and wellbeing (including substances), living situation, dating and relationships, family, mutual friends and who knows whom, and how the friendship with Nathan itself works — each get a `### Heading` whose body has a fixed shape:
 
@@ -280,7 +280,7 @@ After the acknowledgment line, always emit the block below. It is machine input 
 - Standing objects have no period/as-of keys. Periodic objects require `period_start`, `period_end`, and should keep the source's words in `period_label`. Snapshot objects use `as_of` when stated; omit it when the message date is the only honest timestamp.
 - `value` is concise human-readable text. `value_num` and `unit` are optional and only used when the source gives a real numeric measurement.
 - Store invariants, derive variants: birthday rather than age, job start date rather than tenure, anniversary rather than years together. A stated age with no known birthday may be a `snapshot`, never `standing`.
-- Identity fields use these exact names when present: `relationship`, `birthday`, `phone`, `signal_id`. Do not emit the person's display name as a fact.
+- Identity fields use these exact names when present: `relationship`, `birthday`, `email`, `phone`, `signal_id`. `birthday` is `YYYY-MM-DD`, or `--MM-DD` when the year is unknown — anything else is dropped. `email` is one plain address (`local@domain`). Do not emit the person's display name as a fact.
 - `source_message_id` is one archive id that directly proves the fact: the `@m…` primary when its profile citation has one, otherwise the strongest single/end id. It must be from this ledger or copied from that fact's existing profile citation. Never guess it.
 - Do not turn personality summaries, conversational style, jokes, or talking points into atomic facts merely to fill the array.
 - Re-emit all current facts every run; storage handles retry deduplication.
