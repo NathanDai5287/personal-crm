@@ -50,6 +50,17 @@ function nickResolver() {
 }
 const { detect, redact } = require('../lib/redact');
 
+// Hard wall-clock cap on a single pi merge invocation. When it elapses, Node kills
+// the child and spawnSync/execFileSync return an ETIMEDOUT error, which classifies
+// as `transient` and triggers a retry. That retry is NOT free: Moonshot has already
+// billed the tokens generated up to the kill, and every retry re-sends the whole
+// chunk's context as fresh input tokens — so a chunk that repeatedly times out is
+// billed 2-3x for nothing usable. The cap therefore wants to be generous enough that
+// a genuinely long merge (a heavy contact's 900+ message chunk at thinking=high)
+// finishes on attempt 1, and only a truly hung stream ever hits it. 30 min default;
+// CRM_MERGE_TIMEOUT_MS overrides for tuning.
+const MERGE_TIMEOUT_MS = Number(process.env.CRM_MERGE_TIMEOUT_MS) || 1_800_000;
+
 // Bucket a failed pi run so the retry loop knows what to do:
 //   content_filter — a provider rejected the prompt on content grounds; retrying
 //                    verbatim is pointless, so the contact is held for manual review
@@ -288,7 +299,7 @@ function mergeContact(slug, opts = {}) {
           // the monitor still shows it.
           console.log(`crm-merge: ${slug}: -> ${opts.model || MERGE_MODEL}${opts.label ? ` [${opts.label}]` : ''}${attempt > 1 ? ` (attempt ${attempt})` : ''} ...`);
           const r = spawnSync(process.execPath, [PI_CLI, ...piArgs], {
-            cwd, stdio: ['ignore', 'inherit', 'pipe'], timeout: 600_000, env: piEnv,
+            cwd, stdio: ['ignore', 'inherit', 'pipe'], timeout: MERGE_TIMEOUT_MS, env: piEnv,
             encoding: 'utf8', maxBuffer: 16 * 1024 * 1024,
           });
           stderrCap = r.stderr || '';
@@ -298,7 +309,7 @@ function mergeContact(slug, opts = {}) {
           output = '';
         } else {
           output = execFileSync(process.execPath, [PI_CLI, ...piArgs], {
-            cwd, encoding: 'utf8', timeout: 600_000, maxBuffer: 16 * 1024 * 1024, env: piEnv,
+            cwd, encoding: 'utf8', timeout: MERGE_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024, env: piEnv,
           });
         }
         const fixed = normalizeLastContact(slug, cwd);
