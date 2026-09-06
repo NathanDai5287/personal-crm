@@ -49,6 +49,22 @@ assert.strictEqual(r.mentionsStored, 0);
 assert.strictEqual(currentFacts(h, 'alice')[0].value, 'New Co');
 assert.strictEqual(neighbors(h, 'alice').outbound.length, 0);
 
+// An identity fact with a null/invalid source_message_id is DROPPED, not fatal: the
+// chunk still commits its other facts (regression for "bad source_message_id for
+// relationship" hard-failing a whole billed chunk). A BODY fact with a bad id still throws.
+const hId = db();
+let rId = applyStructuredReply(hId, 'alice', reply([
+  { field: 'relationship', kind: 'standing', value: 'friend', source_message_id: null },
+  { field: 'employer', kind: 'standing', value: 'Acme', source_message_id: 20 },
+]), { resolve });
+assert.strictEqual(rId.factsStored, 1); // relationship dropped, employer kept
+assert.strictEqual(currentFacts(hId, 'alice').some((f) => f.field === 'relationship'), false);
+assert.strictEqual(currentFacts(hId, 'alice').find((f) => f.field === 'employer').value, 'Acme');
+assert.throws(() => applyStructuredReply(hId, 'alice', reply([
+  { field: 'employer', kind: 'standing', value: 'X', source_message_id: 999999 },
+]), { resolve }), /bad source_message_id for employer/);
+hId.close();
+
 // Exact replay is free: no duplicate fact.
 r = applyStructuredReply(h, 'alice', reply([newest]), { resolve, runId: 'run-2' });
 assert.strictEqual(r.factsStored, 0);
@@ -77,12 +93,19 @@ assert.throws(() => applyStructuredReply(h, 'alice', reply([
   { field: 'age', kind: 'standing', value: '26', source_message_id: 30 },
 ]), { resolve }), /derived/);
 assert.strictEqual(currentFacts(h, 'alice').some((f) => f.field === 'age'), false);
-assert.throws(() => applyStructuredReply(h, 'alice', reply([
-  { field: 'birthday', kind: 'standing', value: '--01-01', source_message_id: 999 },
-]), { resolve }), /missing archive message/);
-assert.throws(() => applyStructuredReply(h, 'alice', reply([
+// Identity facts with a bad/missing/out-of-chunk source id are DROPPED, never thrown —
+// they must not fail a billed chunk. (Body facts with a bad id still throw; see the
+// relationship/employer regression above.)
+let rIdDrop = applyStructuredReply(h, 'alice', reply([
+  { field: 'birthday', kind: 'standing', value: '--01-01', source_message_id: 999 }, // not in archive
+]), { resolve });
+assert.strictEqual(rIdDrop.factsStored, 0);
+assert.strictEqual(currentFacts(h, 'alice').some((f) => f.field === 'birthday'), false);
+rIdDrop = applyStructuredReply(h, 'alice', reply([
   { field: 'birthday', kind: 'standing', value: '--01-01', source_message_id: 20 },
-]), { resolve, validMessageIds: [30] }), /outside this chunk/);
+]), { resolve, validMessageIds: [30] }); // valid id, but outside this chunk
+assert.strictEqual(rIdDrop.factsStored, 0);
+assert.strictEqual(currentFacts(h, 'alice').some((f) => f.field === 'birthday'), false);
 assert.deepStrictEqual([...profileCitationIds('old ⟨m10-m20 @m15⟩')].sort((a, b) => a - b), [10, 15, 20]);
 applyStructuredReply(h, 'alice', reply([
   { field: 'birthday', kind: 'standing', value: '--01-01', source_message_id: 20 },
