@@ -27,6 +27,7 @@ const { storeNicknameProposals } = require('../lib/nicknames');
 const { trackedResolver } = require('../lib/people-resolve');
 const {
   applyStructuredReply, renderStructuredProfile, profileCitationIds, stripFactsSection,
+  factsInventoryText,
 } = require('../lib/structured-person');
 const { openCrmDb } = require('../lib/signal-db');
 const { ensureMessagesTable, markMerged } = require('../lib/archive');
@@ -121,6 +122,11 @@ function buildArgs(slug, mergePromptText, opts = {}) {
     // .new.txt at merge time (see mergeContact). Censoring is model-egress only; the
     // committed .new.txt stays uncensored — the faithful Rendered record.
     `@data/contacts/_refresh/${slug}.pi.txt`,
+    // Read-only reference: the facts already on record (field name, meaning, current
+    // value) so the model reuses field names instead of coining synonyms. Only present
+    // when this person already has facts (mergeContact writes the file first); omitted
+    // otherwise so a first-ever merge doesn't reference a missing @file.
+    ...(opts.factsRef ? [`@data/contacts/_refresh/${slug}.facts.txt`] : []),
     opts.userMessage || DEFAULT_USER_MESSAGE,
   ];
 }
@@ -249,7 +255,25 @@ function mergeContact(slug, opts = {}) {
     } catch { tempSession = null; sessionDir = null; }
   }
 
-  const piArgs = buildArgs(slug, mergePromptText, { ...opts, sessionDir });
+  // EXISTING-FACTS REFERENCE. Give the model the facts already on record (field name,
+  // meaning, current value) as a separate read-only @file, so it reuses a field when a
+  // message restates or updates it instead of coining a synonym that forks the history.
+  // Kept OUT of the profile the model edits so it can't leak into What-I-know prose.
+  // Production only (needs the real crm.db); best-effort — any failure just omits the
+  // reference and the merge proceeds. Deleted in the finally, like the .pi.txt ledger,
+  // so a transient copy of fact values never enters the committed memory history.
+  const factsRefPath = path.join(cwd, 'data', 'contacts', '_refresh', `${slug}.facts.txt`);
+  let factsRef = false;
+  if (!dryRun && cwd === ROOT) {
+    try {
+      const cdb = openCrmDb();
+      let inventory = '';
+      try { inventory = factsInventoryText(cdb, slug); } finally { cdb.close(); }
+      if (inventory) { fs.writeFileSync(factsRefPath, inventory); factsRef = true; }
+    } catch { /* no reference this run */ }
+  }
+
+  const piArgs = buildArgs(slug, mergePromptText, { ...opts, sessionDir, factsRef });
   const argv = [process.execPath, PI_CLI, ...piArgs];
 
   if (dryRun) {
@@ -465,6 +489,8 @@ function mergeContact(slug, opts = {}) {
     if (tempSession) { try { fs.rmSync(tempSession, { recursive: true, force: true }); } catch { /* best-effort */ } }
     // The censored model-copy is transient — never let it reach the committed history.
     try { fs.unlinkSync(piLedgerPath); } catch { /* already gone */ }
+    // The existing-facts reference is transient too — regenerated from crm.db each run.
+    try { fs.unlinkSync(factsRefPath); } catch { /* already gone */ }
   }
 }
 
