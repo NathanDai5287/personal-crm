@@ -43,7 +43,7 @@ system: |
 
   # Citation range
 
-  `range_start` and `range_end` bound the stretch a reader needs to understand the task **on its own**: the ask, the commitment, and any line that fixes what or when — the referent of "it", a deadline in a follow-up. The task row links to this stretch, so a range that stops at the trigger line loses the story.
+  `range_start` and `range_end` bound the stretch a reader needs to understand the task **on its own** — the cited messages must provide the complete context that led to it: the ask, the commitment, and any line that fixes what or when — the referent of "it", a deadline in a follow-up. The task row links to this stretch, so a range that stops at the trigger line loses the story.
 
   1. **Both endpoints are ids of lines visible in that trigger's own window**, and the range must contain the trigger line (`range_start ≤ msg_id ≤ range_end`). Never an id from another window, never an invented id.
   2. **Tight, not generous.** The shortest stretch that stands alone — start where the ask enters the conversation, end at the last line that bears on the task. Unrelated chatter before or after stays out; never cite the whole window by reflex.

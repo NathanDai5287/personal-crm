@@ -286,9 +286,9 @@ const MUTANTS = [
     after: GOOD.replace(' ⟨m1002⟩.', '.'),
   },
   {
-    name: 'citation leaked into Open questions',
-    expect: 'open_questions_uncited',
-    after: `${GOOD}\n## Open questions\n- Whether the Tesla start date slipped ⟨m1002⟩\n`,
+    name: 'Open question added with no citation',
+    expect: 'open_questions_cited',
+    after: `${GOOD}\n## Open questions\n- Whether the Tesla start date slipped\n`,
   },
   {
     name: 'talking point missing its citation',

@@ -181,8 +181,8 @@ function inline(s) {
 // people API): getPerson returns `talkingPoints`, and the roster/tasks read people
 // through PERSON.allPeople. parseSectionBullets stays here — it reads other sections.
 
-// Section-scoped bullet reader, for `## Open questions` (uncited by design) and
-// anything else worth surfacing as a task.
+// Section-scoped bullet reader, for `## Open questions` and anything else worth
+// surfacing as a task.
 function parseSectionBullets(md, heading) {
   const items = [];
   let inSection = false;

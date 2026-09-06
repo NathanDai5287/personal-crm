@@ -32,7 +32,6 @@ The most common merge mistake is quiet strengthening: a suggestion becomes a dec
 - **A question is not an answer.** Something asked and never answered is unresolved — record the asking, never the presumed answer, even when the asker sounds confident.
 - **Two remarks stay two facts.** Never combine details from separate exchanges into one richer sentence. If the messages didn't connect them, neither do you.
 - **No invented color.** Every hedge, mood, and qualifier you write ("jokingly", "reluctantly", "probably") must appear in the messages. A thin true note beats a vivid guess.
-- **Paraphrase; do not transcribe.** Profile prose is clean sentences in normal capitalisation and grammar — Nathan's notebook, never pasted texting. The exact wording is the citation's job: a reader who wants his words clicks through. Write "dislikes Apple", "says they are flush now", "found the wait at the bank absurd" — not "apple is so gay", "we rich rich now", "i waited like a million years for a banker". Keep a verbatim quote only when the exact phrasing is itself the fact — a genuine catchphrase, a nickname, a term they coined — keep those rare, and never alter a character inside a quote you keep. A hedge survives paraphrase as a hedge ("thinks he probably…"), so nothing here loosens the strength-matching above.
 
 Example — from these two lines:
 
@@ -59,7 +58,7 @@ Any of the three may additionally end with ` ts` before the closing bracket — 
 - **A range covers at most 10 of its conversation's lines.** Count them in the ledger. If the exchange runs longer, cite the strongest 10 or fewer — not the whole thing.
 - **Write it exactly:** smaller id first, ASCII hyphen, no spaces — `⟨m90211-m90219⟩`.
 - **Add `@` when one line states the fact.** A date, a name, a number, a decision usually lives in a single message: point at it and let the range carry the exchange around it. Prose distilled from a whole stretch has no such line — a bare range is the honest form there. The primary must be a line of the same conversation, inside the range.
-- **The cited messages must provide the complete context that led to the claim.** A reader shown only the lines inside the range — nothing before, nothing after — should be able to reach the exact conclusion it is cited for. If the claim depends on context outside the range, widen the range to include it (still within the 10-line cap) or cite a different stretch; never cite a fragment that only makes sense because you read the whole ledger. This holds in every section that carries citations — `## What I know`, `## Talking points`, and `## Open questions` alike.
+- **The range alone must prove the claim.** A reader shown only the lines inside the range — nothing before, nothing after — should be able to reach the exact conclusion it is cited for. If the claim depends on context outside the range, widen the range to include it (still within the 10-line cap) or cite a different stretch; never cite a fragment that only makes sense because you read the whole ledger.
 - **A hard-to-cite fact still goes in.** Citation difficulty is never a reason to drop something worth recording. If no stretch proves the whole claim on its own, record what the strongest stretch does prove — at that strength — and cite it. A thread never falls out of the profile because its range was hard to pick.
 - **Cite the strongest stretch, not the first.** When several stretches could back a claim, prefer the one where the exchange runs several messages rather than one line; where both people engage; where a quote-reply (`[re Nathan: "…"]`) shows the other person took it up; and where most lines inside the range are on-topic. A real exchange beats a passing mention.
 - **Separate moments get separate citations, at most 3 per claim.** A fact stated one week and confirmed the next carries two citations — never one wide range asserting everything in between. Recurrence within the same week is one moment, however many days it touches: cite its strongest stretch once, not one citation per mention. Only a later week's return to the topic is a new moment.
@@ -71,7 +70,7 @@ Some claims are only true for a while: a year in school ("sophomore"), an age ("
 
 ```
 Sophomore at UIUC ⟨m9651 ts⟩
-Grandma is 98 ⟨m9549 ts⟩ — laid-back and sharp …
+Grandma is 98 ⟨m9549 ts⟩ — "chill" and sharp …
 his main holds were ASTS and ServiceNow ⟨m71759-m71770 @m71770 ts⟩
 ```
 
@@ -106,66 +105,22 @@ Not rich — ~$80k of loans ahead — but always thinking of ways to make money.
 
 **Student loans:** Owes ~$80k at graduation; the payoff plan is grandma's inheritance.
 
-Expects ~$80k in student loans, which he finds a little stressful ⟨m9540-m9549 @m9540⟩. UIUC out-of-state tuition ~$45k/year ⟨m9589-m9591 @m9589⟩.
+Expects ~$80k in student loans — "a little" stressful ⟨m9540-m9549 @m9540⟩. UIUC out-of-state tuition ~$45k/year ⟨m9589-m9591 @m9589⟩.
 ```
 
 - **The line directly under the heading is the section's summary**: one plain sentence — no bold, no citations. It only restates what the cited detail below already proves; rewrite it whenever your edit changes what the section says, and never give the summary a fact the detail doesn't carry.
 - **A section owning several distinct threads splits into sub-topics** (two jobs, loans vs schemes vs stocks, one sub-topic per goal): a `**Sub-topic:**` label followed on the same line by that thread's own one-sentence summary (plain, uncited), then a blank line, then its detail paragraph(s). The label line never carries a citation: the moment a sentence needs one, it is detail, and it moves to a paragraph below the blank line. A single-thread section skips sub-topics — detail paragraphs sit right under the section summary. If a section you are editing has grown several threads, split it into sub-topics as part of your edit; each claim keeps its citation.
 - **Detail paragraphs carry the facts, cited per claim**: each checkable fact — a name, date, place, employer, number, status change — carries its citation immediately after the claim it supports, never pooled at the paragraph's end. Characterization prose ("dry humor", "the responsible one") is cited the same way, but its evidence is recurrence: a new trait starts with the single strongest range this ledger offers, and later merges add theirs alongside, up to 3 — three stretches from three different months say "pattern"; three from one Tuesday say "mood".
-- **Detail adds to the summary; it never argues for it.** The summary states the claim and the citation proves it — so a paragraph that restates the claim and then lists behaviours as evidence ("goes to Berkeley — used his @berkeley.edu address, talks about the RSF") has told the reader nothing the summary and its citation did not, and has put the proof in the prose where the citation belongs. Detail is for what is actually known beyond the headline: specifics, developments, the current state of the thread. Never write "X — [the behaviours that show X]". If all the ledger offers on a topic is weak evidence that something is true, write the bare fact with its citation and stop, or write nothing — and where a piece of that evidence is real content in its own right (an address is an `email` fact for `[[FACTS]]`; a gym habit is a wellbeing fact), record it as that, not as an argument.
 - **A blank line separates every block** — heading, summary, each sub-topic line, each paragraph.
 - **Bold belongs to structure only** — `**Sub-topic:**` and `**Notes:**`-style labels. Never bold an employer, a date, a title, or anything else inside summaries or detail prose.
 - A new fact joins the section that owns its topic; a first-class fact with no owner starts a new `###` section (before `### Notes`). A new **durable** fact on a first-class topic always goes in, at whatever length the evidence supports.
 - A profile still in the old shape (one bullet per topic under `## What I know`): convert a bullet into its `###` section only when your edit touches it; leave the others as they are. A profile whose `## What I know` still reads `_Not yet enriched._`: delete that placeholder line when you add the first `###` section.
 
-Worked example — the ledger shows him sending a `@berkeley.edu` address for a chapter calendar and naming Berkeley gyms. Wrong:
-
-```
-### UC Berkeley
-
-Student at UC Berkeley who also builds for BerkeleyTime.
-
-Goes to UC Berkeley — shared his @berkeley.edu email for the chapter calendar, and talks gym options in Berkeley terms (Unit 1, Benchmark, RSF) ⟨m92310-m92314 @m92311⟩.
-```
-
-The detail repeats the summary, then proves it with behaviour; the reader learns nothing new, and the proof was the citation's job. Right:
-
-```
-### UC Berkeley
-
-Student at UC Berkeley who also builds for BerkeleyTime.
-
-Student at UC Berkeley ⟨m92310-m92314 @m92311⟩; builds for BerkeleyTime ⟨m93077⟩.
-```
-
-The detail states what is known and lets the citations carry it; the address goes to `[[FACTS]]` as an `email` fact. When a later ledger says what year he is or what he builds, that is what the paragraph grows by — nuance, never more evidence.
-
-Everything else that stays true of the person over time — running bits and vocabulary, opinions and takes, skills and tastes, the current state of a hobby or game — is **texture**, and lives in `### Notes`, the last section of `## What I know`: one `**Label:** single short line` entry per topic, separated by blank lines, refreshed rather than grown. Voice and style are described, not reproduced — "swears freely; calls most things cringe" — in clean paraphrase; a genuine catchphrase may be quoted exactly, once, because there the wording is the fact. A new mention updates the line in place — swap the stale detail for the current one and bring a citation forward — it never adds a second sentence. Refreshing is compression, not deletion: once a topic has earned its Notes line it never falls out of the profile, and doubt about which tier a fact belongs to makes it texture, not absent.
+Everything else that stays true of the person over time — running bits and vocabulary, opinions and takes, skills and tastes, the current state of a hobby or game — is **texture**, and lives in `### Notes`, the last section of `## What I know`: one `**Label:** single short line` entry per topic, separated by blank lines, refreshed rather than grown. A new mention updates the line in place — swap the stale detail for the current one and bring a citation forward — it never adds a second sentence. Refreshing is compression, not deletion: once a topic has earned its Notes line it never falls out of the profile, and doubt about which tier a fact belongs to makes it texture, not absent.
 
 **`## Talking points`** — max 8 bullets: what to bring up next time — upcoming plans and dates, offers or asks still on the table (theirs or Nathan's), things they recently mentioned that matter to them (worries, wins, purchases, trips, people visiting), and follow-ups ("ask how X went", "did they watch what Nathan sent"). Every bullet ends with its citation(s). Create this section immediately before `## Timeline` if absent.
 
-**`## Open questions`** — things genuinely not yet known: an unanswered question, an unconfirmed hint, a plan nobody closed. One bullet per question, ending with its citation(s). A talking point is something to say next time; an open question is something not yet known — put an item in one, never both.
-
-- **The cited messages must provide the complete context that led to the question.** A reader shown only those lines should understand what was asked or left ambiguous and why it never got resolved — the ask, the non-answer, the deflection, the change of subject. In practice that is usually a range; a single id is right only when one line carries the whole of it. The mechanics are the same as everywhere else: one conversation, at most 10 of its lines, ids copied literally from this ledger (or carried forward), an optional `@` primary inside the range, at most 3 citations, none overlapping.
-- **An answered question is captured, then cleared.** When this ledger answers an open question, the answer does not vanish with it: first write the answer into the section that owns it — a durable fact into `## What I know`, an actionable follow-up into `## Talking points` — cited from this ledger, and only then remove the bullet from `## Open questions`. The whole point of keeping a question is that its answer, once known, becomes something the profile holds; deleting the question without recording the answer throws away exactly what it was kept to catch.
-
-Worked example — the ledger holds:
-
-```
-[2026-07-18 21:04] ⟨m88410⟩ Nathan: did u end up hearing back from the berlin lab
-[2026-07-18 21:09] ⟨m88412⟩ Priya: not yet, they said end of month
-[2026-07-18 21:10] ⟨m88413⟩ Priya: honestly might not even take it if they do
-[2026-07-18 21:11] ⟨m88414⟩ Nathan: wait why
-[2026-07-18 21:30] ⟨m88419⟩ Priya: anyway did u see the game
-```
-
-Write:
-
-```
-- Whether Priya would take the Berlin lab offer if it comes — she hinted she might not, and changed the subject before saying why ⟨m88410-m88419 @m88413⟩
-```
-
-The range runs from Nathan's question to her change of subject. `⟨m88413⟩` alone would show the hint but not that Nathan asked why and never got an answer — and that gap is what makes the question open. If a later ledger holds `⟨m91020⟩ Priya: took the berlin offer, start in october`, the question is answered: record the fact in `## What I know` (under `### Work`, cited `⟨m91020⟩`), then remove the bullet — never delete it and move on.
+**`## Open questions`** — things genuinely unresolved. Add ones the ledger raises (an unanswered question, an unconfirmed hint) and remove any it answers. Plain prose, no citations. A talking point is something to say next time; an open question is something not yet known — put an item in one, never both.
 
 # Handling conflict with what is already there
 
@@ -180,7 +135,7 @@ Worked example — the profile's `### Work` section already contains:
 ```
 **Latch.bio (summer 2026):** Interning as a SWE in Mission Bay; self-deprecating about his SWE skills.
 
-Started a summer 2026 internship at Latch.bio on June 1, 2026 ⟨m84210-m84218 @m84212 ts⟩ (SWE role, office in Mission Bay SF…). Self-deprecating about his own SWE ability ⟨m84619-m84623⟩.
+Started a summer 2026 internship at Latch.bio on June 1, 2026 ⟨m84210-m84218 @m84212 ts⟩ (SWE role, office in Mission Bay SF…). Self-deprecating that he "can't do SWE" ⟨m84619-m84623⟩.
 ```
 
 and the ledger adds:
@@ -195,7 +150,7 @@ Fold it into the sub-topic that owns the thread, and refresh the summary your ed
 ```
 **Latch.bio (summer 2026):** Interning as a SWE in Mission Bay — and by July, talking the company up.
 
-Started a summer 2026 internship at Latch.bio on June 1, 2026 ⟨m84210-m84218 @m84212 ts⟩ (SWE role, office in Mission Bay SF…). Self-deprecating about his own SWE ability ⟨m84619-m84623⟩ — but by July was talking up Latch's work, sending Nathan the company blog on their kimi-k3 benchmark findings ⟨m89166-m89167⟩.
+Started a summer 2026 internship at Latch.bio on June 1, 2026 ⟨m84210-m84218 @m84212 ts⟩ (SWE role, office in Mission Bay SF…). Self-deprecating that he "can't do SWE" ⟨m84619-m84623⟩ — but by July was talking up Latch's work, sending Nathan the company blog on their kimi-k3 benchmark findings ⟨m89166-m89167⟩.
 ```
 
 Fold even when the new detail reverses the framing — a new sub-topic is earned by a new thread, not by a new message about an old one. And note the citations: two back-to-back messages are one two-message range, not two citations; the new range sits on the new claim only; and every existing claim keeps the citation it already carries, character for character — those ids point at older ledgers you cannot see, and they are not yours to rewrite.
@@ -242,7 +197,7 @@ One merged bullet, one citation: the offer and its acceptance are a single excha
 ```
 
 ```
-- 2026-07-24 ask if he ever reached out to Abhi — Nathan pushed three separate times in July, Arshia stayed noncommittal, saying Abhi could figure it out himself ⟨m85943⟩ ⟨m86109-m86132⟩ ⟨m89506⟩
+- 2026-07-24 ask if he ever reached out to Abhi — Nathan pushed three separate times in July, Arshia stayed noncommittal ("he can figure it out") ⟨m85943⟩ ⟨m86109-m86132⟩ ⟨m89506⟩
 ```
 
 One talking point and nothing else: a single deflected ask is just an answer, but three deflections across weeks is a thread that never resolved. Three separate moments, three citations — the two same-day deflections collapse into one range, and stretching a single range from m85943 to m89506 would falsely assert the three weeks in between. A month of behavior is still an episode; only what will still be true of the person in a year touches `## What I know`.
@@ -308,7 +263,7 @@ Nathan | Wayne | ⟨m89204⟩
 
 After the acknowledgment line, always emit the block below. It is machine input and never belongs in the profile file.
 
-`[[FACTS]]` is a JSON array containing the current set of durable, atomic facts supported by the finished profile — carry forward still-current facts already in the profile that have a legal source id (see below) and add/change what this ledger supports. An empty set is `[]`. Each object has:
+`[[FACTS]]` is a JSON array containing the complete current set of durable, atomic facts supported by the finished profile — carry forward still-current facts already in the profile and add/change what this ledger supports. An empty set is `[]`. Each object has:
 
 ```
 [[FACTS]]
@@ -326,9 +281,9 @@ After the acknowledgment line, always emit the block below. It is machine input 
 - `value` is concise human-readable text. `value_num` and `unit` are optional and only used when the source gives a real numeric measurement.
 - Store invariants, derive variants: birthday rather than age, job start date rather than tenure, anniversary rather than years together. A stated age with no known birthday may be a `snapshot`, never `standing`.
 - Identity fields use these exact names when present: `relationship`, `birthday`, `email`, `phone`, `signal_id`. `birthday` is `YYYY-MM-DD`, or `--MM-DD` when the year is unknown — anything else is dropped. `email` is one plain address (`local@domain`). Do not emit the person's display name as a fact.
-- `source_message_id` is one archive id that directly proves the fact: the `@m…` primary when its profile citation has one, otherwise the strongest single/end id. It must be from this ledger or copied from that fact's existing profile citation. Never guess it, and never write `null` — a fact with no legal id is left out of the array, not emitted with a placeholder.
+- `source_message_id` is one archive id that directly proves the fact: the `@m…` primary when its profile citation has one, otherwise the strongest single/end id. It must be from this ledger or copied from that fact's existing profile citation. Never guess it.
 - Do not turn personality summaries, conversational style, jokes, or talking points into atomic facts merely to fill the array.
-- Re-emit every current fact that has a legal `source_message_id` each run; storage handles retry deduplication. The one class this excludes is an identity fact (`relationship`, `birthday`, `email`, `phone`, `signal_id`) that lives only in the metadata header, which carries no `⟨m…⟩` citation. Emit such a fact only when a message in this ledger states or confirms it (cite that message) or the profile body cites it somewhere you can copy from. When neither holds, leave it out: it is already stored and carries forward on its own. Omitting it is correct; inventing an id for it is a failure.
+- Re-emit all current facts every run; storage handles retry deduplication.
 
 # Before you finish
 
@@ -339,19 +294,17 @@ Check each of these. If any fails, fix it before replying:
 - `Last contact` is the latest date in the ledger; `Relationship` and `Birthday` were changed only from `_TBD_` or `_unknown_`.
 - Every id inside a citation you newly wrote — both endpoints and any `@` primary — appears literally in the ledger.
 - Every range you newly wrote has both endpoints in the same conversation, covers at most 10 of its lines, and its primary (if any) sits inside it.
-- Every citation you newly wrote is self-sufficient: the lines inside its range, read alone, provide the complete context for the claim it sits after — in whichever section it sits.
+- Every citation you newly wrote is self-sufficient: the lines inside its range, read alone, support the claim it sits after.
 - No claim carries more than 3 citations; no claim's citations overlap one another.
 - Every `###` section you touched has one plain-sentence summary directly under its heading, and every sub-topic line you touched has its own; summaries carry no citations and no bold.
 - A blank line separates every block you wrote; no bold appears anywhere except `**Sub-topic:**`/`**Label:**` structure.
 - Every ` ts` you wrote or moved sits inside the claim's newest citation; no ` ts` survives on a claim you anchored to a past period; every carried-forward citation is otherwise character-for-character unchanged.
 - Every `### Notes` entry you touched is still a single short line, refreshed in place.
-- Every detail paragraph you wrote adds something its summary does not say; none restates a claim and then lists behaviours as proof of it.
-- Everything you wrote is clean paraphrase in normal capitalisation and grammar; the only verbatim quotes are exact phrasings that are themselves the fact, copied unaltered.
 - Every `## Talking points` bullet has the `- YYYY-MM-DD … ⟨…⟩` shape — date unbolded; 8 or fewer bullets.
-- Every `## Open questions` bullet ends with 1–3 citations whose lines, read alone, show what was asked or left ambiguous and why it never resolved; every open question this ledger answered had its answer written into `## What I know` or `## Talking points` before its bullet was removed.
+- No citations in `## Open questions`.
 - Every `###` section you touched covers exactly one topic; surviving claims kept their existing citations.
 - Nothing you wrote is about you, these instructions, or the merge run itself; every claim is written at the strength its messages said it.
 - If you emitted a [[NICKNAMES]] block, it sits after the DONE/NO-OP line, every id in it appears literally in the ledger, no nickname is anyone's canonical name or a group-chat name, and every nickname belonging to someone other than the subject names its target as the first of three fields.
-- `[[FACTS]]` is present after the acknowledgment, contains a valid JSON array, and every structured source id obeys the rules above — no `null`, no guessed id; an identity fact this ledger neither states nor the profile body cites was left out, not padded.
+- `[[FACTS]]` is present after the acknowledgment, contains a valid JSON array, and every structured source id obeys the rules above.
 
 Then reply with **exactly one** acknowledgment line — `DONE — <n> talking points, <n> facts added/changed` on a real edit, or `NO-OP` when nothing was worth recording — followed by `[[FACTS]]`, plus a `[[NICKNAMES]]` block when one is due. The acknowledgment and the `[[FACTS]]` block are mandatory: the pipeline rejects and reruns an incomplete reply.

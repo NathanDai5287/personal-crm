@@ -460,24 +460,31 @@ function checkTalkingPointCap(ctx) {
   };
 }
 
-// SPLIT FROM prose_sections_uncited, which used to assert that NO prose section
-// carried citations. `## What I know` is now the section Nathan reads most and the
-// one a weak model can most quietly corrupt, so it is required to carry provenance
-// (prompts/merge-v6.md onward). `## Open questions` stays plain prose — it is
-// short, speculative and self-clearing, so ids there are noise.
-const UNCITED_SECTIONS = new Set(['## Open questions']);
-
-function checkOpenQuestionsUncited(ctx) {
-  const dirty = [];
-  for (const [h, body] of ctx.after.sections) {
-    if (!UNCITED_SECTIONS.has(h)) continue;
-    const ids = citationIds(body);
-    if (ids.size) dirty.push(`${h} (${ids.size})`);
+// INVERTED for merge v16: `## Open questions` now REQUIRES a citation on every bullet —
+// the cited messages must carry the complete context that raised the question (same
+// standard as `## What I know`). Fair to legacy exactly like wik_cited: only the bullets
+// THIS merge added or changed are judged, so a contact's pre-v16 uncited questions (and
+// the old plain-prose shape, which yields no bullets) are never retroactively failed.
+function checkOpenQuestionsCited(ctx) {
+  const before = ctx.before.sections.get('## Open questions');
+  const after = ctx.after.sections.get('## Open questions');
+  if (after === undefined) {
+    return { id: 'open_questions_cited', severity: 'medium', pass: true, detail: 'no Open questions section' };
   }
+  const norm = (s) => String(s).replace(/\s+/g, ' ').trim();
+  const priorBullets = new Set(bullets(before === undefined ? '' : before).map(norm));
+  const changed = bullets(after).filter((b) => !priorBullets.has(norm(b)));
+  if (!changed.length) {
+    return { id: 'open_questions_cited', severity: 'medium', pass: true, detail: 'section unchanged' };
+  }
+  const uncited = changed.filter((b) => citationIds(b).size === 0);
   return {
-    id: 'open_questions_uncited', severity: 'medium',
-    pass: dirty.length === 0,
-    detail: dirty.length ? `citations leaked into: ${dirty.join(', ')}` : 'clean',
+    id: 'open_questions_cited', severity: 'medium',
+    pass: uncited.length === 0,
+    detail: uncited.length
+      ? `${uncited.length} of ${changed.length} added/changed question(s) carry no ⟨m…⟩: `
+        + uncited.map((b) => `"${b.trim().slice(0, 60)}…"`).join(' ')
+      : `${changed.length} added/changed question(s), all cited`,
   };
 }
 
@@ -656,7 +663,7 @@ const ALL = [
   checkWriteScope, checkTimeline, checkCitedIdsFromLedger, checkCitationsResolve,
   checkCitationRangeValid,
   checkCitationCarryForward, checkCitationSyntax, checkTalkingPointFormat,
-  checkTalkingPointCap, checkOpenQuestionsUncited, checkWhatIKnowCited, checkWikSectionShape,
+  checkTalkingPointCap, checkOpenQuestionsCited, checkWhatIKnowCited, checkWikSectionShape,
   checkSectionOrder, checkMetadata,
   checkNoDerivedFacts, checkLastContact, checkInjection, checkNoop,
 ];
