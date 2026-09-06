@@ -111,8 +111,19 @@ const md = '# Alice\n- **Relationship:** friend\n\n## What I know\n\n### Work\nO
 const timeline = md.slice(md.indexOf('## Timeline'));
 const rendered = renderStructuredProfile(md, currentFacts(h, 'alice'));
 assert.strictEqual(rendered.slice(rendered.indexOf('## Timeline')), timeline);
-assert.match(rendered, /\*\*Employer:\*\* New Co ⟨m20⟩/);
-assert.doesNotMatch(rendered, /Old prose/);
+assert.match(rendered, /\*\*Employer:\*\* New Co ⟨m20⟩/); // body facts now live in ## Facts
+assert.match(rendered, /Old prose/); // the model's What I know prose is preserved, never clobbered
+// ## Facts is inserted after What I know and before Timeline.
+assert.match(rendered, /## What I know[\s\S]*Old prose[\s\S]*## Facts[\s\S]*## Timeline/);
+
+// Dedup: a field emitted as BOTH a snapshot and a standing collapses to one bullet.
+const dupRender = renderStructuredProfile('# D\n\n## What I know\n\nprose\n\n## Timeline\n', [
+  { id: 1, field: 'gpa', kind: 'standing', value: '3.5', src_msg: 10, observed_at: 100 },
+  { id: 2, field: 'gpa', kind: 'snapshot', value: '3.5', src_msg: 10, observed_at: 100, as_of: 100 },
+]);
+assert.strictEqual((dupRender.match(/\*\*Gpa:\*\*/g) || []).length, 1);
+// Re-rendering an already-rendered profile is idempotent — no second ## Facts section.
+assert.strictEqual((renderStructuredProfile(dupRender, []).match(/## Facts/g) || []).length, 1);
 
 // Replacement strings are data, and multiple identity facts render newest-wins.
 const injected = renderStructuredProfile(md, [

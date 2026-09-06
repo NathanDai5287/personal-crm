@@ -33,7 +33,7 @@ const P = require('../lib/nicknames');
 const PERSON = require('../lib/person');
 const { listCandidates, promoteOne, untrackSlug, WINDOW_DAYS, MIN_MSGS, MIN_INCOMING } = require('../lib/promote');
 const { writeFileAtomic } = require('../lib/atomic-write');
-const { factLabel } = require('../lib/structured-person');
+const { factLabel, distinctBodyFacts } = require('../lib/structured-person');
 const {
   recordFact, retractCurrentFact, mentionEdges, edgeCitations, recordReassign,
   normalizeBirthday, normalizeEmail,
@@ -549,8 +549,7 @@ function contactList() {
     // crm.db facts/counts + talking points). No second per-contact profile read.
     return PERSON.allPeople({ cdb }).map((person) => {
       const waiting = pending.get(person.slug, person.slug).n;
-      const structuredFacts = person.facts
-        .filter((f) => !['relationship', 'birthday', 'phone', 'signal_id'].includes(f.field)).slice(0, 3);
+      const structuredFacts = distinctBodyFacts(person.facts).slice(0, 3);
       const structured = structuredFacts.length
         ? structuredFacts.map((f) => mdInline(`**${factLabel(f.field)}:** ${f.value}${f.src_msg ? ` ⟨m${f.src_msg}⟩` : ''}`))
         : null;
@@ -1597,9 +1596,11 @@ function profilePage(slug) {
     const unitHtml = units.map((u, i) => {
       const text = sectionText(lines, u);
       if (u.level === 2 && text === lines[u.from].trimEnd()) return renderProfile(text, mdOpts);
-      // Structured facts are the source of truth; this section is rendered from
-      // crm.db after merges and is intentionally not hand-editable as prose.
-      if (u.level === 2 && u.heading === 'What I know') return renderProfile(text, mdOpts);
+      // The machine-owned `## Facts` section is regenerated from crm.db after every
+      // merge, so it is rendered read-only (no pencil): hand edits would be overwritten.
+      // `## What I know` is now the model's prose profile and IS hand-editable, like the
+      // other prose sections below.
+      if (u.level === 2 && u.heading === 'Facts') return renderProfile(text, mdOpts);
       const view = renderProfile(text, mdOpts).replace(/<\/h([23])>/, `${pencil(u.heading)}</h$1>`);
       return `<section class="eunit" data-idx="${i}" data-heading="${esc(u.heading)}">`
         + `<div class="eview">${view}</div>`
