@@ -22,7 +22,7 @@ const {
   BOT_SERVICE_ID,
 } = require('../lib/config');
 const { openCrmDb, openSignalDb } = require('../lib/signal-db');
-const { estIngestFromRows, isFree, fmtUsd } = require('../lib/cost');
+const { estIngestFromRows, fmtUsd } = require('../lib/cost');
 const { dateKey: ptDateKey, fmtLocal: ptLocal, weekStart, nextWeekStart, nextPacificDaily } = require('../lib/weeks');
 const { resolveSources, buildMessageQuery, buildArchiveQuery } = require('../lib/sources');
 const { validateCitations, ensureMessagesTable } = require('../lib/archive');
@@ -2435,10 +2435,15 @@ function dial(label, cadence, sinceMs, intervalMs, job, sched) {
 // sweep or merge lands, i.e. when `waiting` moves, so that is the cache key.
 const pendingCostCache = new Map(); // slug -> { waiting, est }
 function attachPendingCosts(roster) {
+  // Price against the model the run will actually use (the persisted ingest pick),
+  // not the config default — so the estimate matches the dollar figure the run
+  // reports. A per-run dropdown override the client hasn't submitted yet can still
+  // diverge; the model is in the cache key so a persisted change recomputes.
+  const mergeModel = RUN_MODELS.getModel('ingest') || MERGE_MODEL;
   const waiting = roster.filter((x) => x.waiting > 0);
   const stale = waiting.filter((x) => {
     const c = pendingCostCache.get(x.slug);
-    return !c || c.waiting !== x.waiting;
+    return !c || c.waiting !== x.waiting || c.model !== mergeModel;
   });
   if (stale.length) {
     const cdb = openCrmDb();
@@ -2446,7 +2451,7 @@ function attachPendingCosts(roster) {
       const q = cdb.prepare('SELECT sent_at, length(body) AS blen FROM messages WHERE contact_slug = ? AND id NOT IN (SELECT message_id FROM merged WHERE slug = ?) ORDER BY sent_at');
       for (const x of stale) {
         const rows = q.all(x.slug, x.slug);
-        pendingCostCache.set(x.slug, { waiting: x.waiting, est: estIngestFromRows(MERGE_MODEL, TIMELINE_MODEL, rows) });
+        pendingCostCache.set(x.slug, { waiting: x.waiting, model: mergeModel, est: estIngestFromRows(mergeModel, TIMELINE_MODEL, rows) });
       }
     } finally {
       cdb.close();
@@ -2455,7 +2460,7 @@ function attachPendingCosts(roster) {
   for (const x of waiting) {
     const est = pendingCostCache.get(x.slug).est;
     x.estCalls = est.calls;
-    x.estCostUsd = est.usd; // dollars, 0 for subscription models, null if unpriced
+    x.estCostUsd = est.usd; // dollars for the effective model, null if unpriced
     x.estDurSec = est.seconds; // wall-clock estimate (merges run sequentially)
   }
   return roster;
@@ -2538,13 +2543,12 @@ const JOB_MODAL_JS = `<script>(function(){
   if(!form)return;
   // The effective model per job, read LIVE from the card's <select> (so a just-
   // changed selection is reflected without a server restart), falling back to the
-  // pipeline default when "default" is chosen. free = anthropic/* (subscription),
-  // matching lib/cost isFree. ingest's model governs merge AND Timeline.
+  // pipeline default when "default" is chosen. ingest's model governs merge AND Timeline.
   var DEF=${JSON.stringify(JOB_DEFAULT_MODEL)};
   function modelFor(kind){
     var sel=form.querySelector('select[name="model:'+kind+'"]');
     var id=(sel&&sel.value)||DEF[kind]||'';
-    return {label:id?id.split('/').pop():'?',free:id.indexOf('anthropic/')===0};
+    return {label:id?id.split('/').pop():'?'};
   }
   function fmtUsd(v){if(!(v>0))return '$0';if(v<0.01)return '<$0.01';if(v<10)return '$'+v.toFixed(2);if(v<100)return '$'+v.toFixed(1);return '$'+Math.round(v);}
   function fmtDur(sec){sec=Math.round(sec);if(!(sec>0))return '~0s';if(sec<90)return '~'+sec+'s';var m=Math.round(sec/60);if(m<60)return '~'+m+'m';return '~'+Math.floor(m/60)+'h '+(m%60)+'m';}
@@ -2582,7 +2586,7 @@ const JOB_MODAL_JS = `<script>(function(){
       calls+=k;
       if(d===''||d==null){if(k>0)unknown=true;}else{sum+=parseFloat(d);}
     });
-    var money=mj.free?('on plan · '+mj.label):((unknown?'—':fmtUsd(sum))+' · '+mj.label);
+    var money=(unknown?'—':fmtUsd(sum))+' · '+mj.label;
     el.textContent='Est. '+money+'  ·  '+fmtDur(dur)+'  ·  '+calls+(calls===1?' week':' weeks');
   }
   function open(btn){
@@ -2712,18 +2716,16 @@ function rowForRun(r) {
 }
 
 // The ESTIMATED-cost cell for a model-calling run. Records written before cost
-// tracking have no costUsd field (undefined) → "—"; a subscription model is free.
+// tracking have no costUsd field (undefined) → "—"; every priced model shows its
+// real dollar figure.
 function costCell(r) {
   if (r.costUsd === undefined && r.costModel === undefined) return '—';
-  if (isFree(r.costModel)) return fmtUsd(0, { free: true });
   return fmtUsd(r.costUsd == null ? null : r.costUsd);
 }
 
 // The ACTUAL-cost cell, summed from pi's real session usage after the run.
-// Subscription models are $0; anything not captured (legacy rows, capture
-// failed, todo) reads "—".
+// Anything not captured (legacy rows, capture failed, todo) reads "—".
 function actualCell(r) {
-  if (isFree(r.costModel)) return fmtUsd(0, { free: true });
   return fmtUsd(r.actualCostUsd == null ? null : r.actualCostUsd);
 }
 
@@ -3015,7 +3017,7 @@ function runDetailPage(id) {
   } catch { /* older runs have no persisted log */ }
 
   // Estimated vs actual cost + duration for this run, when recorded.
-  const money = (v, model) => (isFree(model) ? 'on plan' : fmtUsd(v == null ? null : v));
+  const money = (v) => fmtUsd(v == null ? null : v);
   const costHtml = (run.costUsd !== undefined || run.actualCostUsd !== undefined)
     ? `<span class="sub"> · cost est ${esc(money(run.costUsd, run.costModel))} · actual ${esc(money(run.actualCostUsd, run.costModel))}</span>`
     : '';

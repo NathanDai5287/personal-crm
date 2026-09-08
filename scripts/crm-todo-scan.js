@@ -19,11 +19,10 @@
 // often as you like. A model is invoked ONLY when the regex fires, which on Nathan's real
 // history is about 0.2 times a month.
 //
-// PAID BY DEFAULT, AND GUARDED. Nathan: "i will not be using opus for anything in the app.
-// it will all be kimi models." moonshotai/* bills per token, so a run that would spend
-// refuses unless told to: --allow-paid, or CRM_ALLOW_PAID=1 in the scheduled task's
-// environment. At ~3,100 tokens per trigger this is pennies a year, but an unguarded
-// scheduled task that can spend money is a bad shape regardless of the amount.
+// PAID RUNS ARE GUARDED. A separately-metered model (moonshotai/* bills per token) is
+// refused unless told to spend: --allow-paid, or CRM_ALLOW_PAID=1 in the scheduled
+// task's environment. At ~3,100 tokens per trigger this is pennies a year, but an
+// unguarded scheduled task that can spend money is a bad shape regardless of the amount.
 
 const fs = require('fs');
 const path = require('path');
