@@ -26,6 +26,9 @@ const WT = ROOT;
 //                   Signal — but with a periodic .backup, not per-merge git.
 //   signal-key.txt  The Signal DB cipher key. Never belongs in any history.
 //   web-password.txt  Dashboard credential. Same reason.
+//   session-secret.txt  The web app's session-cookie HMAC key — anyone with it can
+//                    forge an admin session. Never commit.
+//   oauth.json      Google OAuth client_id/client_secret for Sign-In. Same reason.
 //   contacts/_raw   Bulk message dumps (katia's is 1.4MB). Regenerable from the
 //                   archive, so history buys nothing.
 //
@@ -46,6 +49,8 @@ const EXCLUDE = [
   ':(exclude)data/crm.db-shm',
   ':(exclude)data/signal-key.txt',
   ':(exclude)data/web-password.txt',
+  ':(exclude)data/session-secret.txt',
+  ':(exclude)data/oauth.json',
   ':(exclude)data/contacts/_raw',
   ':(exclude)data/contacts/_refresh/*.pi.txt',
   ':(exclude)data/_session-tmp',
@@ -83,7 +88,8 @@ ensureRepo();
 try {
   git('rm', '--cached', '-r', '--quiet', '--ignore-unmatch',
     'data/crm.db', 'data/crm.db-wal', 'data/crm.db-shm',
-    'data/signal-key.txt', 'data/web-password.txt', 'data/contacts/_raw');
+    'data/signal-key.txt', 'data/web-password.txt',
+    'data/session-secret.txt', 'data/oauth.json', 'data/contacts/_raw');
 } catch (e) {
   const out = (e.stdout || '') + (e.stderr || '');
   if (!/did not match|pathspec/i.test(out)) console.log('untrack issue:', out || e.message);

@@ -1,15 +1,17 @@
 // crm-web.js — a tiny, dependency-free local web app for browsing the CRM
 // profiles. Reads data/contacts/*.md LIVE on every request (so whatever the
-// daily pipeline last wrote is what you see), renders the Markdown to HTML,
-// and gates everything behind HTTP basic auth.
+// daily pipeline last wrote is what you see), renders the Markdown to HTML.
 //
 //   node scripts/crm-web.js            # http://localhost:8787
 //   CRM_WEB_PORT=9000 node scripts/crm-web.js
 //
-// Auth: username = WEB_USER (default "nathan"). Password comes from
-// env CRM_WEB_PASSWORD, else data/web-password.txt; if neither exists a random
-// one is generated, saved to that file, and printed here once. Local-only by
-// design — later this can be put behind a tunnel to reach crm.cal.taxi.
+// Auth: Google Sign-In (lib/auth-google) + signed session cookies (lib/session).
+// The owner (config.ADMIN_EMAIL) gets the full app; any other Google account
+// whose email UNIQUELY matches a contact's `email` sees ONLY that one page and
+// the conversations they were in — enforced structurally by lib/identity +
+// lib/lens, not by scattered checks. Reached over https via the cloudflared
+// tunnel at config.PUBLIC_ORIGIN (crm.cal.taxi). Requires GOOGLE_CLIENT_ID/
+// GOOGLE_CLIENT_SECRET (env or data/oauth.json).
 'use strict';
 const http = require('http');
 const fs = require('fs');
@@ -17,11 +19,16 @@ const path = require('path');
 const crypto = require('crypto');
 const { spawn, execFileSync } = require('child_process');
 const {
-  ROOT, CONTACTS_DIR, WEB_PORT, WEB_USER, WEB_PASSWORD_FILE,
+  ROOT, CONTACTS_DIR, WEB_PORT,
   TRACKED, LOGS_DIR, GITDIR, MERGE_MODEL, TIMELINE_MODEL,
   BOT_SERVICE_ID,
+  ADMIN_EMAIL, PUBLIC_ORIGIN, SESSION_SECRET_FILE, loadOauth,
 } = require('../lib/config');
 const { openCrmDb, openSignalDb } = require('../lib/signal-db');
+const session = require('../lib/session');
+const AUTHG = require('../lib/auth-google');
+const { resolveIdentity } = require('../lib/identity');
+const { guestLens } = require('../lib/lens');
 const { estIngestFromRows, fmtUsd } = require('../lib/cost');
 const { dateKey: ptDateKey, fmtLocal: ptLocal, weekStart, nextWeekStart, nextPacificDaily } = require('../lib/weeks');
 const { resolveSources, buildMessageQuery, buildArchiveQuery } = require('../lib/sources');
@@ -62,61 +69,26 @@ let GRAPH_CLIENT_JS = '';
 try { GRAPH_CLIENT_JS = fs.readFileSync(path.join(__dirname, '..', 'lib', 'view', 'graph-client.js'), 'utf8'); } catch { /* fallback table still works */ }
 
 // ---------------------------------------------------------------------------
-// Auth
+// Auth — Google Sign-In + signed session cookies (see lib/session,
+// lib/auth-google, lib/identity, lib/lens). The owner (ADMIN_EMAIL) gets the full
+// app; any other Google account whose email uniquely matches a contact sees only
+// that one page and the conversations they were in. No passwords anywhere.
 // ---------------------------------------------------------------------------
-function resolvePassword() {
-  if (process.env.CRM_WEB_PASSWORD) return process.env.CRM_WEB_PASSWORD;
-  try {
-    const p = fs.readFileSync(WEB_PASSWORD_FILE, 'utf8').trim();
-    if (p) return p;
-  } catch { /* not created yet */ }
-  const generated = crypto.randomBytes(12).toString('base64url');
-  fs.writeFileSync(WEB_PASSWORD_FILE, generated + '\n', { mode: 0o600 });
-  // Don't echo the secret to the journal — it's already persisted 0600 in the
-  // file. Print only where to read it, so `journalctl` can't leak the password.
-  console.log(`\n  No password set — generated one and saved it (0600) to:\n    ${WEB_PASSWORD_FILE}\n  Username: ${WEB_USER}\n  (read the file for the password)\n`);
-  return generated;
-}
+const SESSION_COOKIE = 'crm_session';
+const OAUTH_TMP_COOKIE = 'crm_oauth'; // short-lived: carries {state,nonce,verifier} across the redirect
+const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const OAUTH_TMP_TTL_MS = 10 * 60 * 1000;
 
-// Constant-time-ish credential check.
-function authOk(header, user, pass) {
-  if (!header || !header.startsWith('Basic ')) return false;
-  let decoded;
-  try { decoded = Buffer.from(header.slice(6), 'base64').toString('utf8'); } catch { return false; }
-  const i = decoded.indexOf(':');
-  if (i === -1) return false;
-  const gotUser = decoded.slice(0, i);
-  const gotPass = decoded.slice(i + 1);
-  const a = Buffer.from(gotUser + '\0' + gotPass);
-  const b = Buffer.from(user + '\0' + pass);
-  return a.length === b.length && crypto.timingSafeEqual(a, b);
+// The HMAC key for session cookies. Env wins; else data/session-secret.txt,
+// generated 0600 on first start. Rotating it signs everyone out.
+function resolveSessionSecret() {
+  if (process.env.CRM_SESSION_SECRET) return process.env.CRM_SESSION_SECRET;
+  try { const s = fs.readFileSync(SESSION_SECRET_FILE, 'utf8').trim(); if (s) return s; } catch { /* not created yet */ }
+  const gen = crypto.randomBytes(32).toString('base64url');
+  try { fs.writeFileSync(SESSION_SECRET_FILE, gen + '\n', { mode: 0o600 }); } catch { /* read-only fs: keep the in-memory secret */ }
+  console.log(`\n  No session secret set — generated one and saved it (0600) to:\n    ${SESSION_SECRET_FILE}\n`);
+  return gen;
 }
-
-// Per-client auth backoff (P5-4). Basic auth has no lockout of its own, so without
-// this a tunnelled endpoint would accept unlimited password guesses. Keyed by the
-// client — X-Forwarded-For's first hop when fronted by a tunnel, else the socket
-// address. A few misses are free (fat-finger); after that, an exponential lockout
-// capped at 15 min. A success clears the record. In-memory (resets on restart),
-// which is the right lifetime for a brute-force speed bump.
-const AUTH_FAILS = new Map(); // key -> { n, until }
-const AUTH_FREE_TRIES = 3;
-const AUTH_MAX_LOCK_MS = 15 * 60 * 1000;
-function authKey(req) {
-  const xff = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
-  return xff || (req.socket && req.socket.remoteAddress) || 'unknown';
-}
-function authBlockedMs(key) {
-  const rec = AUTH_FAILS.get(key);
-  return rec && rec.until > Date.now() ? rec.until - Date.now() : 0;
-}
-function authNoteFailure(key) {
-  const rec = AUTH_FAILS.get(key) || { n: 0, until: 0 };
-  rec.n += 1;
-  if (rec.n > AUTH_FREE_TRIES) rec.until = Date.now() + Math.min(1000 * 2 ** (rec.n - AUTH_FREE_TRIES), AUTH_MAX_LOCK_MS);
-  if (AUTH_FAILS.size > 5000) AUTH_FAILS.clear(); // bound the map against forged-key floods
-  AUTH_FAILS.set(key, rec);
-}
-function authClear(key) { AUTH_FAILS.delete(key); }
 
 // ---------------------------------------------------------------------------
 // Markdown rendering (compact, tuned for the profile format)
@@ -894,7 +866,7 @@ const SCROLL_TO_HIT = `<script>(function(){`
 // before and 10 after from the same conversation dimmed around it — resolved
 // from crm.db's archive (not Signal's DB), so cited messages stay viewable even
 // if Signal purges history.
-function messagePage(id) {
+function messagePage(id, opts = {}) {
   let cdb;
   try { cdb = openCrmDb(); } catch { return null; }
   try {
@@ -910,13 +882,13 @@ function messagePage(id) {
           .all(msg.conv_id, msg.sent_at, msg.sent_at, msg.id)
       : [];
     const dim = new Set([...before, ...after].map((m) => m.id));
-    const backHref = msg.contact_slug ? `/c/${encodeURIComponent(msg.contact_slug)}` : '/';
+    const backHref = opts.backHref || (msg.contact_slug ? `/c/${encodeURIComponent(msg.contact_slug)}` : '/');
     const body = `<div class="back"><a href="${backHref}">&larr; back</a></div>` +
       `<div class="profile"><h1>${esc(msg.conversation || 'Conversation')}</h1>` +
       `<p class="sub">source message <code>m${msg.id}</code>, shown with surrounding context</p>` +
       `<div class="charge">${msgBubbles(cdb, [...before, msg, ...after], msg.id, dim)}</div></div>` +
       SCROLL_TO_HIT;
-    return page(`m${msg.id} — ${msg.conversation || 'message'}`, body, '/');
+    return page(`m${msg.id} — ${msg.conversation || 'message'}`, body, opts.nav === false ? undefined : '/');
   } finally {
     try { cdb.close(); } catch { /* already closed */ }
   }
@@ -933,7 +905,7 @@ function messagePage(id) {
 // ARCHIVE, and the gaps that leaves (ids of other conversations, ids never
 // mirrored) are normal rather than errors. The 20 thread messages before the
 // range and the 10 after are shown dimmed; only in-range rows are the citation.
-function spanPage(start, end) {
+function spanPage(start, end, opts = {}) {
   if (end < start) return null;
   let cdb;
   try { cdb = openCrmDb(); } catch { return null; }
@@ -958,7 +930,7 @@ function spanPage(start, end) {
           .all(anchor.conv_id, end)
       : [];
     const dim = new Set([...before, ...after].map((m) => m.id));
-    const backHref = anchor.contact_slug ? `/c/${encodeURIComponent(anchor.contact_slug)}` : '/';
+    const backHref = opts.backHref || (anchor.contact_slug ? `/c/${encodeURIComponent(anchor.contact_slug)}` : '/');
     const span = `m${start}&ndash;m${end}`;
     const body = `<div class="back"><a href="${backHref}">&larr; back</a></div>` +
       `<div class="profile"><h1>${esc(anchor.conversation || 'Conversation')}</h1>` +
@@ -967,7 +939,7 @@ function spanPage(start, end) {
       `${anchor.conv_id ? ', shown with surrounding context' : ' (no conversation recorded for this row)'}</p>` +
       `<div class="charge">${msgBubbles(cdb, [...before, ...rows, ...after], null, dim)}</div></div>` +
       SCROLL_TO_HIT;
-    return page(`m${start}-m${end} — ${anchor.conversation || 'range'}`, body, '/');
+    return page(`m${start}-m${end} — ${anchor.conversation || 'range'}`, body, opts.nav === false ? undefined : '/');
   } finally {
     try { cdb.close(); } catch { /* already closed */ }
   }
@@ -3769,33 +3741,276 @@ function readBody(req, cb, limit = 64_000) {
 function isSafeSlug(s) { return /^[a-z0-9._-]+$/i.test(s) && !s.includes('..'); }
 function isSafeRunId(s) { return /^[A-Za-z0-9-]+$/.test(s); }
 
+// ---------------------------------------------------------------------------
+// Media serving (shared by the admin router and the guest router). Decrypts a
+// Signal attachment on demand and serves the ORIGINAL file. The guest router
+// calls this only AFTER its lens has confirmed the hash belongs to an in-scope
+// conversation; the admin router calls it unconditionally.
+// ---------------------------------------------------------------------------
+function serveOriginalMedia(req, res, hashHex, send) {
+  // Cross-site embed guard. A top-level navigation (opening "↗ original" in a new
+  // tab) sends Sec-Fetch-Site none/same-origin/same-site; only an off-site page
+  // embedding this URL (`<img src=…>`) sends 'cross-site'. Refuse that so private
+  // media can't be pulled into a third-party page riding the logged-in session.
+  if ((req.headers['sec-fetch-site'] || '').toLowerCase() === 'cross-site') {
+    res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' }); res.end('Cross-site request refused.'); return;
+  }
+  let sdb = null;
+  try {
+    sdb = openSignalDb();
+    const { buf, row } = decryptByHash(sdb, hashHex);
+    const ct = String(row.contentType || 'application/octet-stream');
+    const lc = ct.toLowerCase();
+    // INLINE ONLY for types the browser renders inertly. contentType is chosen by
+    // the Signal SENDER, so an attacker-picked `text/html` or `image/svg+xml` opened
+    // inline would run script on THIS origin with the logged-in session (stored XSS,
+    // full same-origin read/write). Positive allowlist (no text/*, no svg/xml) +
+    // nosniff (no MIME-sniffing a spoofed type up to HTML) + CSP sandbox (no script
+    // even if one slips the allowlist). Everything else downloads. See the
+    // 2026-08-23 stored-XSS entry in docs/ENGINEERING-LOG.md.
+    const INLINE_OK = new Set([
+      'image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/bmp', 'image/avif',
+      'image/heic', 'image/heif',
+      'audio/mp4', 'audio/mpeg', 'audio/ogg', 'audio/aac', 'audio/wav', 'audio/x-wav', 'audio/webm',
+      'video/mp4', 'video/webm', 'video/ogg', 'video/quicktime',
+      'application/pdf',
+    ]);
+    const inline = INLINE_OK.has(lc);
+    const EXTS = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/gif': '.gif', 'image/webp': '.webp',
+      'audio/mp4': '.m4a', 'audio/mpeg': '.mp3', 'audio/ogg': '.ogg', 'video/mp4': '.mp4', 'video/webm': '.webm',
+      'video/quicktime': '.mov', 'application/pdf': '.pdf' };
+    const name = `original-${hashHex.slice(0, 12)}${EXTS[lc] || ''}`;
+    res.writeHead(200, {
+      'Content-Type': ct,
+      'Content-Disposition': `${inline ? 'inline' : 'attachment'}; filename="${name}"`,
+      'X-Content-Type-Options': 'nosniff',
+      'Content-Security-Policy': 'sandbox',
+      'Cache-Control': 'private, no-store',
+    });
+    res.end(buf);
+  } catch {
+    send(404, page('Not found', '<div class="back"><a href="/">&larr; back</a></div><p>That attachment could not be opened — it may not be downloaded to this device, or is no longer on disk.</p>'));
+  } finally {
+    try { if (sdb) sdb.close(); } catch { /* already closed */ }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Session / identity plumbing
+// ---------------------------------------------------------------------------
+// A verified session (its {email}) -> { role, ... }. Admin is a pure email
+// compare (no DB); only a guest opens crm.db + the Signal DB to build its scope,
+// so an admin page load never pays the sqlcipher cost.
+function resolveIdentityForReq(sess) {
+  if (!sess || !sess.email) return { role: 'none', reason: 'no-session' };
+  const email = normalizeEmail(sess.email);
+  if (!email) return { role: 'none', reason: 'no-email' }; // never let null===null grant admin
+  const adminNorm = normalizeEmail(ADMIN_EMAIL);
+  // Case-insensitive on the full address: normalizeEmail lowercases only the domain.
+  if (adminNorm && email.toLowerCase() === adminNorm.toLowerCase()) {
+    return { role: 'admin', email };
+  }
+  let cdb = null; let sdb = null;
+  try { cdb = openCrmDb(); } catch { return { role: 'none', reason: 'no-db' }; }
+  try { sdb = openSignalDb(); } catch { try { cdb.close(); } catch { /* */ } return { role: 'none', reason: 'no-signal-db' }; }
+  try {
+    return resolveIdentity(sess, { cdb, sdb, adminEmail: ADMIN_EMAIL });
+  } catch { return { role: 'none', reason: 'resolve-error' }; }
+  finally {
+    try { cdb.close(); } catch { /* */ }
+    try { sdb.close(); } catch { /* */ }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Auth pages + OAuth flow
+// ---------------------------------------------------------------------------
+function loginPage(oauth) {
+  const configured = !!(oauth && oauth.clientId && oauth.clientSecret);
+  const btn = configured
+    ? '<p style="margin-top:22px"><a href="/auth/google/start" style="display:inline-block;padding:10px 18px;border:1px solid var(--rule);border-radius:8px;text-decoration:none;font-weight:600">Sign in with Google</a></p>'
+    : '<p class="sub">Sign-in is not configured on this server yet.</p>';
+  const body = `<div class="profile"><h1>Personal CRM</h1><p>Please sign in to continue.</p>${btn}</div>`;
+  return page('Sign in', body);
+}
+
+function noAccessPage(reason) {
+  if (reason) console.warn(`[auth] access denied: ${reason}`);
+  const body = '<div class="profile"><h1>No access</h1>'
+    + '<p>Your Google account isn’t linked to a page here.</p>'
+    + '<p class="sub"><a href="/auth/logout">Sign out</a></p></div>';
+  return page('No access', body);
+}
+
+function authStart(req, res, ctx) {
+  const { OAUTH, SESSION_SECRET, COOKIE_SECURE, redirect, send } = ctx;
+  if (!OAUTH.clientId || !OAUTH.clientSecret) {
+    send(503, page('Unavailable', '<div class="profile"><p>Sign-in is not configured.</p></div>'));
+    return;
+  }
+  const state = AUTHG.randomToken();
+  const nonce = AUTHG.randomToken();
+  const { verifier, challenge } = AUTHG.pkce();
+  const tmp = session.sign({ state, nonce, verifier }, SESSION_SECRET, OAUTH_TMP_TTL_MS);
+  res.setHeader('Set-Cookie', session.serializeCookie(OAUTH_TMP_COOKIE, tmp, { maxAgeMs: OAUTH_TMP_TTL_MS, secure: COOKIE_SECURE, sameSite: 'Lax' }));
+  const redirectUri = `${PUBLIC_ORIGIN}/auth/google/callback`;
+  redirect(AUTHG.authUrl({ clientId: OAUTH.clientId, redirectUri, state, nonce, codeChallenge: challenge }));
+}
+
+async function authCallback(req, res, url, ctx) {
+  const { OAUTH, SESSION_SECRET, COOKIE_SECURE, redirect, send } = ctx;
+  const clearTmp = session.serializeCookie(OAUTH_TMP_COOKIE, '', { maxAgeMs: 0, secure: COOKIE_SECURE });
+  const fail = (msg) => {
+    res.setHeader('Set-Cookie', clearTmp);
+    send(400, page('Sign-in failed', `<div class="profile"><h1>Sign-in failed</h1><p>${esc(msg)}</p><p class="sub"><a href="/login">Try again</a></p></div>`));
+  };
+  try {
+    const err = url.searchParams.get('error');
+    if (err) return fail(`Google returned an error (${err}).`);
+    const code = url.searchParams.get('code');
+    const state = url.searchParams.get('state');
+    if (!code || !state) return fail('Missing authorization code or state.');
+    const cookies = session.parseCookies(req.headers.cookie);
+    const tmp = session.verify(cookies[OAUTH_TMP_COOKIE], SESSION_SECRET);
+    if (!tmp || tmp.state !== state) return fail('Invalid or expired sign-in state.');
+    const redirectUri = `${PUBLIC_ORIGIN}/auth/google/callback`;
+    const claims = await AUTHG.exchangeCode({
+      code, clientId: OAUTH.clientId, clientSecret: OAUTH.clientSecret, redirectUri, codeVerifier: tmp.verifier,
+    });
+    if (!AUTHG.validateClaims(claims, { clientId: OAUTH.clientId, nonce: tmp.nonce })) {
+      return fail('Could not verify your Google identity.');
+    }
+    const token = session.sign({ email: String(claims.email).toLowerCase() }, SESSION_SECRET, SESSION_TTL_MS);
+    res.setHeader('Set-Cookie', [
+      clearTmp,
+      session.serializeCookie(SESSION_COOKIE, token, { maxAgeMs: SESSION_TTL_MS, secure: COOKIE_SECURE, sameSite: 'Lax' }),
+    ]);
+    redirect('/');
+  } catch {
+    return fail('Sign-in error. Please try again.');
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Guest router — default-deny allowlist. Every data read goes through `lens`,
+// which is scoped to the guest's own conversations, so no path here can name an
+// out-of-scope message, range or attachment.
+// ---------------------------------------------------------------------------
+// Message-date resolver like msgDates(), but scoped: an id outside the guest's
+// conversations resolves to null (its citation slip renders inert), so not even a
+// send-date of a third-party message leaks onto the guest's page.
+function msgDatesScoped(convIds) {
+  const set = convIds instanceof Set ? convIds : new Set(convIds || []);
+  let cdb = null; let q = null;
+  try { cdb = openCrmDb(); q = cdb.prepare('SELECT conv_id, sent_at FROM messages WHERE id = ?'); } catch { /* no db */ }
+  const cache = new Map();
+  return {
+    dateFor(id) {
+      if (!cache.has(id)) {
+        let ms = null;
+        if (q) { try { const r = q.get(id); if (r && r.conv_id != null && set.has(r.conv_id)) ms = r.sent_at; } catch { /* archive not ready */ } }
+        cache.set(id, ms);
+      }
+      return cache.get(id);
+    },
+    close() { if (cdb) { try { cdb.close(); } catch { /* closed */ } } },
+  };
+}
+
+// The guest's own profile, chromeless: the same Markdown renderer the admin page
+// uses (prose shown as-is, per Nathan), but no nav, no edit/history/nick/graph
+// controls. Citations remain live links into /m/… which the guest router gates.
+function guestProfilePage(slug, lens) {
+  const file = path.posix.join(CONTACTS_DIR, `${slug}.md`);
+  let md;
+  try { md = fs.readFileSync(file, 'utf8'); } catch { return null; }
+  const titleLine = md.split(/\r?\n/).find((l) => l.startsWith('# '));
+  const name = titleLine ? titleLine.slice(2).trim() : slug;
+  const dates = msgDatesScoped(lens.convIds);
+  try {
+    const bodyHtml = renderProfile(md, { dateFor: dates.dateFor, now: Date.now() });
+    return page(name, `<div class="profile">${bodyHtml}</div>`);
+  } finally {
+    dates.close();
+  }
+}
+
+function guestHandle(req, res, identity, url, ctx) {
+  const { send } = ctx;
+  const lens = guestLens(identity.convIds);
+  const p = url.pathname;
+  const backHref = `/c/${encodeURIComponent(identity.slug)}`;
+  const bare = (title, msg) => page(title, `<div class="profile"><p>${esc(msg)}</p></div>`);
+  const notFound = () => send(404, bare('Not found', 'Not found.'));
+
+  if (req.method !== 'GET') { send(405, bare('Not allowed', 'Not allowed.')); return; }
+
+  if (p === '/') { res.writeHead(302, { Location: backHref }); res.end(); return; }
+
+  const cm = p.match(/^\/c\/([^/]+)$/);
+  if (cm) {
+    const slug = decodeURIComponent(cm[1]);
+    // A guest may see EXACTLY their own page. Any other slug is indistinguishable
+    // from a nonexistent one (same 404), so the roster can't be probed.
+    if (!isSafeSlug(slug) || slug !== identity.slug) { notFound(); return; }
+    const html = guestProfilePage(slug, lens);
+    if (!html) { notFound(); return; }
+    send(200, html);
+    return;
+  }
+
+  const mm = p.match(/^\/m\/(\d+)$/);
+  if (mm) {
+    const id = Number(mm[1]);
+    if (!lens.canSeeMessage(id)) { notFound(); return; }
+    const html = messagePage(id, { nav: false, backHref });
+    if (!html) { notFound(); return; }
+    send(200, html);
+    return;
+  }
+
+  const ms = p.match(/^\/m\/(\d+)-(\d+)$/);
+  if (ms) {
+    const startId = Number(ms[1]);
+    const endId = Number(ms[2]);
+    if (!lens.canSeeSpan(startId)) { notFound(); return; }
+    const html = spanPage(startId, endId, { nav: false, backHref });
+    if (!html) { notFound(); return; }
+    send(200, html);
+    return;
+  }
+
+  const mh = p.match(/^\/media\/([0-9a-f]{16,})$/i);
+  if (mh) {
+    const hash = mh[1].toLowerCase();
+    if (!lens.canSeeAttachment(hash)) { notFound(); return; }
+    serveOriginalMedia(req, res, hash, send);
+    return;
+  }
+
+  send(403, bare('Not found', 'Not found.'));
+}
+
 function start() {
-  const PASSWORD = resolvePassword();
+  const SESSION_SECRET = resolveSessionSecret();
+  const OAUTH = loadOauth();
+  const COOKIE_SECURE = /^https:/i.test(PUBLIC_ORIGIN);
+  if (!OAUTH.clientId || !OAUTH.clientSecret) {
+    console.error('WARNING: Google OAuth is not configured (set GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET or data/oauth.json). Nobody can sign in until it is.');
+  }
   const server = http.createServer((req, res) => {
-    const akey = authKey(req);
-    const blockedMs = authBlockedMs(akey);
-    if (blockedMs > 0) {
-      res.writeHead(429, { 'Retry-After': String(Math.ceil(blockedMs / 1000)), 'Content-Type': 'text/plain; charset=utf-8' });
-      res.end(`Too many failed attempts — try again in ${Math.ceil(blockedMs / 1000)}s.`);
-      return;
-    }
-    if (!authOk(req.headers.authorization, WEB_USER, PASSWORD)) {
-      authNoteFailure(akey);
-      res.writeHead(401, { 'WWW-Authenticate': 'Basic realm="Personal CRM", charset="UTF-8"' });
-      res.end('Authentication required');
-      return;
-    }
-    authClear(akey);
     const send = (code, html) => { res.writeHead(code, { 'Content-Type': 'text/html; charset=utf-8' }); res.end(html); };
     const sendJson = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(obj)); };
+    const redirect = (loc) => { res.writeHead(302, { Location: loc }); res.end(); };
     // A malformed request must never kill the server: `new URL` throws on
     // bogus absolute-form targets and decodeURIComponent throws on bad
     // percent-encoding (e.g. /c/%zz) — both were uncaught process crashes.
     try {
-      const url = new URL(req.url, 'http://localhost');
+      const url = new URL(req.url, PUBLIC_ORIGIN);
 
-      // Self-hosted woff2 (see lib/view/shell.js). Immutable: the files only
-      // change with a redesign, which also changes the shell's fonts.css.
+      // Self-hosted woff2 (see lib/view/shell.js). PUBLIC (needed on /login too).
+      // Immutable: the files only change with a redesign, which also changes the
+      // shell's fonts.css.
       if (url.pathname.startsWith('/fonts/')) {
         try {
           const buf = fs.readFileSync(path.join(FONTS_DIR, path.basename(url.pathname)));
@@ -3804,6 +4019,33 @@ function start() {
         } catch { res.writeHead(404); res.end(); }
         return;
       }
+
+      // ---- Public auth surface (no session required) -----------------------
+      if (url.pathname === '/login') { send(200, loginPage(OAUTH)); return; }
+      if (url.pathname === '/auth/google/start') {
+        authStart(req, res, { OAUTH, SESSION_SECRET, COOKIE_SECURE, redirect, send });
+        return;
+      }
+      if (url.pathname === '/auth/google/callback') {
+        authCallback(req, res, url, { OAUTH, SESSION_SECRET, COOKIE_SECURE, redirect, send });
+        return;
+      }
+      if (url.pathname === '/auth/logout') {
+        res.setHeader('Set-Cookie', session.serializeCookie(SESSION_COOKIE, '', { maxAgeMs: 0, secure: COOKIE_SECURE }));
+        redirect('/login');
+        return;
+      }
+
+      // ---- Require a valid session -----------------------------------------
+      const cookies = session.parseCookies(req.headers.cookie);
+      const sess = session.verify(cookies[SESSION_COOKIE], SESSION_SECRET);
+      if (!sess) { redirect('/login'); return; }
+
+      // ---- Resolve role, then split the routers ----------------------------
+      const identity = resolveIdentityForReq(sess);
+      if (identity.role === 'none') { send(403, noAccessPage(identity.reason)); return; }
+      if (identity.role === 'guest') { guestHandle(req, res, identity, url, { send, sendJson }); return; }
+      // identity.role === 'admin' → the full app below, unchanged.
 
       // The interactive graph's client script (see graphPage). no-cache so a
       // redeploy is picked up on the next load without a stale cached copy.
@@ -3820,51 +4062,7 @@ function start() {
       // Browser-viewable types open inline (new tab); everything else downloads.
       const mediaHit = url.pathname.match(/^\/media\/([0-9a-f]{16,})$/i);
       if (mediaHit && req.method === 'GET') {
-        // Cross-site embed guard. A top-level navigation (opening "↗ original" in a new
-        // tab) sends Sec-Fetch-Site none/same-origin/same-site; only an off-site page
-        // embedding this URL (`<img src=…>`) sends 'cross-site'. Refuse that so private
-        // media can't be pulled into a third-party page riding the cached auth.
-        if ((req.headers['sec-fetch-site'] || '').toLowerCase() === 'cross-site') {
-          res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' }); res.end('Cross-site request refused.'); return;
-        }
-        let sdb = null;
-        try {
-          sdb = openSignalDb();
-          const { buf, row } = decryptByHash(sdb, mediaHit[1]);
-          const ct = String(row.contentType || 'application/octet-stream');
-          const lc = ct.toLowerCase();
-          // INLINE ONLY for types the browser renders inertly. contentType is chosen by
-          // the Signal SENDER, so an attacker-picked `text/html` or `image/svg+xml` opened
-          // inline would run script on THIS origin with the logged-in session (stored XSS,
-          // full same-origin read/write). Positive allowlist (no text/*, no svg/xml) +
-          // nosniff (no MIME-sniffing a spoofed type up to HTML) + CSP sandbox (no script
-          // even if one slips the allowlist). Everything else downloads. See the
-          // 2026-08-23 stored-XSS entry in docs/ENGINEERING-LOG.md.
-          const INLINE_OK = new Set([
-            'image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/bmp', 'image/avif',
-            'image/heic', 'image/heif',
-            'audio/mp4', 'audio/mpeg', 'audio/ogg', 'audio/aac', 'audio/wav', 'audio/x-wav', 'audio/webm',
-            'video/mp4', 'video/webm', 'video/ogg', 'video/quicktime',
-            'application/pdf',
-          ]);
-          const inline = INLINE_OK.has(lc);
-          const EXTS = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/gif': '.gif', 'image/webp': '.webp',
-            'audio/mp4': '.m4a', 'audio/mpeg': '.mp3', 'audio/ogg': '.ogg', 'video/mp4': '.mp4', 'video/webm': '.webm',
-            'video/quicktime': '.mov', 'application/pdf': '.pdf' };
-          const name = `original-${mediaHit[1].slice(0, 12)}${EXTS[lc] || ''}`;
-          res.writeHead(200, {
-            'Content-Type': ct,
-            'Content-Disposition': `${inline ? 'inline' : 'attachment'}; filename="${name}"`,
-            'X-Content-Type-Options': 'nosniff',
-            'Content-Security-Policy': 'sandbox',
-            'Cache-Control': 'private, no-store',
-          });
-          res.end(buf);
-        } catch {
-          send(404, page('Not found', '<div class="back"><a href="/">&larr; back</a></div><p>That attachment could not be opened — it may not be downloaded to this device, or is no longer on disk.</p>'));
-        } finally {
-          try { if (sdb) sdb.close(); } catch { /* already closed */ }
-        }
+        serveOriginalMedia(req, res, mediaHit[1], send);
         return;
       }
 
@@ -4297,7 +4495,7 @@ function start() {
     }
   });
   server.listen(WEB_PORT, '127.0.0.1', () => {
-    console.log(`Personal CRM web app: http://localhost:${WEB_PORT}  (user: ${WEB_USER})`);
+    console.log(`Personal CRM web app: http://localhost:${WEB_PORT}  (admin: ${ADMIN_EMAIL}, public origin: ${PUBLIC_ORIGIN})`);
   });
 }
 
