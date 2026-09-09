@@ -3410,7 +3410,7 @@ let job = null;
 // Per-step wall-clock cap for a launched job (P5-6): a hung child can't hold the
 // pipeline lock past this. Generous — a big backfill chunk-merge is legitimately
 // long; this only catches a genuine hang. Override with CRM_JOB_TIMEOUT_MS.
-const JOB_STEP_TIMEOUT_MS = Number(process.env.CRM_JOB_TIMEOUT_MS) || 60 * 60 * 1000;
+const JOB_STEP_TIMEOUT_MS = Number(process.env.CRM_JOB_TIMEOUT_MS) || 180 * 60 * 1000;
 
 // GRACEFUL SHUTDOWN (P5-1). On SIGTERM (systemctl stop/restart, or a bare `kill`) or
 // SIGINT, don't just die and orphan a running job's children — they'd keep writing
