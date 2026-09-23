@@ -20,7 +20,7 @@
 const fs = require('fs');
 const path = require('path');
 const { execFileSync, spawnSync } = require('child_process');
-const { ROOT, DATA_DIR, PI_CLI, MERGE_MODEL, MERGE_PROMPT, BOT_SERVICE_ID } = require('../lib/config');
+const { ROOT, DATA_DIR, PI_CLI, MERGE_MODEL, MERGE_PROMPT, BOT_SERVICE_ID, SELF_SLUG } = require('../lib/config');
 const { dateKey } = require('../lib/weeks');
 const { sumSessionCostUsd, sessionAssistantText } = require('../lib/cost');
 const { storeNicknameProposals } = require('../lib/nicknames');
@@ -159,7 +159,11 @@ function normalizeLastContact(slug, cwd) {
       try {
         const { DatabaseSync } = require('node:sqlite');
         const h = new DatabaseSync(db, { readOnly: true });
-        const r = h.prepare('select max(sent_at) t from messages where contact_slug = ? and src is not ?').get(slug, BOT_SERVICE_ID);
+        // Nathan's own profile has no contact_slug rows: its "last contact" is the newest
+        // human message in any conversation.
+        const r = slug === SELF_SLUG
+          ? h.prepare('select max(sent_at) t from messages where src is not ?').get(BOT_SERVICE_ID)
+          : h.prepare('select max(sent_at) t from messages where contact_slug = ? and src is not ?').get(slug, BOT_SERVICE_ID);
         h.close();
         // PACIFIC, NOT UTC. Every date this repo prints — ledger lines, week
         // boundaries, checkLastContact's ledgerMaxDate — is America/Los_Angeles

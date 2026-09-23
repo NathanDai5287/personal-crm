@@ -256,6 +256,8 @@ button{font:inherit;cursor:pointer}
    red box on a click). A soft border tint keeps a faint, non-red focus cue. */
 .dialmodel .dmsel:focus,.dialmodel .dmsel:focus-visible{outline:none;border-color:var(--soft)}
 .dialmodel .dmset{display:none}
+/* the same picker on Nathan's own roster row, beside its ingest button */
+.rowmodel{display:inline-flex;vertical-align:middle}
 
 /* ---- circulation ledger (runs / roster tables) -------------------------- */
 .ledger{background:var(--card);border:1px solid var(--rule);box-shadow:var(--shadow)}

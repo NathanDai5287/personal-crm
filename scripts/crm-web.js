@@ -538,6 +538,29 @@ function contactList() {
   }
 }
 
+// Nathan's own profile (lib/self.js) as the roster's last row: every archived message is
+// its source, so its bar is the whole archive vs its own merge frontier. It carries the
+// self-model picker (off by default) instead of a sweep button; ingesting it runs
+// `crm-daily --only nathan`. Not a person: never counted in "tracked".
+function selfRosterRow() {
+  const HOLD = require('../lib/censor-hold');
+  const cdb = openCrmDb();
+  try {
+    const all = cdb.prepare('SELECT COUNT(*) n, MAX(sent_at) mx FROM messages').get();
+    const waiting = cdb.prepare('SELECT COUNT(*) n FROM messages WHERE id NOT IN (SELECT message_id FROM merged WHERE slug = ?)').get(OWNER_SLUG).n;
+    const selfModel = RUN_MODELS.getModel('self');
+    return {
+      slug: OWNER_SLUG, name: 'Nathan (me)', rel: null, self: true,
+      selfModel, modelOptions: RUN_MODELS.MODELS,
+      last: all.mx ? ptDateKey(all.mx) : null,
+      held: all.n || 0, waiting, facts: [], heldReview: HOLD.isHeld(OWNER_SLUG),
+      stamp: !selfModel ? 'self off' : (waiting > 0 ? `${waiting} waiting` : null), stampBlue: true,
+    };
+  } finally {
+    cdb.close();
+  }
+}
+
 // Suggestions + the contact picker for the People-tab nickname inbox. `list` is a
 // contactList() result, reused so we don't re-query. Cite slips resolve like a
 // profile's. Suggestions come from lib/nicknames (assigned + unassigned).
@@ -1407,14 +1430,22 @@ function profilePage(slug) {
   try {
     const statDb = openCrmDb();
     try {
-      const lc = statDb.prepare('SELECT MAX(sent_at) mx FROM messages WHERE contact_slug = ? AND src IS NOT ?').get(slug, BOT_SERVICE_ID);
+      // Nathan's own profile has no contact_slug rows: its sources are every conversation.
+      const own = slug === OWNER_SLUG;
+      const where = own ? '1=1' : 'contact_slug = ?';
+      const wp = own ? [] : [slug];
+      const lc = statDb.prepare(`SELECT MAX(sent_at) mx FROM messages WHERE ${where} AND src IS NOT ?`).get(...wp, BOT_SERVICE_ID);
       if (lc && lc.mx) meta.set('Last contact', ptDateKey(lc.mx));
       // From me/them by DIRECTION (type), reliable regardless of which serviceId a
       // message was sent under; calls aren't messages, so the total is just
       // outgoing+incoming. The bot is dropped (src IS NOT the bot — NULL-safe).
-      const mine = statDb.prepare("SELECT COUNT(*) n FROM messages WHERE contact_slug = ? AND type = 'outgoing' AND src IS NOT ?").get(slug, BOT_SERVICE_ID).n;
-      const theirs = statDb.prepare("SELECT COUNT(*) n FROM messages WHERE contact_slug = ? AND type = 'incoming' AND src IS NOT ?").get(slug, BOT_SERVICE_ID).n;
-      if (mine + theirs > 0) meta.set('Messages', `${mine + theirs} total (${theirs} from them, ${mine} from me)`);
+      const mine = statDb.prepare(`SELECT COUNT(*) n FROM messages WHERE ${where} AND type = 'outgoing' AND src IS NOT ?`).get(...wp, BOT_SERVICE_ID).n;
+      const theirs = statDb.prepare(`SELECT COUNT(*) n FROM messages WHERE ${where} AND type = 'incoming' AND src IS NOT ?`).get(...wp, BOT_SERVICE_ID).n;
+      if (mine + theirs > 0) {
+        meta.set('Messages', own
+          ? `${mine + theirs} total (${theirs} from others, ${mine} from Nathan)`
+          : `${mine + theirs} total (${theirs} from them, ${mine} from me)`);
+      }
     } finally { statDb.close(); }
   } catch { /* fall back to the stored .md values */ }
   // `show` overrides the display form only — the input always edits the raw
@@ -1618,7 +1649,7 @@ function mePage() {
   } finally {
     dates.close();
   }
-  const v = V.me(nicks);
+  const v = V.me(nicks, PERSON.exists(OWNER_SLUG));
   const cfgJs = `<script>window.__EDIT_CFG=${JSON.stringify({ slug: OWNER_SLUG }).replace(/</g, '\\u003c')}</script>`;
   return page(v.title, render(v.body) + cfgJs + NN_JS);
 }
@@ -2412,18 +2443,24 @@ function attachPendingCosts(roster) {
   // reports. A per-run dropdown override the client hasn't submitted yet can still
   // diverge; the model is in the cache key so a persisted change recomputes.
   const mergeModel = RUN_MODELS.getModel('ingest') || MERGE_MODEL;
+  // Nathan's own row runs on the self model; with self off it runs nothing (est 0).
+  const modelOf = (x) => (x.self ? x.selfModel : mergeModel);
   const waiting = roster.filter((x) => x.waiting > 0);
   const stale = waiting.filter((x) => {
     const c = pendingCostCache.get(x.slug);
-    return !c || c.waiting !== x.waiting || c.model !== mergeModel;
+    return !c || c.waiting !== x.waiting || c.model !== modelOf(x);
   });
   if (stale.length) {
     const cdb = openCrmDb();
     try {
       const q = cdb.prepare('SELECT sent_at, length(body) AS blen FROM messages WHERE contact_slug = ? AND id NOT IN (SELECT message_id FROM merged WHERE slug = ?) ORDER BY sent_at');
+      const qSelf = cdb.prepare('SELECT sent_at, length(body) AS blen FROM messages WHERE id NOT IN (SELECT message_id FROM merged WHERE slug = ?) ORDER BY sent_at');
       for (const x of stale) {
-        const rows = q.all(x.slug, x.slug);
-        pendingCostCache.set(x.slug, { waiting: x.waiting, model: mergeModel, est: estIngestFromRows(mergeModel, TIMELINE_MODEL, rows) });
+        const model = modelOf(x);
+        const est = x.self
+          ? (model ? estIngestFromRows(model, model, qSelf.all(OWNER_SLUG)) : { calls: 0, usd: 0, seconds: 0 })
+          : estIngestFromRows(mergeModel, TIMELINE_MODEL, q.all(x.slug, x.slug));
+        pendingCostCache.set(x.slug, { waiting: x.waiting, model, est });
       }
     } finally {
       cdb.close();
@@ -2440,7 +2477,8 @@ function attachPendingCosts(roster) {
 
 function adminData() {
   const now = Date.now();
-  const roster = attachPendingCosts(contactList());
+  // Nathan's own profile rides the roster as its last row (selfRosterRow).
+  const roster = attachPendingCosts([...contactList(), selfRosterRow()]);
   let kept = 0;
   let span = '—';
   const cdb = openCrmDb();
@@ -2466,7 +2504,7 @@ function adminData() {
   const heldReview = roster.filter((x) => x.heldReview).length;
   const HOUR = 3600000;
   const health = {
-    kept: kept.toLocaleString(), span, tracked: roster.length,
+    kept: kept.toLocaleString(), span, tracked: roster.filter((x) => !x.self).length,
     stranded: '—', strandedSub: 'deep-sweep to verify',
     lastSweep: sweepMs == null ? '—' : fmtAgo(sweepMs), lastSweepSub: sweepMs == null ? 'never run' : 'ago · hourly',
     sweepStale: sweepMs != null && sweepMs > 90 * 60000,
@@ -3502,7 +3540,9 @@ function jobCommands({ kind, slugs, deep, plan }) {
     return people.map((s) => [ARCHIVE_JS, ...(s ? ['--only', s] : []), ...(deep ? ['--deep'] : [])]);
   }
   if (kind === 'ingest') {
-    const people = slugs.length ? slugs : loadTrackedSlugs();
+    // "Everyone" includes Nathan's own profile when a self model is chosen (it runs last,
+    // as crm-daily --only nathan — the same per-profile step as a contact).
+    const people = slugs.length ? slugs : [...loadTrackedSlugs(), ...(RUN_MODELS.getModel('self') ? [OWNER_SLUG] : [])];
     // --force: a hand-started run always bypasses the web-UI run-toggle pause.
     return people.map((s) => [DAILY_JS, '--only', s, ...(plan ? ['--dry-run'] : []), '--force']);
   }

@@ -55,6 +55,14 @@
 //   node crm-timeline.js --slug katia-jacoby   # one contact
 //   node crm-timeline.js --group third-woman   # one group
 //   node crm-timeline.js --no-llm              # structural only, skip summaries
+//   node crm-timeline.js --self-model <id>     # also build Nathan's own Timeline (lib/self.js)
+//                                              # on that model; with --slug nathan, only his
+//
+// NATHAN'S OWN TIMELINE (lib/self.js) is the same tier engine over EVERY archived
+// conversation, with its own template (prompts/self-compact.md) and its own model. Its raw
+// input is GROUPED BY CONVERSATION (one block per chat, blank line between blocks, every
+// line labelled `(DM: Name)` / `(<group>)`), which is the shape that template documents.
+// It runs only when crm-daily passes --self-model (i.e. a self model is chosen in the UI).
 
 const fs = require("fs");
 const path = require("path");
@@ -86,6 +94,8 @@ const {
   PI_CLI,
   TIMELINE_MODEL,
   TIMELINE_PROMPT,
+  SELF_SLUG,
+  SELF_TIMELINE_PROMPT,
 } = require("../lib/config");
 
 const DAY = 86_400_000;
@@ -121,6 +131,12 @@ const groupArg = argVal("--group");
 // CRM_TIMELINE_MODEL env / default. Timeline is not a UI job, so there is no
 // separate dropdown here — ingest's model governs it, passed in via --model.
 const TIMELINE_MODEL_EFF = argVal("--model") || TIMELINE_MODEL;
+// Nathan's own Timeline runs on the self model, passed in by crm-daily. Absent = the self
+// pass is off and his Timeline is not built.
+const SELF_MODEL_EFF = argVal("--self-model");
+// A self week is every conversation at once (median ~86k tokens of raw lines), so its
+// summary call gets far longer than a contact week's 2 minutes.
+const SELF_CALL_TIMEOUT_MS = 600_000;
 
 
 // Replaces the original claude.exe call: invoke `pi` headless, prompt via
@@ -131,11 +147,11 @@ const TIMELINE_MODEL_EFF = argVal("--model") || TIMELINE_MODEL;
 // the ledger; deleted after the run. null → stay ephemeral (--no-session).
 let SESSION_CAPTURE = null;
 
-function piSummarize(prompt, system) {
+function piSummarize(prompt, system, { model = TIMELINE_MODEL_EFF, timeoutMs = 120_000 } = {}) {
   if (NO_LLM) return "(summary skipped: --no-llm)";
   try {
     const sessionArgs = SESSION_CAPTURE ? ["--session-dir", SESSION_CAPTURE] : ["--no-session"];
-    const argv = [PI_CLI, "-p", ...sessionArgs, "-nc", "--no-extensions", "--no-skills", "--no-tools", "--model", TIMELINE_MODEL_EFF];
+    const argv = [PI_CLI, "-p", ...sessionArgs, "-nc", "--no-extensions", "--no-skills", "--no-tools", "--model", model];
     // v1 declares no system prompt — the whole contract sits in the user turn,
     // which was the review's top finding. A variant that declares one gets it
     // on the system channel where models weight it more heavily.
@@ -147,7 +163,7 @@ function piSummarize(prompt, system) {
         input: prompt,
         cwd: require("os").tmpdir(),
         encoding: "utf8",
-        timeout: 120_000,
+        timeout: timeoutMs,
         maxBuffer: 16 * 1024 * 1024,
         env: { ...process.env, PI_SKIP_VERSION_CHECK: "1", PI_OFFLINE: "1" },
       },
@@ -194,12 +210,18 @@ function isBadSummary(s) {
   return !s || /^\((summary (failed|skipped)|no result)/.test(String(s).trim());
 }
 
-let TIMELINE_TEMPLATE = null;
-function summarize(who, periodLabel, lines, style) {
+// Templates are loaded once per file. `ctx` picks the template, model and call timeout —
+// the contact/group defaults, or Nathan's own (see buildSelfTimeline). Passed per call,
+// never swapped globally, so a self summary can never go out on the contact template.
+const TEMPLATES = new Map();
+function templateFor(file) {
+  if (!TEMPLATES.has(file)) TEMPLATES.set(file, loadTemplate(file));
+  return TEMPLATES.get(file);
+}
+function summarize(who, periodLabel, lines, style, ctx = {}) {
   if (lines.length === 0) return null;
-  if (TIMELINE_TEMPLATE === null) TIMELINE_TEMPLATE = loadTemplate(TIMELINE_PROMPT);
-  const { system, user } = buildSummaryPrompt(who, periodLabel, lines, style, TIMELINE_TEMPLATE);
-  return piSummarize(user, system);
+  const { system, user } = buildSummaryPrompt(who, periodLabel, lines, style, templateFor(ctx.templateFile || TIMELINE_PROMPT));
+  return piSummarize(user, system, { model: ctx.model || TIMELINE_MODEL_EFF, timeoutMs: ctx.timeoutMs || 120_000 });
 }
 
 // ---- timeline block parsing --------------------------------------------------
@@ -359,7 +381,10 @@ function renderTimeline(t, { includeGroup }) {
 // Speaker labels were attributed once, at archive time (sender column).
 // Rows from all sources are merged in time order, so a contact's timeline
 // interleaves their DM and their group chats exactly like refresh ledgers do.
-function messagesBetween(cdb, convs, fromMs, toMs) {
+// opts.grouped (the self Timeline): instead of one interleaved list, emit one block per
+// conversation — its lines in time order — blocks ordered by their first message and
+// separated by an empty line.
+function messagesBetween(cdb, convs, fromMs, toMs, opts = {}) {
   const rows = [];
   for (const c of convs) {
     let sql = `SELECT id AS rid, body, sent_at, type, src AS sourceServiceId, sender, att_hashes FROM messages
@@ -376,10 +401,26 @@ function messagesBetween(cdb, convs, fromMs, toMs) {
     for (const r of cdb.prepare(sql + " ORDER BY sent_at ASC").all(...params)) rows.push({ ...r, _c: c });
   }
   rows.sort((a, b) => a.sent_at - b.sent_at || a.rid - b.rid);
+  const fmt = (m) => formatLine({ sentAt: m.sent_at, rid: m.rid, prefix: m._c.prefix || "", sender: m.sender, body: renderedBody(cdb, m) });
+  let lines;
+  if (opts.grouped) {
+    const blocks = new Map(); // convId -> rows; insertion order = first-message order
+    for (const m of rows) {
+      if (!blocks.has(m._c.convId)) blocks.set(m._c.convId, []);
+      blocks.get(m._c.convId).push(m);
+    }
+    lines = [];
+    for (const list of blocks.values()) {
+      if (lines.length) lines.push("");
+      for (const m of list) lines.push(fmt(m));
+    }
+  } else {
+    lines = rows.map(fmt);
+  }
   return {
     // Uncensored RENDERED lines (body + OCR/STT fold). Censoring is applied at model
     // egress in buildSummaryPrompt (the timeline model's only entry point), never here.
-    lines: rows.map((m) => formatLine({ sentAt: m.sent_at, rid: m.rid, prefix: m._c.prefix || "", sender: m.sender, body: renderedBody(cdb, m) })),
+    lines,
     senders: new Set(rows.map((r) => r.sourceServiceId).filter(Boolean)),
   };
 }
@@ -416,7 +457,7 @@ function weekStartOfKey(weekKey) {
 
 // Mutates `t` (daily/weekly/monthly/older maps). Returns { summaries, attempts,
 // newWeeklies, historyFrom }.
-function buildConvTiers(cdb, convs, who, since, now, t) {
+function buildConvTiers(cdb, convs, who, since, now, t, ctx = {}) {
   let summaries = 0;
   let attempts = 0; // model calls this run WOULD make — the cost preview under --no-llm
   const newWeeklies = new Map();
@@ -445,10 +486,10 @@ function buildConvTiers(cdb, convs, who, since, now, t) {
     if (wStart < since) continue;
     const key = dateKey(wStart);
     if (t.weekly.has(key)) continue;
-    const lines = messagesBetween(cdb, convs, wStart, nextWeekStart(wStart)).lines;
+    const lines = messagesBetween(cdb, convs, wStart, nextWeekStart(wStart), { grouped: ctx.grouped }).lines;
     if (lines.length === 0) continue;
     attempts++;
-    const wsum = summarize(who, `the week of ${key}`, lines, "weekly");
+    const wsum = summarize(who, `the week of ${key}`, lines, "weekly", ctx);
     // A failed or skipped summary must NOT be stored: the `t.weekly.has(key)` guard
     // above skips any filled key forever, so one transient model error would leave
     // "(summary failed: …)" in the Timeline for good. Leaving the key empty means the
@@ -472,7 +513,7 @@ function buildConvTiers(cdb, convs, who, since, now, t) {
   for (const mk of foldableMonths(weeklyKeys, t.monthly, cutoffMonth)) {
     const lines = weeklyKeys.filter((k) => monthKeyOfWeek(k) === mk).map((k) => `- week of ${k}: ${t.weekly.get(k)}`);
     attempts++;
-    const note = summarize(who, monthName(mk), lines, "monthly");
+    const note = summarize(who, monthName(mk), lines, "monthly", ctx);
     if (isBadSummary(note)) continue;
     t.monthly.set(mk, note.trim());
     summaries++;
@@ -490,7 +531,7 @@ function backupAndWrite(file, next) {
 
 // ---- contact + group Timeline builders ----------------------------------------
 
-function buildConversationTimeline({ cdb, convs, who, file, stateKey, state, now, includeGroup, foldLines }) {
+function buildConversationTimeline({ cdb, convs, who, file, stateKey, state, now, includeGroup, foldLines, ctx }) {
   const ensured = fs.existsSync(file)
     ? fs.readFileSync(file, "utf8")
     : `# ${path.basename(file, ".md")}\n\n## What I know\n\n_(stub)_\n`;
@@ -503,7 +544,7 @@ function buildConversationTimeline({ cdb, convs, who, file, stateKey, state, now
   const since = BACKFILL ? 0 : (prevSince != null ? prevSince : now);
 
   const { summaries, attempts, newWeeklies, historyFrom } =
-    buildConvTiers(cdb, convs, who, since, now, t);
+    buildConvTiers(cdb, convs, who, since, now, t, ctx);
   const sinceOut = BACKFILL
     ? Math.min(historyFrom != null ? historyFrom : now, prevSince != null ? prevSince : now)
     : since;
@@ -635,6 +676,32 @@ function buildGroupTimeline(cdb, sdb, group, state, now) {
   return { slug: group.slug, name: group.name, participants: [...all], participantsByWeek, ...r };
 }
 
+// Nathan's own Timeline (lib/self.js): every archived conversation, all speakers, no
+// group-activity fold (every group is already one of its sources), grouped raw input,
+// the self template and the self model.
+function buildSelfTimeline(cdb, sdb, state, now, nameMap) {
+  const SELF = require("../lib/self");
+  const convs = SELF.selfConversations(cdb, sdb, nameMap).map((c) => ({
+    convId: c.convId, prefix: `(${c.label}) `, conversation: c.label,
+  }));
+  if (convs.length === 0) return { slug: SELF_SLUG, skipped: "no conversations" };
+  // The stub (Relationship _self_, no Email line) must exist before the Timeline writes
+  // one of its own — buildConversationTimeline's fallback stub is a contact's.
+  if (WRITE) SELF.ensureSelfProfile(cdb, convs.map((c) => c.convId));
+  const r = buildConversationTimeline({
+    cdb,
+    convs,
+    who: "from all of Nathan's conversations",
+    file: `${CONTACTS_DIR}/${SELF_SLUG}.md`,
+    stateKey: SELF_SLUG,
+    state,
+    now,
+    includeGroup: false,
+    ctx: { grouped: true, templateFile: SELF_TIMELINE_PROMPT, model: SELF_MODEL_EFF, timeoutMs: SELF_CALL_TIMEOUT_MS },
+  });
+  return { slug: SELF_SLUG, name: SELF.SELF_NAME, ...r };
+}
+
 // The tracked MULTI-groups a contact belongs to. A per-contact run (--slug, and
 // the web "Ingest", which passes --slug) processes these in Phase 1 so the
 // contact's "Group activity" fold is refreshed — otherwise it only ever updated on
@@ -688,7 +755,10 @@ function main() {
     : slugArg
       ? groupsForContact(sdb, cdb, slugArg, allGroups)
       : allGroups;
-  const slugs = groupArg ? [] : slugArg ? [slugArg] : JSON.parse(fs.readFileSync(TRACKED, "utf8")).slugs;
+  // Nathan's own profile is never a contact here (Phase 3 builds it, on its own model).
+  const slugs = (groupArg ? [] : slugArg ? [slugArg] : JSON.parse(fs.readFileSync(TRACKED, "utf8")).slugs)
+    .filter((s) => s !== SELF_SLUG);
+  const runSelf = Boolean(SELF_MODEL_EFF) && !groupArg && (!slugArg || slugArg === SELF_SLUG);
 
   console.log(`crm-timeline: ${WRITE ? "WRITE" : "DRY-RUN"}${NO_LLM ? " | --no-llm" : ""}${BACKFILL ? " | BACKFILL (whole history)" : ""} | ${slugs.length} contact(s), ${groups.length} group(s)\n`);
 
@@ -697,6 +767,7 @@ function main() {
   let scanned = 0;
   let changedCount = 0;
   let summariesCount = 0;
+  let selfSummaries = 0; // priced on the self model, not TIMELINE_MODEL_EFF
 
   // ACTUAL-COST CAPTURE: point every summary call at one throwaway session dir
   // under data/ (gitignored, deleted below) so pi records real usage we can sum.
@@ -783,6 +854,22 @@ function main() {
     if (!WRITE && r.next && slugArg) printTimeline(r.next);
   }
 
+  // Phase 3: Nathan's own Timeline, on the self model.
+  if (runSelf) {
+    const r = buildSelfTimeline(cdb, sdb, state, now, nameMap);
+    if (r.skipped) console.log(`- ${SELF_SLUG}: skipped (${r.skipped})`);
+    else {
+      scanned += 1;
+      if (r.changed) changedCount += 1;
+      selfSummaries += r.summaries || 0;
+      console.log(`- ${SELF_SLUG} (self, ${SELF_MODEL_EFF}): summaries=${r.summaries}/${r.attempts} changed=${r.changed}`);
+      if (WRITE) { state[SELF_SLUG] = { since: r.since, ranAt: now }; writeState(); }
+      if (!WRITE && r.next && slugArg) printTimeline(r.next);
+    }
+  } else if (slugArg === SELF_SLUG) {
+    console.log(`- ${SELF_SLUG}: skipped (self profile is off — no --self-model)`);
+  }
+
   sdb.close();
   cdb.close();
   writeState();
@@ -800,7 +887,8 @@ function main() {
     try {
       const cost = require("../lib/cost");
       const per = cost.shortCallUsd(TIMELINE_MODEL_EFF);
-      costUsd = per == null ? null : per * summariesCount;
+      const perSelf = selfSummaries ? cost.shortCallUsd(SELF_MODEL_EFF) : 0;
+      costUsd = per == null || perSelf == null ? null : per * summariesCount + perSelf * selfSummaries;
       // Real billed cost, summed from the session dir every summary wrote into.
       if (SESSION_CAPTURE) {
         const a = cost.sumSessionCostUsd(SESSION_CAPTURE);
@@ -816,7 +904,7 @@ function main() {
         only: slugArg || (groupArg ? `group:${groupArg}` : null),
         scanned,
         changed: changedCount,
-        summaries: summariesCount,
+        summaries: summariesCount + selfSummaries,
         costUsd,
         actualCostUsd,
         costModel: TIMELINE_MODEL_EFF,

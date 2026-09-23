@@ -4,7 +4,9 @@
 //   1. memory-commit.js "daily pre-refresh snapshot"      (isolated git history; safe)
 //   2. crm-autopromote.js --write                          (non-fatal on failure)
 //   3. crm-refresh.js                                      (fatal if it throws)
-//   4. per-contact merge + CURSOR COMMIT (crash-safe, see below)
+//   4. per-contact merge + CURSOR COMMIT (crash-safe, see below), then Nathan's own
+//      profile (lib/self.js) through the same loop on its own model + prompt
+//      (only when a self model is chosen in the UI — unset means off)
 //   5. crm-timeline.js --force (apply; forced = ingest's own Timeline sub-step) (non-fatal)
 //   6. memory-commit.js "daily post-refresh"
 //   7. logs/last-run.json + logs/daily.log
@@ -44,10 +46,10 @@ const path = require('path');
 const { execFileSync, execSync } = require('child_process');
 const {
   ROOT, LOGS_DIR, REFRESH_STATE, CONTACTS_DIR, GROUPS_DIR, GITDIR,
-  MERGE_MODEL, TIMELINE_MODEL, MERGE_PROMPT,
+  MERGE_MODEL, TIMELINE_MODEL, MERGE_PROMPT, SELF_SLUG, SELF_MERGE_PROMPT,
 } = require('../lib/config');
 const { mergeContact } = require('./crm-merge');
-const { planAll, writeChunkLedger, chunkSummary } = require('./crm-refresh');
+const { planAll, planSelf, writeChunkLedger, writeSelfLedger, chunkSummary } = require('./crm-refresh');
 const { validateCitations, markMerged } = require('../lib/archive');
 const { writeFileAtomic } = require('../lib/atomic-write');
 const { mergeCallUsd, recordCostSample, fitCostModel } = require('../lib/cost');
@@ -88,6 +90,12 @@ const FORCE = process.argv.includes('--force');
 // model and a paid Timeline model. Read once per process; a fresh run picks up a
 // UI change.
 const MERGE_MODEL_EFF = require('../lib/run-models').getModel('ingest') || MERGE_MODEL;
+// Nathan's own profile runs on its OWN model (the UI's self picker), for both its merge
+// and its Timeline. No default: unset means the self pass is OFF — its first run is a
+// whole-archive backfill, so it must never start on a model nobody chose.
+const SELF_MODEL_EFF = require('../lib/run-models').getModel('self');
+// --only runs one stream: a contact's, or (--only nathan) the self profile's.
+const SELF_WANTED = !process.argv.includes('--only') || process.argv[process.argv.indexOf('--only') + 1] === SELF_SLUG;
 // Step 5 builds Timeline tiers from the whole archived history (one weekly
 // summary per historical week — paid) instead of only forward from now.
 const TIMELINE_BACKFILL = process.argv.includes('--timeline-backfill');
@@ -142,25 +150,27 @@ function gitHeadSha() {
 // The prompt is identified by CONTENT hash, not just path: prompts/merge.md is
 // production and gets overwritten when a variant is promoted, so the path alone
 // would silently conflate two different prompts.
-let promptShaCache = null;
-function mergePromptSha() {
-  if (promptShaCache !== null) return promptShaCache;
+const promptShaCache = new Map();
+function mergePromptSha(promptFile = MERGE_PROMPT) {
+  if (promptShaCache.has(promptFile)) return promptShaCache.get(promptFile);
+  let sha;
   try {
-    const text = fs.readFileSync(MERGE_PROMPT, 'utf8');
-    promptShaCache = require('crypto').createHash('sha256').update(text, 'utf8').digest('hex').slice(0, 12);
+    const text = fs.readFileSync(promptFile, 'utf8');
+    sha = require('crypto').createHash('sha256').update(text, 'utf8').digest('hex').slice(0, 12);
   } catch {
-    promptShaCache = 'unknown';
+    sha = 'unknown';
   }
-  return promptShaCache;
+  promptShaCache.set(promptFile, sha);
+  return sha;
 }
 
-function provenanceTrailers(runTag) {
-  const rel = path.relative(ROOT, MERGE_PROMPT).replace(/\\/g, '/');
+function provenanceTrailers(runTag, model = MERGE_MODEL_EFF, promptFile = MERGE_PROMPT) {
+  const rel = path.relative(ROOT, promptFile).replace(/\\/g, '/');
   // TWO newlines. Git requires a BLANK line between the subject and the body,
   // and only parses trailers in the final paragraph. With a single newline it
   // folds the trailer lines into the subject and %(trailers:key=Model) returns
   // empty — the lines are there, but nothing can read them as trailers.
-  return `\n\n${[`Model: ${MERGE_MODEL_EFF}`, `Prompt: ${rel}@${mergePromptSha()}`, `Run: ${runTag}`].join('\n')}`;
+  return `\n\n${[`Model: ${model}`, `Prompt: ${rel}@${mergePromptSha(promptFile)}`, `Run: ${runTag}`].join('\n')}`;
 }
 
 function runNode(scriptPath, args, { timeout = 120_000 } = {}) {
@@ -359,6 +369,17 @@ function main() {
           // Scheduled runs stop at the last complete Monday-04:00 week.
           includePartialWeek: Boolean(ONLY),
         });
+        // NATHAN'S OWN PROFILE rides the same loop as one more plan (p.self), AFTER the
+        // contacts, so it gets the same caps, holds, per-chunk commits and cost ledger.
+        // planAll already swept, so this reads the same archive snapshot.
+        if (SELF_WANTED) {
+          if (!SELF_MODEL_EFF) {
+            logLines.push('[3] self profile: off (no self model chosen in the UI)');
+          } else {
+            const sp = planSelf(cdb, sdb, { includePartialWeek: Boolean(ONLY) });
+            if (sp) plans.push(sp);
+          }
+        }
       } finally {
         sdb.close();
         cdb.close();
@@ -474,7 +495,7 @@ function main() {
         id: runTag, kind: 'ingest', complete: false,
         startedAt, endedAt: now, durationMs: now - startedAt,
         dryRun: false, only: ONLY,
-        models: { merge: MERGE_MODEL_EFF, timeline: MERGE_MODEL_EFF },
+        models: { merge: MERGE_MODEL_EFF, timeline: MERGE_MODEL_EFF, self: SELF_MODEL_EFF },
         costUsd: mergeCostKnown ? mergeCostUsd : null,
         actualCostUsd: actualCostSeen ? actualCostUsd : null,
         costModel: MERGE_MODEL_EFF,
@@ -510,7 +531,7 @@ function main() {
             `${c.partial ? '  [day-split]' : ''}`);
         });
         // Validate argv construction without dumping the whole system prompt.
-        const plan = mergeContact(p.slug, { dryRun: true, quiet: true });
+        const plan = mergeContact(p.slug, { dryRun: true, quiet: true, ...(p.self ? { promptFile: SELF_MERGE_PROMPT, model: SELF_MODEL_EFF } : {}) });
         const a = plan.argv;
         logLines.push(`    argv ok: --model ${a[a.indexOf('--model') + 1]}, ` +
           `--tools ${a[a.indexOf('--tools') + 1]}, ` +
@@ -520,8 +541,18 @@ function main() {
     } else {
       const state = loadRefreshState();
       const mergeDb = openCrmDb(); // for recording merges in the `merged` ledger
+      let selfSdb = null; // the self ledger's cast header reads group rosters from Signal
       for (const p of plans) {
         const total = p.chunks.length;
+        // The self plan merges on its own model with its own prompt; everything else
+        // about the chunk (frontier, structured commit, cost, commit) is identical.
+        const model = p.self ? SELF_MODEL_EFF : MERGE_MODEL_EFF;
+        const promptFile = p.self ? SELF_MERGE_PROMPT : MERGE_PROMPT;
+        if (p.self) {
+          try { require('../lib/self').ensureSelfProfile(mergeDb, p.convs.map((c) => c.convId)); }
+          catch (e) { warnings.push(`self profile stub/header update failed: ${e.message}`); }
+          try { selfSdb = selfSdb || openSignalDb(); } catch { selfSdb = null; }
+        }
         let contactFailed = false;
         for (let i = 0; i < total && !contactFailed; i++) {
           const chunk = p.chunks[i];
@@ -540,7 +571,8 @@ function main() {
           // Write this chunk's ledger, overwriting the previous chunk's. The
           // per-chunk commit below captures each version, so the memory history
           // holds every ledger ever fed to a merge.
-          writeChunkLedger(p, chunk, i + 1, total);
+          if (p.self) writeSelfLedger(mergeDb, selfSdb, p, chunk, i + 1, total);
+          else writeChunkLedger(p, chunk, i + 1, total);
 
           const t0 = Date.now();
           // stream:true pipes pi's output live to our stdout so the web job
@@ -549,7 +581,8 @@ function main() {
           const result = mergeContact(p.slug, {
             dryRun: false,
             stream: true,
-            model: MERGE_MODEL_EFF,
+            model,
+            promptFile,
             runId: runTag,
             deferStructured: true,
             label: `${i + 1}/${total} ${chunk.label} · ${chunk.count} msgs`,
@@ -608,13 +641,13 @@ function main() {
             }
             detail.ok = true;
             detail.cursorAfter = chunk.ridEnd;
-            const cc = mergeCallUsd(MERGE_MODEL_EFF, { ledgerTokens: chunk.tokens });
+            const cc = mergeCallUsd(model, { ledgerTokens: chunk.tokens });
             if (cc == null) mergeCostKnown = false; else mergeCostUsd += cc;
             if (result.costUsd != null) {
               actualCostUsd += result.costUsd; actualCostSeen = true;
               // Feed the real (input base, billed USD) pair to the self-calibrating
               // cost model so future estimates track this model's actual behaviour.
-              recordCostSample(MERGE_MODEL_EFF, { ledgerTokens: chunk.tokens, usd: result.costUsd });
+              recordCostSample(model, { ledgerTokens: chunk.tokens, usd: result.costUsd });
             }
             logLines.push(`[4] merge ${p.slug} ${i + 1}/${total} (${chunk.label}, ${chunk.count} msgs): ok, cursor -> ${chunk.ridEnd}`);
 
@@ -640,7 +673,7 @@ function main() {
             // `git log -- data/contacts/<slug>.md` a readable history of why the
             // profile says what it says.
             const msg = `merge ${p.slug} ${chunk.label} (${chunk.count} msgs, m${chunk.ridStart}..m${chunk.ridEnd}) [${i + 1}/${total}]`
-              + provenanceTrailers(runTag);
+              + provenanceTrailers(runTag, model, promptFile);
             const commit = runNode(SCRIPTS.memoryCommit, [msg]);
             if (commit.ok) {
               detail.postSha = gitHeadSha();
@@ -667,6 +700,7 @@ function main() {
         }
       }
       mergeDb.close();
+      if (selfSdb) { try { selfSdb.close(); } catch { /* closed */ } }
     }
   } else if (!fatal) {
     logLines.push('[4] merge: nothing to merge (no unmerged messages)');
@@ -696,6 +730,8 @@ function main() {
     const timelineArgs = ONLY ? ['--force', '--slug', ONLY] : ['--force'];
     // Timeline runs on the SAME model as the merge for this run (see MERGE_MODEL_EFF).
     timelineArgs.push('--model', MERGE_MODEL_EFF);
+    // Nathan's own Timeline runs on the self model; with self off it is skipped.
+    if (SELF_WANTED && SELF_MODEL_EFF) timelineArgs.push('--self-model', SELF_MODEL_EFF);
     if (TIMELINE_BACKFILL) timelineArgs.push('--backfill');
     const timelineRun = timed('timeline', () => runNode(SCRIPTS.timeline, timelineArgs, { timeout: 1_800_000 }));
     logLines.push(`[5] timeline${ONLY ? ` --slug ${ONLY}` : ''}: ${timelineRun.ok ? 'ok' : 'FAILED (non-fatal)'}`);
@@ -765,7 +801,7 @@ function main() {
     // The EFFECTIVE model both halves actually ran on (UI 'ingest' dropdown >
     // env > default), not the static default — else a UI override makes this
     // attribution field lie. Merge and Timeline share MERGE_MODEL_EFF this run.
-    models: { merge: MERGE_MODEL_EFF, timeline: MERGE_MODEL_EFF },
+    models: { merge: MERGE_MODEL_EFF, timeline: MERGE_MODEL_EFF, self: SELF_MODEL_EFF },
     // Estimated merge-side spend (this record's half of the combined job; the
     // Timeline half is priced in crm-timeline's own record). null = model not in
     // pi's price catalog. See lib/cost.js — an estimate, never a bill.

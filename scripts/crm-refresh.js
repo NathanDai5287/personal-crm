@@ -282,6 +282,132 @@ function planAll(cdb, sdb, opts = {}) {
   return plans;
 }
 
+// ---- Nathan's own profile (lib/self.js) -----------------------------------------
+
+// Plan the SELF stream: the same ingest as a contact — unmerged archive messages,
+// oldest-first, media-gated, gated into buckets (lib/weeks gateBuckets) and chunked into
+// whole weeks ≤40k tokens (busy weeks split by day) — but over EVERY archived
+// conversation, with the merge frontier keyed by slug 'nathan'. A pure function of
+// (archive, frontier, effective date) like planContact, so backfill == play-forward holds.
+// Chunks stay chronological; the per-conversation GROUPING happens only when a chunk's
+// ledger is written (writeSelfLedger). Returns null when nothing is released.
+function planSelf(cdb, sdb, opts = {}) {
+  const {
+    nameMap = signalNameMap(sdb), now = Date.now(), includePartialWeek = false, backfillDays = MERGE_BACKFILL_DAYS,
+  } = opts;
+  const SELF = require('../lib/self');
+  const convs = SELF.selfConversations(cdb, sdb, nameMap);
+  if (!convs.length) return null;
+  const convById = new Map(convs.map((c) => [c.convId, c]));
+  const ph = convs.map(() => '?').join(',');
+  const params = [...convs.map((c) => c.convId), SELF.SELF_SLUG];
+  let sql = `SELECT id AS rid, body, sent_at, type, conv_id AS cid, src, sender, att_hashes FROM messages
+     WHERE conv_id IN (${ph}) AND id NOT IN (SELECT message_id FROM merged WHERE slug = ?)`;
+  if (backfillDays != null) { sql += ' AND sent_at >= ?'; params.push(now - backfillDays * DAY); }
+  const msgs = cdb.prepare(`${sql} ORDER BY sent_at ASC, id ASC`).all(...params);
+  if (msgs.length === 0) return null;
+
+  // MEDIA GATE — identical to planContact: hold the first message whose media is still
+  // processing, and everything after it, so a caption never misses the merge.
+  const firstPending = msgs.findIndex((m) => hasPendingMedia(cdb, m.att_hashes));
+  if (firstPending !== -1) {
+    msgs.length = firstPending;
+    if (msgs.length === 0) return null;
+  }
+  for (const m of msgs) m.rendered = renderedBody(cdb, m);
+
+  const cutoff = lastCompleteWeekStart(now);
+  const bucketMsgs = includePartialWeek
+    ? [msgs]
+    : gateBuckets(msgs, { N: INGEST_N, floorDays: INGEST_FLOOR_DAYS, ceilingDays: INGEST_CEILING_DAYS, endMs: cutoff });
+  if (bucketMsgs.length === 0) return null;
+  const chunks = [];
+  bucketMsgs.forEach((bm, bi) => { for (const ch of planChunks(bm)) { ch.bucketIndex = bi; chunks.push(ch); } });
+  if (chunks.length === 0) return null;
+
+  return {
+    slug: SELF.SELF_SLUG,
+    name: SELF.SELF_NAME,
+    profile: `data/contacts/${SELF.SELF_SLUG}.md`,
+    self: true,
+    convs,
+    convById,
+    total: chunks.reduce((n, c) => n + c.count, 0),
+    chunks,
+  };
+}
+
+// Tracked people in one self chunk, as ledger digests: DM partners, group rosters, anyone
+// who spoke, and anyone named — the "people in these chats" header. Never Nathan.
+function selfCast(cdb, sdb, plan, chunk) {
+  const out = [];
+  try {
+    const resolver = getResolver(cdb);
+    const slugBySid = new Map();
+    for (const c of require('../lib/person').trackedContacts(cdb)) if (c.signalId) slugBySid.set(c.signalId, c.slug);
+    const relevant = new Set();
+    const cids = [...new Set(chunk.msgs.map((m) => m.cid))];
+    for (const cid of cids) {
+      const c = plan.convById.get(cid);
+      if (c && c.kind === 'dm' && slugBySid.has(c.serviceId)) relevant.add(slugBySid.get(c.serviceId));
+    }
+    if (sdb && cids.length) {
+      const ph = cids.map(() => '?').join(',');
+      for (const r of sdb.prepare(`SELECT members FROM conversations WHERE type = 'group' AND id IN (${ph})`).all(cids)) {
+        for (const sid of (r.members || '').split(/\s+/).filter(Boolean)) if (slugBySid.has(sid)) relevant.add(slugBySid.get(sid));
+      }
+    }
+    for (const m of chunk.msgs) {
+      if (m.src && slugBySid.has(m.src)) relevant.add(slugBySid.get(m.src));
+      for (const s of resolver.mentionsIn(m.body || '')) relevant.add(s);
+    }
+    relevant.delete('nathan');
+    for (const s of [...relevant].sort()) {
+      const d = personDigest(s, resolver.nameBySlug.get(s) || s);
+      if (d) out.push(d);
+    }
+  } catch { /* cast is best-effort context */ }
+  return out;
+}
+
+// Write ONE self chunk's ledger to _refresh/nathan.new.txt, in the shape
+// prompts/self-merge.md documents: GROUPED BY CONVERSATION — each conversation's lines
+// one contiguous block in time order, blocks ordered by their first message and
+// separated by a blank line — and every line labelled `(DM: Name)` or `(<group>)`.
+// Header lines as the prompt lists them. `sdb` (optional) feeds the group rosters in
+// the cast header.
+function writeSelfLedger(cdb, sdb, plan, chunk, chunkIndex, chunkTotal, dir = REFRESH_DIR) {
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `${plan.slug}.new.txt`);
+  const blocks = new Map(); // cid -> msgs; Map insertion order = first-message order
+  for (const m of chunk.msgs) {
+    if (!blocks.has(m.cid)) blocks.set(m.cid, []);
+    blocks.get(m.cid).push(m);
+  }
+  const labelOf = (cid) => (plan.convById.get(cid) || { label: 'unknown' }).label;
+  const body = [...blocks.entries()].map(([cid, list]) => list.map((m) => {
+    const sender = m.src === BOT_SERVICE_ID ? `${m.sender} (bot)` : m.sender;
+    return formatLine({ sentAt: m.sent_at, rid: m.rid, prefix: `(${labelOf(cid)}) `, sender, body: m.rendered });
+  }).join('\n')).join('\n\n');
+
+  const srcBits = [...blocks.keys()].map((cid) => {
+    const c = plan.convById.get(cid);
+    return c && c.kind === 'dm' ? `DM with ${c.name}` : `group "${c ? c.name : 'unknown'}"`;
+  });
+  const nick = confirmedNicknames('nathan');
+  const cast = selfCast(cdb, sdb, plan, chunk);
+  const header = [
+    `# Nathan's own conversations — ${chunk.label} (Pacific)`,
+    `# chunk ${chunkIndex} of ${chunkTotal} · ${chunk.count} messages · ids m${chunk.ridStart}–m${chunk.ridEnd}`,
+    `# window: ${fmtLocal(chunk.startMs)} to ${fmtLocal(chunk.endMs)}${chunk.partial ? ' (partial week — oversized week split by day)' : ''}`,
+    `# sources: ${srcBits.join(', ')}`,
+    ...(nick.length ? [`# known nicknames: Nathan is also called ${nick.map((n) => `"${n}"`).join(', ')}`] : []),
+    ...(cast.length ? ['# people in these chats (context — NOT the subject of this profile):', ...cast.map((d) => `#   ${d}`)] : []),
+  ].join('\n');
+  fs.writeFileSync(file, `${header}\n\n${body}\n`);
+  return { file, rel: `data/contacts/_refresh/${plan.slug}.new.txt` };
+}
+
 // ---- ledger writing ------------------------------------------------------------
 
 // Write ONE chunk's ledger to the contact's ledger path, overwriting whatever
@@ -417,4 +543,4 @@ if (require.main === module) {
   if (!lock.ok) { console.log(`crm-refresh: skipped, run in progress (${lock.holderDesc}).`); process.exit(0); }
   try { main(); } finally { lock.release(); }
 }
-module.exports = { planAll, planContact, gateBuckets, writeChunkLedger, chunkSummary, MERGE_BACKFILL_DAYS };
+module.exports = { planAll, planContact, planSelf, gateBuckets, writeChunkLedger, writeSelfLedger, chunkSummary, MERGE_BACKFILL_DAYS };
