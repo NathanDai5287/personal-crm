@@ -1717,3 +1717,16 @@ Also found: pi's **anthropic** OAuth refresh token is expired on BOTH minmus (ac
 2026-09-12) and duna (`invalid_grant: Refresh token expired`). `pi update --models` aborts on the
 anthropic step (the other providers still refresh), and any `anthropic/*` model picked in the UI
 would fail on minmus until `pi` is re-logged-in there.
+
+### Scheduled ingest never ran: it collided with the hourly sweep (2026-09-22)
+Expected the Monday `crm-ingest.timer` (04:00) to run ingest; it has skipped every week since at
+least 2026-09-14 with `crm-daily: skipped, run in progress (archive pid N+1, 0s ago)`. Cause:
+`crm-sweep.timer` is `OnCalendar=hourly`, so it also fires at 04:00, and systemd's default
+`AccuracySec=1min` coalesces both to the same second (04:00:43). The sweep wins the pipeline lock,
+so ingest skips itself. (Ingest was also paused in the UI, which would have skipped it anyway; every
+ingest record since 2026-09-09 was hand-started.) Fix: minmus
+`~/.config/systemd/user/crm-ingest.timer` → `OnCalendar=Mon *-*-* 04:20:00`, clear of the sweep
+(:00, ~8s), the todo scan (:10) and the 03:30 deep sweep (~10s). The timer units live only on
+minmus; they are not in this repo. 04:20 Pacific is 11:20/12:20 UTC, off-peak for DeepSeek.
+Gotcha: changing `OnCalendar` on a `Persistent=true` timer and running `daemon-reload` fires the
+unit immediately as a "missed" run. It was harmless here only because ingest was paused.
