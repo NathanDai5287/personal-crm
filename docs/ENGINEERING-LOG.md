@@ -1768,3 +1768,38 @@ week keys incl. DST, legacy-daily drain, month fold, era supersession).
 Gotcha while editing: a `node - <<'EOF'` heredoc through this machine's Git Bash collapses
 `\\` to `\`, which silently stripped the backslashes out of a regex (`\d` became `d`). Edits
 containing backslashes go through a script file or the Edit tool, never a shell heredoc.
+
+### Self profile: nathan.md as its own ingest stream (2026-09-22)
+Built the plumbing for the Fable prompts (prompts/self-merge.md, self-compact.md). Nathan's
+profile is the contact pipeline inverted: sources = every archived conversation
+(lib/self.js selfConversations; Note to Self and the bot DM excluded), frontier = the
+`merged` table under slug `nathan`, planner = crm-refresh planSelf (same gate, media gate,
+40k week chunks, busy weeks day-split). Chunks stay chronological; only the LEDGER is
+grouped by conversation (writeSelfLedger: one block per chat in first-message order,
+blank line between, every line labelled `(DM: Name)` / `(<group>)`). crm-daily pushes the
+self plan onto the same chunk loop after the contacts, so caps, holds, per-chunk commits
+and cost records are shared; only model, prompt and ledger writer differ. Timeline:
+crm-timeline Phase 3, grouped raw input, the self template passed per call (`ctx`), never
+a global swap; 10-minute call timeout because a self week is ~86k tokens.
+
+Decisions that close off alternatives:
+- **Off by default.** The self model (run-models key `self`) has no fallback: unset = the
+  self pass does not run. Its first run is a whole-archive backfill (dry run on minmus:
+  107,293 messages → 134 chunks, 67 of them day-split, ~4h, ≈$3.19 deepseek-flash
+  off-peak / ≈$66 kimi-k3), so it must never start on a model nobody chose.
+- **nathan.md lives in data/contacts/ but is not a person.** lib/person.allPeople() skips
+  it (roster, graph, tasks, guest email matching), it is not in crm-tracked.json and has
+  no contacts row. The web roster shows it as a separate last row with the self picker
+  and ingests it as `crm-daily --only nathan`.
+- **No email fact on the self slug**, enforced in structured-person validateFact (dropped,
+  not thrown): email is the guest sign-in key, and the self-merge prompt's worked example
+  does tell the model to emit one.
+- DM labels use the tracked contact's display name (contact_slug → contacts row → Signal
+  name), not Signal's conversation row, which for an alias DM carried the old identity's
+  profile name ("Big Ritty" for Ritvik).
+
+Expected Nigesh/Advay to be two people; they are one. The DM filed under
+nigesh-chakraborty.md has sender label "Nigesh" on 1,982 incoming rows through 2026-08-29
+and "Advay" on 36 from 2026-09-10: sender labels are baked at sweep time from the Signal
+name of the moment, and the contact's Signal name is now "Advay Ratan". Contact ledgers
+already showed the same mismatch; the self ledger inherits it. Not fixed here.
