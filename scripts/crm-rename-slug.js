@@ -6,7 +6,8 @@
 //
 // It rewrites every slug reference atomically: the profile file, crm-tracked.json, and
 // every slug-bearing column in crm.db (contacts.file_path, facts.slug, mentions.from/to,
-// mention_reassign.from/orig/new, messages.contact_slug, merged.slug). Mentions are also
+// mention_reassign.from/orig/new, messages.contact_slug, merged.slug, facts.identity_key),
+// plus the slug-keyed stores outside it (see renameSideStores). Mentions are also
 // rebuilt deterministically by the next sweep, but they are rewritten here too so the
 // graph is consistent immediately.
 //

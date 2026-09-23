@@ -1802,4 +1802,13 @@ Expected Nigesh/Advay to be two people; they are one. The DM filed under
 nigesh-chakraborty.md has sender label "Nigesh" on 1,982 incoming rows through 2026-08-29
 and "Advay" on 36 from 2026-09-10: sender labels are baked at sweep time from the Signal
 name of the moment, and the contact's Signal name is now "Advay Ratan". Contact ledgers
-already showed the same mismatch; the self ledger inherits it. Not fixed here.
+already showed the same mismatch; the self ledger inherits it. FIXED the same day at Nathan's
+request: the 1,985 rows were relabelled Advay by a one-off UPDATE scoped to his serviceId
+(the bot's rows are all labelled Janet, so it was never the bot), the archived
+conversation label rewritten to "DM with Advay Ratan", and the slug renamed
+nigesh-chakraborty -> advay-ratan. crm-repair-senders was NOT used: its dry run would also
+have relabelled 295 of Ritvik's rows "Big" (his alias account's profile name "Big Ritty").
+crm-rename-slug had missed facts.identity_key (splits supersession chains), the nicknames
+db, and the archive/todo/Timeline state keys (a lost todo cursor re-scans the person's
+whole history on a paid model); it now rewrites all of them. Message BODIES that say
+"Nigesh" (295) are Layer 1 and were left; "nigesh" stays as one of his nicknames.
