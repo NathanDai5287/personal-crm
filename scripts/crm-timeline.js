@@ -4,27 +4,41 @@
 // (forced); it is also runnable standalone from the CLI for one contact/group.
 //
 // A conversation (a 1:1 DM or a group) keeps its `## Timeline` at decreasing resolution:
-//   ### Daily log (7–21 days)        one line per Pacific day (Mon-04:00 anchored)
-//   ### Weekly log (3–10 weeks)      one line per Pacific calendar week (Mon 04:00)
-//   ### Older                        coarse/era notes (+ any pre-existing curated timeline)
+//   ### Weekly log                   one line per Pacific calendar week (Mon 04:00), written
+//                                    once the week has ended ≥7 days ago, from RAW messages
+//   ### Monthly log                  one note per calendar month, distilled ONCE from that
+//                                    month's weekly lines when it is fully older than ~70 days
+//   ### Older                        legacy only: pre-existing curated text, plus old season
+//                                    "era" notes not yet superseded by month notes
+//
+// WEEK → MONTH (Nathan, 2026-09-22). There used to be a daily tier (one line per day
+// 7–21 days back) and season era notes. The daily tier read the raw messages, then was
+// discarded once the weekly line re-read the SAME raw messages — pure duplicate spend —
+// and eras re-wrote their note on every fold. Now raw messages are read once (weekly) and
+// a month is one call over 4–5 weekly lines. Weekly lines are still KEPT forever (Nathan's
+// rule: every week stays viewable); the month note is a summary on top. Legacy daily lines
+// in old profiles are kept until their week gets its weekly line, then dropped (as before);
+// a season era note is dropped once every month of that season with weekly lines has a
+// month note (a season with no weekly lines keeps its era note — it may be the only record).
 //
 // NO verbatim tier. There used to be a "### Recent (raw, last 7 days)" block that
 // copied the last week's messages into the profile word-for-word. Nathan's call
 // (2026-08-23): "I will never read an exact log of a week's worth of messages …
 // I don't want to be reading (or even storing) exact message copies in the
 // profiles." So the timeline is summaries only. The most recent ~week is therefore
-// NOT in the Timeline (its raw block is gone, and a day is only summarized once it
-// has fully aged out, so a partial day is never frozen) — recent substance lives in
+// NOT in the Timeline (its raw block is gone, and a week is only summarized once it
+// has fully aged out, so a partial week is never frozen) — recent substance lives in
 // the merge sections (What I know / Talking points). This keeps the timeline free
 // of verbatim text AND adds no model cost (the Timeline step runs on a paid model);
 // it does not summarize the current week just to fill the gap. The full verbatim
 // history always lives in the archive (crm.db); fetch it with crm-transcript.js.
 // Contact profiles also get:
-//   ### Group activity               folded day-summaries from groups they're in (capped)
+//   ### Group activity               folded weekly summaries from groups they're in (capped)
 //
 // Groups are multi-speaker (raw lines labeled by sender) sourced by groupId. When a group's
-// day rolls up into a daily summary, that summary is also folded into each tracked
-// participant's profile, so a person's profile reflects their group activity too.
+// week rolls up into a weekly summary, that summary is also folded into the profile of each
+// tracked participant who spoke that week, so a person's profile reflects their group
+// activity too.
 //
 // The Signal DB stores every message permanently, so the Timeline is always recoverable.
 //
@@ -56,7 +70,7 @@ const { renderedBody, formatLine, forModel } = require("../lib/message-context")
 // and weekStart/nextWeekStart replace isoWeekKey's UTC-ISO week with the pipeline's own
 // Monday-04:00-Pacific week boundary, so the Timeline's tiers bucket the same way every
 // other ledger in the system does.
-const { dateKey, fmtLocal, weekStart, nextWeekStart, dayStart } = require("../lib/weeks");
+const { dateKey, fmtLocal, weekStart, nextWeekStart } = require("../lib/weeks");
 const { writeJsonAtomic } = require("../lib/atomic-write");
 const {
   DATA_DIR,
@@ -75,10 +89,8 @@ const {
 } = require("../lib/config");
 
 const DAY = 86_400_000;
-const HOUR = 3_600_000;
-const DAILY_FROM_DAYS = 7; // daily tier covers [7, 21) days ago (was the old RAW_DAYS boundary)
-const DAILY_UNTIL_DAYS = 21;
-const WEEKLY_UNTIL_DAYS = 70;
+const WEEKLY_AFTER_DAYS = 7; // a week gets its line once it ENDED ≥7 days ago (recent week lives in the prose)
+const WEEKLY_UNTIL_DAYS = 70; // months fully older than this fold into a month note
 const GROUP_ACTIVITY_MAX = 40; // cap on folded group-activity lines per contact
 
 const args = process.argv.slice(2);
@@ -153,24 +165,20 @@ function piSummarize(prompt, system) {
 // as durable, a word ceiling well above v2's starvation budget, and
 // periods-not-semicolons to kill the clause pileup.
 const STYLE_INSTRUCTION = {
-  daily: "Summarize the day in ONE line: every durable fact (plans, decisions, life events, money owed or paid) and nothing else — drop chatter, jokes, games, and one-off details that change nothing. Short past-tense sentences separated by periods, not semicolons. At most ~65 words: cut words and noise, never a durable fact.",
   weekly: "Summarize the period in 1-2 lines: the main threads and every durable fact, nothing else. Short past-tense sentences separated by periods, not semicolons. At most ~110 words: cut words and noise, never a durable fact.",
-  // era: distills aged-out weekly lines into one season note in the Older tier.
-  // Input is weekly SUMMARIES (not raw messages); when the era already has a
-  // note it is included in the input and must be rewritten, never appended to.
-  // Text reviewed by a Fable agent (2026-08-09): the replace-don't-append and
-  // carry-forward-unless-superseded sentences each cover a distinct observed
-  // failure mode of repeated self-rewrite; the closing formula is the proven
-  // anti-starvation clause from the daily/weekly strings.
-  era: "Distill the period into one era note: only what will still matter in a year — life events, durable changes (job, school, moves, relationships), big decisions, money milestones. Drop week-by-week narration and logistics. When a later week changes or reverses an earlier fact, keep only the outcome. If a current era note is included, rewrite the whole note — your output replaces it, never appends to it — and keep every fact it holds unless a later week supersedes it. One paragraph of short past-tense sentences separated by periods, not semicolons. At most ~120 words: cut words and noise, never a durable fact.",
+  // monthly: distills one calendar month's weekly lines into its Monthly-log note, in a
+  // single call (no existing note to rewrite — a month is folded exactly once). Input is
+  // weekly SUMMARIES, not raw messages. Replaces the retired season `era` string (and the
+  // retired `daily` one — see the header). Text authored by Fable; see ENGINEERING-LOG.
+  monthly: "Distill the month into one note: only what will still matter in a year — life events, durable changes (job, school, moves, relationships), big decisions, money milestones. Drop week-by-week narration and logistics. When a later week changes or reverses an earlier fact, keep only the outcome. One paragraph of short past-tense sentences separated by periods, not semicolons. At most ~90 words: cut words and noise, never a durable fact.",
 };
 
 // Exported so evals/ can build the exact prompt this pipeline sends without
 // re-implementing it — the same reason crm-merge.js takes a promptFile override.
 function buildSummaryPrompt(who, periodLabel, lines, style, template) {
   return render(template, {
-    // Era calls read weekly summaries, not raw messages — the framing must say so.
-    PERIOD_SENTENCE: style === "era"
+    // Month calls read weekly summaries, not raw messages — the framing must say so.
+    PERIOD_SENTENCE: style === "monthly"
       ? `These are one-line weekly summaries of Signal messages ${who} during ${periodLabel}.`
       : `These are Signal messages ${who} during ${periodLabel}.`,
     STYLE_INSTRUCTION: STYLE_INSTRUCTION[style] || STYLE_INSTRUCTION.weekly,
@@ -202,13 +210,46 @@ const TIER_HEADERS = {
   // "### Recent (raw, …)" block left in an old profile, so verbatim message copies
   // clear out on the next run instead of lingering. See the top-of-file note.
   raw: "### Recent (raw, last 7 days)",
+  // `daily` is parse-and-drain only: no new day lines are written, but legacy ones stay
+  // (and render) until their week gets its weekly line.
   daily: "### Daily log",
   weekly: "### Weekly log",
+  monthly: "### Monthly log",
   older: "### Older",
   group: "### Group activity",
 };
 
-// Season eras for the Older tier, Pacific calendar: spring = Jan–May,
+// Calendar months for the Monthly log. A week belongs to the month of its Monday (the
+// same rule the season eras used), so a week is never split across two month notes.
+// Keys are "YYYY-MM": they sort chronologically as text and parse with the tier regex.
+const MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+function monthKeyOfWeek(weekDateKey) {
+  return weekDateKey.slice(0, 7);
+}
+function monthName(monthKey) {
+  const [y, m] = monthKey.split("-");
+  return `${MONTH_NAMES[Number(m) - 1]} ${y}`;
+}
+// Months ready to fold: every month that has weekly lines, is strictly before
+// `cutoffMonth` (so each of its weeks is older than the weekly window), and has no note
+// yet. Oldest first. Pure — exported for evals/timeline-tiers-selftest.js.
+function foldableMonths(weeklyKeys, monthly, cutoffMonth) {
+  return [...new Set(weeklyKeys.map(monthKeyOfWeek))]
+    .filter((mk) => mk < cutoffMonth && !monthly.has(mk))
+    .sort();
+}
+// Drop a legacy season era note once month notes cover it: every month of that season
+// that has weekly lines must have its month note. A season with NO weekly lines keeps
+// its era note — in an old profile that note may be the only record left. Mutates `older`.
+function dropSupersededEras(older, weeklyKeys, monthly) {
+  for (const k of [...older.keys()]) {
+    if (!/^\d{4}-(spring|summer|fall)$/.test(k)) continue;
+    const months = new Set(weeklyKeys.filter((w) => eraKey(w) === k).map(monthKeyOfWeek));
+    if (months.size && [...months].every((m) => monthly.has(m))) older.delete(k);
+  }
+}
+
+// Season eras (LEGACY — see dropSupersededEras), Pacific calendar: spring = Jan–May,
 // summer = Jun–Aug, fall = Sep–Dec. A week belongs to the era of its Monday.
 function eraKey(weekDateKey) {
   const m = Number(weekDateKey.slice(5, 7));
@@ -253,7 +294,7 @@ function splitProfile(text) {
 }
 
 function parseTiers(block) {
-  const buckets = { raw: [], daily: [], weekly: [], older: [], group: [] };
+  const buckets = { raw: [], daily: [], weekly: [], monthly: [], older: [], group: [] };
   let legacy = [];
   let cur = "legacy";
   for (const line of block.split("\n")) {
@@ -275,6 +316,7 @@ function parseTiers(block) {
   return {
     daily: toMap(buckets.daily),
     weekly: toMap(buckets.weekly),
+    monthly: toMap(buckets.monthly),
     older: toMap(buckets.older),
     group: buckets.group.filter((l) => l.trim().startsWith("- ")), // flat capped list
     legacyOlder: legacy.join("\n").trim(),
@@ -284,19 +326,18 @@ function parseTiers(block) {
 function renderTimeline(t, { includeGroup }) {
   const sortDesc = (m) => [...m.entries()].sort((a, b) => (a[0] < b[0] ? 1 : -1));
   const out = ["## Timeline"];
-  for (const [tier, label] of [
-    ["daily", "daily"],
-    ["weekly", "weekly"],
-  ]) {
-    out.push("", TIER_HEADERS[tier]);
-    out.push(t[tier].size ? sortDesc(t[tier]).map(([k, v]) => `- ${k}: ${v}`).join("\n") : "_(none yet)_");
-    void label;
-  }
-  out.push("", TIER_HEADERS.older);
+  const lines = (m) => sortDesc(m).map(([k, v]) => `- ${k}: ${v}`).join("\n");
+  // Legacy day lines render only while any remain (draining into their weekly line).
+  if (t.daily.size) out.push("", TIER_HEADERS.daily, lines(t.daily));
+  out.push("", TIER_HEADERS.weekly, t.weekly.size ? lines(t.weekly) : "_(none yet)_");
+  out.push("", TIER_HEADERS.monthly, t.monthly.size ? lines(t.monthly) : "_(none yet)_");
+  // Older is legacy-only now (curated pre-existing text + unsuperseded season eras), so
+  // it renders only when it holds something.
   const olderLines = [...t.older.entries()]
     .sort((a, b) => (eraSortKey(a[0]) < eraSortKey(b[0]) ? 1 : -1))
     .map(([k, v]) => `- ${k}: ${v}`);
-  out.push([olderLines.join("\n"), t.legacyOlder].filter(Boolean).join("\n\n").trim() || "_(none yet)_");
+  const older = [olderLines.join("\n"), t.legacyOlder].filter(Boolean).join("\n\n").trim();
+  if (older) out.push("", TIER_HEADERS.older, older);
   if (includeGroup) {
     out.push("", TIER_HEADERS.group);
     out.push(t.group.length ? t.group.join("\n") : "_(none yet)_");
@@ -357,23 +398,6 @@ function firstArchivedMs(cdb, convs) {
   return first;
 }
 
-// DST-safe Pacific-day stepping. lib/weeks has no prev/next-day primitive, but
-// dayStart() re-anchors ANY instant to its 04:00-Pacific day start, so nudging by
-// more than the ±1h DST shift and re-anchoring steps whole Pacific days reliably.
-const prevDayStart = (ds) => dayStart(ds - 2 * HOUR);
-const nextDayStart = (ds) => dayStart(ds + 26 * HOUR);
-
-// The 04:00-Pacific day starts for the daily tier window, index i = i days before
-// today (today = index 0). ANCHORED TO THE PACIFIC CALENDAR, not a rolling 24h
-// window off Date.now() — so a day's key is the same whether the run fires at 04:00
-// or 15:00, and it never skips/collides a date across a DST transition. This is the
-// fix for the old `now - (d+1)*DAY` keying.
-function dayStartsForDaily(now) {
-  const out = [dayStart(now)];
-  for (let i = 1; i < DAILY_UNTIL_DAYS; i++) out.push(prevDayStart(out[i - 1]));
-  return out;
-}
-
 // The Monday-04:00-Pacific week key a daily key ("YYYY-MM-DD") belongs to. Uses a
 // mid-day instant (far from any DST edge) so weekStart lands on the correct Monday
 // regardless of that date's offset. Lets the daily-deletion rule find a daily's
@@ -383,66 +407,41 @@ function weekKeyOfDay(dayKey) {
   return dateKey(weekStart(Date.UTC(y, mo - 1, d, 19, 0)));
 }
 
-// Mutates `t` (daily/weekly/older maps). Returns { summaries, attempts,
-// newDailies, historyFrom, foldedOut }. `foldedTo` is the era-fold watermark from
-// state: every weekly key ≤ it has already been distilled.
-function buildConvTiers(cdb, convs, who, since, now, t, foldedTo) {
+// The Monday-04:00-Pacific week's start instant for a week key ("YYYY-MM-DD", the
+// week's Monday). Mid-day anchor for the same DST reason as weekKeyOfDay.
+function weekStartOfKey(weekKey) {
+  const [y, mo, d] = weekKey.split("-").map(Number);
+  return weekStart(Date.UTC(y, mo - 1, d, 19, 0));
+}
+
+// Mutates `t` (daily/weekly/monthly/older maps). Returns { summaries, attempts,
+// newWeeklies, historyFrom }.
+function buildConvTiers(cdb, convs, who, since, now, t) {
   let summaries = 0;
   let attempts = 0; // model calls this run WOULD make — the cost preview under --no-llm
-  const newDailies = new Map();
-  // Daily: ensure a one-line summary for each 04:00-Pacific day in
-  // [DAILY_FROM_DAYS, DAILY_UNTIL) that aged out after tiering started. Every day in
-  // this window is COMPLETE (the current ~week is excluded, so a partial day is never
-  // frozen under its key — and, with the raw tier gone, the recent week simply isn't
-  // in the Timeline). Days are anchored to the Pacific calendar (see dayStartsForDaily)
-  // so the key and the summarized window match and are stable across run time-of-day
-  // and DST.
-  const days = dayStartsForDaily(now);
-  for (let d = DAILY_FROM_DAYS; d < DAILY_UNTIL_DAYS; d++) {
-    const ds = days[d];
-    if (ds < since) continue;
-    const key = dateKey(ds);
-    if (t.daily.has(key) || t.weekly.has(dateKey(weekStart(ds)))) continue;
-    const lines = messagesBetween(cdb, convs, ds, nextDayStart(ds)).lines;
-    if (lines.length === 0) continue;
-    attempts++;
-    const s = summarize(who, key, lines, "daily");
-    // A failed or skipped summary must NOT be stored. Storing it is permanent:
-    // the `t.daily.has(key)` guard above skips any filled key forever, so one
-    // transient model error would leave "(summary failed: …)" in the Timeline
-    // for good — and the Timeline step is the one whose raw lines get dropped, so
-    // there is nothing to regenerate from later. Leaving the key empty means
-    // the next run simply retries the day.
-    if (isBadSummary(s)) continue;
-    t.daily.set(key, s);
-    newDailies.set(key, s);
-    summaries++;
-  }
-  // Weekly: roll up whole Monday-04:00-Pacific weeks (lib/weeks.js's own week
-  // boundary — not an ISO-UTC week) older than DAILY_UNTIL, up to WEEKLY_UNTIL, then
-  // drop aged dailies. nextWeekStart is the only week-stepping primitive lib/weeks.js
-  // exports, so walk forward from the oldest candidate week rather than back from now.
-  // Keyed by the week's Monday date, so it sorts and reads like the daily keys.
+  const newWeeklies = new Map();
+  // Weekly: one line per whole Monday-04:00-Pacific week (lib/weeks.js's own week
+  // boundary — not an ISO-UTC week) that ENDED at least WEEKLY_AFTER_DAYS ago, from the
+  // raw messages. nextWeekStart is the only week-stepping primitive lib/weeks.js exports,
+  // so walk forward from the oldest candidate week rather than back from now. Keyed by
+  // the week's Monday date.
   //
-  // ONLY COMPLETE WEEKS. A week straddling dailyBoundary must wait: summarizing a
-  // clipped range would freeze under the week's key (`t.weekly.has` skips filled
-  // keys forever), and the days clipped off would age out of the daily tier with
-  // nowhere to go — silently vanishing from the Timeline.
-  const dailyBoundary = now - DAILY_UNTIL_DAYS * DAY;
-  const weeklyBoundary = now - WEEKLY_UNTIL_DAYS * DAY;
-  // Forward runs walk only the 21–70 day window; a --backfill walks from the
-  // first archived message, so every complete historical week gets its line —
-  // the same set of weeklies a pipeline running since day one would have built
-  // (dailies for fully rolled-up weeks would have been deleted anyway, so a
-  // single weekly pass per week reproduces the play-forward end state).
+  // ONLY COMPLETE WEEKS, and only once fully aged: summarizing a week still in progress
+  // would freeze a clipped range under its key (`t.weekly.has` skips filled keys forever).
+  const weeklyEnd = now - WEEKLY_AFTER_DAYS * DAY;
+  const monthBoundary = now - WEEKLY_UNTIL_DAYS * DAY;
+  // Forward runs walk the last ~10 weeks (so a week whose call failed is retried while it
+  // is still recent); a --backfill walks from the first archived message, so every
+  // complete historical week gets its line — the same set a pipeline running since day
+  // one would have built.
   let historyFrom = null;
-  let weeklyFrom = weekStart(weeklyBoundary);
+  let weeklyFrom = weekStart(monthBoundary);
   if (BACKFILL) {
     const first = firstArchivedMs(cdb, convs);
     if (first != null && weekStart(first) < weeklyFrom) weeklyFrom = weekStart(first);
     historyFrom = first;
   }
-  for (let wStart = weeklyFrom; nextWeekStart(wStart) <= dailyBoundary; wStart = nextWeekStart(wStart)) {
+  for (let wStart = weeklyFrom; nextWeekStart(wStart) <= weeklyEnd; wStart = nextWeekStart(wStart)) {
     if (wStart < since) continue;
     const key = dateKey(wStart);
     if (t.weekly.has(key)) continue;
@@ -450,52 +449,37 @@ function buildConvTiers(cdb, convs, who, since, now, t, foldedTo) {
     if (lines.length === 0) continue;
     attempts++;
     const wsum = summarize(who, `the week of ${key}`, lines, "weekly");
-    if (isBadSummary(wsum)) continue; // same permanence trap as the daily loop
+    // A failed or skipped summary must NOT be stored: the `t.weekly.has(key)` guard
+    // above skips any filled key forever, so one transient model error would leave
+    // "(summary failed: …)" in the Timeline for good. Leaving the key empty means the
+    // next run simply retries the week.
+    if (isBadSummary(wsum)) continue;
     t.weekly.set(key, wsum);
+    newWeeklies.set(key, wsum);
     summaries++;
   }
-  // Delete a daily ONLY once its week actually has a weekly summary. The old rule
-  // deleted any daily older than the current weekly window regardless of whether
-  // that week was ever summarized — so a first-run straddle week (skipped by the
-  // weekly loop's `wStart < since` guard) or a chronically-failing weekly lost its
-  // dailies with nowhere for the content to go: a permanent tier hole. Keeping the
-  // dailies of an un-summarized week preserves that content until (if ever) its
-  // weekly lands; a summarized week's dailies are redundant and dropped.
+  // LEGACY daily lines (from before week→month) drain here: drop a daily ONLY once its
+  // week actually has a weekly line — never before, or a week whose weekly failed would
+  // lose its content with nowhere to go (a permanent tier hole).
   for (const k of [...t.daily.keys()]) if (t.weekly.has(weekKeyOfDay(k))) t.daily.delete(k);
 
-  // ---- era fold: weeks aged past the weekly window distill into their
-  // season's note in the Older tier. Weekly lines are KEPT (Nathan's rule:
-  // every week stays viewable) — the era note is a distillation on top, not a
-  // replacement. Eras fold oldest-first and the watermark only advances
-  // through successes, so one failed model call simply retries next run
-  // without skipping anything. Forward runs fold a week or two at a time into
-  // the era's existing note (rewritten, never appended); a backfill hands an
-  // era all its weeks in one call.
-  let foldedOut = foldedTo || null;
-  const weeklyCutoffKey = dateKey(weekStart(weeklyBoundary));
-  const foldable = [...t.weekly.keys()]
-    .filter((k) => k < weeklyCutoffKey && (!foldedTo || k > foldedTo))
-    .sort();
-  const byEra = new Map(); // insertion order = chronological (keys sorted above)
-  for (const k of foldable) {
-    const era = eraKey(k);
-    if (!byEra.has(era)) byEra.set(era, []);
-    byEra.get(era).push(k);
-  }
-  for (const [era, weeks] of byEra) {
-    const lines = [];
-    const cur = t.older.get(era);
-    if (cur) lines.push(`Current era note (rewrite it to fold the new weeks in): ${cur}`);
-    for (const k of weeks) lines.push(`- week of ${k}: ${t.weekly.get(k)}`);
+  // ---- month fold: a calendar month fully older than the weekly window distills its
+  // weekly lines into ONE month note, once. Weekly lines are KEPT (Nathan's rule: every
+  // week stays viewable). No watermark and no rewrite loop: a month with a note is done,
+  // and a failed call just leaves the month unfolded for the next run to retry.
+  const cutoffMonth = monthKeyOfWeek(dateKey(weekStart(monthBoundary)));
+  const weeklyKeys = [...t.weekly.keys()].sort();
+  for (const mk of foldableMonths(weeklyKeys, t.monthly, cutoffMonth)) {
+    const lines = weeklyKeys.filter((k) => monthKeyOfWeek(k) === mk).map((k) => `- week of ${k}: ${t.weekly.get(k)}`);
     attempts++;
-    const note = summarize(who, eraName(era), lines, "era");
-    if (isBadSummary(note)) break; // watermark stays — this era retries next run
-    t.older.set(era, note.trim());
+    const note = summarize(who, monthName(mk), lines, "monthly");
+    if (isBadSummary(note)) continue;
+    t.monthly.set(mk, note.trim());
     summaries++;
-    foldedOut = weeks[weeks.length - 1];
   }
+  dropSupersededEras(t.older, weeklyKeys, t.monthly);
 
-  return { summaries, attempts, newDailies, historyFrom, foldedOut };
+  return { summaries, attempts, newWeeklies, historyFrom };
 }
 
 function backupAndWrite(file, next) {
@@ -518,9 +502,8 @@ function buildConversationTimeline({ cdb, convs, who, file, stateKey, state, now
   // gradient behind them is real, not a gap.
   const since = BACKFILL ? 0 : (prevSince != null ? prevSince : now);
 
-  const foldedTo = (state[stateKey] && state[stateKey].foldedTo) || null;
-  const { summaries, attempts, newDailies, historyFrom, foldedOut } =
-    buildConvTiers(cdb, convs, who, since, now, t, foldedTo);
+  const { summaries, attempts, newWeeklies, historyFrom } =
+    buildConvTiers(cdb, convs, who, since, now, t);
   const sinceOut = BACKFILL
     ? Math.min(historyFrom != null ? historyFrom : now, prevSince != null ? prevSince : now)
     : since;
@@ -543,6 +526,10 @@ function buildConversationTimeline({ cdb, convs, who, file, stateKey, state, now
       if (k) { if (seen.has(k)) continue; seen.add(k); }
       combined.push(l);
     }
+    // Newest first by the line's date key (stable), so the cap always keeps the most
+    // recent weeks — a group backfill folds its whole history in oldest-first.
+    const dk = (l) => (l.match(/^- (\d{4}-\d{2}-\d{2}) \[/) || [null, ""])[1];
+    combined.sort((a, b) => (dk(a) < dk(b) ? 1 : dk(a) > dk(b) ? -1 : 0));
     t.group = combined.slice(0, GROUP_ACTIVITY_MAX);
     if (combined.length > GROUP_ACTIVITY_MAX) {
       t.group.push(`- _(${combined.length - GROUP_ACTIVITY_MAX} ${GROUP_TRUNC})_`);
@@ -559,7 +546,7 @@ function buildConversationTimeline({ cdb, convs, who, file, stateKey, state, now
       fs.writeFileSync(file, next);
     }
   }
-  return { changed, summaries, attempts, since: sinceOut, foldedTo: foldedOut, next, newDailies };
+  return { changed, summaries, attempts, since: sinceOut, next, newWeeklies };
 }
 
 function buildContactTimeline(cdb, sdb, slug, state, now, foldLines, nameMap) {
@@ -622,24 +609,30 @@ function buildGroupTimeline(cdb, sdb, group, state, now) {
   });
   // Bi-groups (only other party besides me/bot is one person) are already
   // covered IN that person's own timeline via buildContactTimeline's sources — do
-  // not also fold their day-summaries into the profile, or everything would
+  // not also fold their weekly summaries into the profile, or everything would
   // appear twice.
   if (groupOthers(conv.members).length <= 1) {
-    return { slug: group.slug, name: group.name, participants: [], ...r };
+    return { slug: group.slug, name: group.name, participants: [], participantsByWeek: new Map(), ...r };
   }
-  // Map participants (tracked contacts who spoke recently) for folding.
-  const recent = messagesBetween(cdb, [convSpec], now - DAILY_UNTIL_DAYS * DAY, now).senders;
-  const participants = [];
-  for (const sid of recent) {
-    if (sid === BOT_SERVICE_ID) continue;
-    const c = cdb.prepare("SELECT file_path FROM contacts WHERE signal_id = ?").get(sid);
-    if (c && c.file_path && c.file_path.startsWith("data/contacts/")) {
-      const pslug = c.file_path.replace("data/contacts/", "").replace(/\.md$/, "");
-      // Don't fold group activity into the owner's own profile.
-      if (pslug !== "nathan") participants.push(pslug);
+  // Map each NEW weekly line to the tracked contacts who spoke THAT week, so a week's
+  // group summary folds only into the profiles of people who were actually in it.
+  const participantsByWeek = new Map();
+  const all = new Set();
+  for (const wk of (r.newWeeklies || new Map()).keys()) {
+    const ws = weekStartOfKey(wk);
+    const ps = [];
+    for (const sid of messagesBetween(cdb, [convSpec], ws, nextWeekStart(ws)).senders) {
+      if (sid === BOT_SERVICE_ID) continue;
+      const c = cdb.prepare("SELECT file_path FROM contacts WHERE signal_id = ?").get(sid);
+      if (c && c.file_path && c.file_path.startsWith("data/contacts/")) {
+        const pslug = c.file_path.replace("data/contacts/", "").replace(/\.md$/, "");
+        // Don't fold group activity into the owner's own profile.
+        if (pslug !== "nathan" && !ps.includes(pslug)) { ps.push(pslug); all.add(pslug); }
+      }
     }
+    participantsByWeek.set(wk, ps);
   }
-  return { slug: group.slug, name: group.name, participants, ...r };
+  return { slug: group.slug, name: group.name, participants: [...all], participantsByWeek, ...r };
 }
 
 // The tracked MULTI-groups a contact belongs to. A per-contact run (--slug, and
@@ -723,10 +716,10 @@ function main() {
   // keeps the state of everything already done.
   const writeState = () => { if (WRITE) writeJsonAtomic(TIMELINE_STATE, state); };
 
-  // Phase 1: groups first, so their new day-summaries can fold into participant profiles.
+  // Phase 1: groups first, so their new weekly summaries can fold into participant profiles.
   // DURABLE FOLD QUEUE (H4). A crash between a group's day being written (here) and that day
   // being folded into participants (Phase 2) used to lose the fold line forever: the next
-  // run's group build saw the day already present and emitted no newDailies, so nothing
+  // run's group build saw the week already present and emitted no newWeeklies, so nothing
   // re-folded. So each group's fold lines are mirrored into state._pendingFolds and persisted
   // ATOMICALLY TOGETHER with the group's state advance; Phase 2 clears a contact's entry only
   // once it has absorbed the lines. A crash just replays them next run — idempotently, thanks
@@ -744,19 +737,23 @@ function main() {
     if (r.changed) changedCount += 1;
     summariesCount += r.summaries || 0;
     console.log(`- group ${g.slug} (${r.name}): summaries=${r.summaries}/${r.attempts} participants=[${r.participants.join(", ")}] changed=${r.changed}`);
-    const groupLines = (r.newDailies || []).map(([date, summary]) => `- ${date} [${r.name}]: ${summary}`);
-    for (const line of groupLines) {
-      for (const slug of r.participants) {
+    // One fold line per new weekly group summary, routed to the people who spoke that week.
+    const groupFolds = [...(r.newWeeklies || new Map())].map(([week, summary]) => ({
+      line: `- ${week} [${r.name}]: ${summary}`,
+      to: (r.participantsByWeek && r.participantsByWeek.get(week)) || [],
+    }));
+    for (const { line, to } of groupFolds) {
+      for (const slug of to) {
         if (!foldByContact.has(slug)) foldByContact.set(slug, []);
         foldByContact.get(slug).push(line);
       }
     }
     if (WRITE) {
-      state[`group:${g.slug}`] = { since: r.since, foldedTo: r.foldedTo || undefined, ranAt: now };
+      state[`group:${g.slug}`] = { since: r.since, ranAt: now };
       // Mirror this group's folds into the durable queue, then persist state + queue together.
       state._pendingFolds = state._pendingFolds || {};
-      for (const line of groupLines) {
-        for (const slug of r.participants) {
+      for (const { line, to } of groupFolds) {
+        for (const slug of to) {
           (state._pendingFolds[slug] = state._pendingFolds[slug] || []).push(line);
         }
       }
@@ -777,7 +774,7 @@ function main() {
     summariesCount += r.summaries || 0;
     console.log(`- ${slug} (${r.name}): summaries=${r.summaries}/${r.attempts} changed=${r.changed}`);
     if (WRITE) {
-      state[slug] = { since: r.since, foldedTo: r.foldedTo || undefined, ranAt: now };
+      state[slug] = { since: r.since, ranAt: now };
       // This contact has absorbed its group-activity folds into its own profile — drop them
       // from the durable queue so they aren't replayed.
       if (state._pendingFolds) delete state._pendingFolds[slug];
@@ -844,7 +841,7 @@ function printTimeline(next) {
 
 // Pure tiering helpers exposed for evals/timeline-tiers-selftest.js. Requiring this
 // module does not run main() (guarded below), so the test can import these directly.
-module.exports = { dayStartsForDaily, weekKeyOfDay, prevDayStart, nextDayStart };
+module.exports = { weekKeyOfDay, weekStartOfKey, monthKeyOfWeek, monthName, foldableMonths, dropSupersededEras, STYLE_INSTRUCTION };
 
 if (require.main === module) {
   // Cross-process pipeline lock (see lib/pipeline-lock.js). The Timeline step

@@ -22,13 +22,18 @@ Ordered roughly by how much they matter, not by effort.
   - Validate v8 vs G: deterministic checks as the floor, judge as a screen only (its
     F-lean inverted Nathan's blind votes 4 of 12), one arena session as the ranking
     signal — insights over tallies.
-- [ ] **`nathan.md` self-pass — decide only the schema now.** The pass itself runs
-  post-backfill (the archive rebuilds it anytime), but if the self-profile wants
-  sections the contact template lacks, deciding that before the backfill is free and
-  after it is not. Design agreed 2026-08-04: monthly wide-context pass, single
-  writer, contact merges never touch it; skeleton from Timeline tiers, evidence
-  from a raw pull of Nathan's own outgoing messages; big-picture only (goals,
-  beliefs, preferences, career direction, cross-cutting relationship patterns).
+- [ ] **`nathan.md` self-profile — same pipeline as a contact, inverted.**
+  Redesigned 2026-09-22 (supersedes the 2026-08-04 "monthly wide-context pass" plan):
+  Nathan gets prose + structured facts + Timeline exactly like every contact. Its own
+  SEPARATE merge stream (never piggybacked on contact merges — that would duplicate
+  content on every contact Rebuild, break chronology during a backfill, and count group
+  messages once per member). Sources = every archived conversation; chunks chronological
+  (oldest week first, busy weeks day-split at the 40k cap); within a chunk, lines are
+  GROUPED BY CONVERSATION, every line labeled `(DM: Name)` / `(Group)`. Own model
+  dropdown in the UI. Prompts drafted by Fable, awaiting Nathan's sign-off:
+  `prompts/self-merge.md` (structurally parallel to merge.md, third-person voice) and
+  `prompts/self-compact.md`. Not built yet: the planner/ledger/merge/timeline plumbing,
+  the `nathan.md` stub (Relationship `_self_`), and the UI picker.
 
 (Timeline v3, sandbox realism, and provenance ranges all shipped 2026-08-04. The
 K3 numbers are still upper bounds until the awareness rate is re-measured under the

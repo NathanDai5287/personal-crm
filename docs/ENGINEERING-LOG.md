@@ -1730,3 +1730,41 @@ ingest record since 2026-09-09 was hand-started.) Fix: minmus
 minmus; they are not in this repo. 04:20 Pacific is 11:20/12:20 UTC, off-peak for DeepSeek.
 Gotcha: changing `OnCalendar` on a `Persistent=true` timer and running `daemon-reload` fires the
 unit immediately as a "missed" run. It was harmless here only because ingest was paused.
+
+### Timeline tiers: week → month for every profile (2026-09-22)
+Nathan's call: the Timeline is "a week by week summary that turns into a month by month
+summary". Replaced the daily tier (days 7–21) and the season era notes with:
+- **Weekly log** — one line per Monday-04:00-Pacific week, written once the week ENDED ≥7 days
+  ago, from raw messages (unchanged weekly style string).
+- **Monthly log** — one note per calendar month (a week belongs to the month of its Monday),
+  folded ONCE from the month's weekly lines when the month is fully older than 70 days. No
+  rewrite loop and no watermark: a month with a note is done. `foldedTo` state is retired.
+Weekly lines are still kept forever (Nathan's standing rule — also in lib/view/markdown.js).
+Group activity now folds a group's WEEKLY lines, routed only to the tracked contacts who spoke
+that week, and the capped list is sorted newest-first so a group backfill can't fill the cap
+with its oldest weeks.
+
+Why it is cheaper: the daily tier read the raw messages, then was deleted once the weekly
+line re-read the SAME raw messages; eras rewrote their note on every weekly fold. Now raw is
+read once, and a month is one call over 4–5 weekly lines: ~2 calls per active week per
+profile instead of up to 9.
+
+Legacy handling: old daily lines drain as before (dropped only once their week has a weekly
+line); a season era note is dropped only once every month of that season that has weekly
+lines has its month note — a season with no weekly lines keeps its note, since in an old
+profile it may be the only record. `### Older` now renders only when non-empty.
+
+Expected a migration cost; there is none. A `--dry-run --no-llm` of the new code on minmus
+showed every Timeline empty: all profiles were rebuilt 2026-09-06..09 and the Timeline only
+builds forward from its `since`, which no ingest has reached yet (ingest paused + the
+timer collision above). Estimated full `--timeline-backfill` for all 26 contacts + the self
+profile: 565+66 weekly and 190+17 monthly calls over ~7M raw input tokens ≈ **$1.55 on
+deepseek-flash off-peak, ≈ $32 on kimi-k3**.
+
+The monthly style string and the one-line `prompts/compact.md` change are Fable-authored and
+held for Nathan's sign-off. Tests: evals/timeline-tiers-selftest.js rewritten (38 assertions:
+week keys incl. DST, legacy-daily drain, month fold, era supersession).
+
+Gotcha while editing: a `node - <<'EOF'` heredoc through this machine's Git Bash collapses
+`\\` to `\`, which silently stripped the backslashes out of a regex (`\d` became `d`). Edits
+containing backslashes go through a script file or the Edit tool, never a shell heredoc.

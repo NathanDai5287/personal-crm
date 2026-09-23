@@ -686,8 +686,8 @@ function main() {
     // INGEST'S SECOND HALF: a single-contact run builds that contact's Timeline
     // right after ingesting them, so one dashboard "Ingest" does both halves; a
     // full run builds everyone's. The Timeline step makes one pi call per aged-out
-    // day/week per conversation, so first runs after a gap can take a while — half
-    // an hour. --timeline-backfill makes step 5 build tiers from the whole archived
+    // week per conversation plus one per aged-out month, so first runs after a gap can
+    // take a while. --timeline-backfill makes step 5 build tiers from the whole archived
     // history (crm-timeline --backfill) — the flag for a post-wipe re-backfill,
     // so profile AND timeline regenerate in the same pass. Explicit only; a
     // normal nightly run must never re-walk history.
