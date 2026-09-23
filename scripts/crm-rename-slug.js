@@ -120,7 +120,7 @@ function main() {
 
   const factKeys = count('SELECT COUNT(*) n FROM facts WHERE substr(identity_key, 1, ?) = ?', oldSlug.length + 1, `${oldSlug}|`);
   console.log(`  facts.identity_key: ${factKeys} row(s)`);
-  for (const line of renameSideStores(false)) console.log(`  ${line}`);
+  if (!WRITE) for (const line of renameSideStores(false)) console.log(`  ${line}`);
 
   if (!WRITE) {
     console.log('\nDry-run — nothing changed. Back up crm.db (node scripts/crm-backup.js), then re-run with --write.');
