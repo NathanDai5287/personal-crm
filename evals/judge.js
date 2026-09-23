@@ -332,4 +332,4 @@ function main() {
 }
 
 if (require.main === module) main();
-module.exports = { withoutTimeline, reconcile, extractJson };
+module.exports = { withoutTimeline, reconcile, extractJson, SYSTEM, buildUser, DIMENSIONS };
