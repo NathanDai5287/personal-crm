@@ -1692,3 +1692,28 @@ Result: **imported 316** (ids 100098668–100098983); minmus 95,922 → **96,238
 rows are unmerged, so the next ingest folds them into their contacts' profiles (backfill ==
 play-forward). Pre-import backup: `data/crm.db.pre-import-20260823-231808.bak` on minmus.
 `crm-import-archive.js` is reusable for any future second-machine fold.
+
+### DeepSeek V4.1 Flash added; off-peak pricing modelled in lib/cost.js (2026-09-22)
+pi 0.83 supports DeepSeek natively (provider `deepseek`, key in `~/.pi/agent/auth.json`); the
+catalog id for "V4.1 Flash" is **`deepseek/deepseek-flash`** (not `deepseek-v4.1-flash` — verified
+against the minmus models-store after `pi update --models`). Key installed on minmus and duna.
+Smoke-tested on minmus, including a read+edit tool round trip (the merge's tool set).
+
+Expected pi's reported cost to be the billed cost; it is not for DeepSeek. DeepSeek bills half
+price off-peak (peak = 01:00-04:00 and 06:00-10:00 **UTC**, Mon-Fri), but pi's catalog carries
+only the peak rate and writes `cost.total` into each session turn at that rate. Decision:
+`lib/cost.js` `rateFactor(model, atMs)` applies 0.5 off-peak — per turn from the turn's own
+`message.timestamp` for actuals, at `opts.atMs` for estimates — and `fitCostModel` divides it back
+out so peak and off-peak samples fit one set of coefficients. The windows are deliberately UTC
+(the provider's billing clock), the one exception to Pacific-everywhere. Chinese public holidays
+(also off-peak) are not modelled, so a holiday run is over-, never under-estimated. The weekly
+ingest timer (Mon 04:00 Pacific = 11:00/12:00 UTC) already lands off-peak.
+
+Surprise: `pi -p` run over a bare `ssh host 'pi -p …'` hangs indefinitely with no output — it
+waits on the ssh-held stdin. `</dev/null` fixes it (1.8s). Production is unaffected (systemd
+gives services a null stdin), but any hand-run pi test over ssh needs the redirect.
+
+Also found: pi's **anthropic** OAuth refresh token is expired on BOTH minmus (access expired
+2026-09-12) and duna (`invalid_grant: Refresh token expired`). `pi update --models` aborts on the
+anthropic step (the other providers still refresh), and any `anthropic/*` model picked in the UI
+would fail on minmus until `pi` is re-logged-in there.
