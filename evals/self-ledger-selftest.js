@@ -94,9 +94,16 @@ const ok = (cond, msg) => { assert.ok(cond, msg); pass += 1; };
   c.run('c-grp', 'group', 'Hike crew', null, 'sid-s');
   c.run('c-nts', 'private', null, MY_SERVICE_ID, null);
   c.run('c-bot', 'private', null, BOT_SERVICE_ID, null);
-  const convs = selfConversations(cdb, sdb, new Map([['sid-k', 'Katia']]));
-  ok(JSON.stringify(convs.map((x) => x.convId)) === '["c-dm","c-grp"]', 'Note to Self and the bot DM are excluded');
-  ok(convs[0].label === 'DM: Katia', 'DM label uses the Signal name');
+  // An alias DM: Signal's conversation row carries the old identity ('sid-old', profile
+  // name "Big K"), but the archive files it under the tracked contact katia.
+  ins.run(7, 'c-old', 'DM with Katia Jacoby', 'katia', 7000, 'Katia', 'old acct', 'sid-old', 'incoming');
+  c.run('c-old', 'private', null, 'sid-old', null);
+  cdb.exec('CREATE TABLE contacts (name TEXT, signal_id TEXT, file_path TEXT)');
+  cdb.prepare('INSERT INTO contacts VALUES (?,?,?)').run('Katia Jacoby', 'sid-k', 'data/contacts/katia.md');
+  const convs = selfConversations(cdb, sdb, new Map([['sid-k', 'Katia'], ['sid-old', 'Big K']]));
+  ok(JSON.stringify(convs.map((x) => x.convId)) === '["c-dm","c-grp","c-old"]', 'Note to Self and the bot DM are excluded');
+  ok(convs[0].label === 'DM: Katia', "DM label is the tracked contact's Signal name");
+  ok(convs[2].label === 'DM: Katia', 'an alias DM is labelled with the contact, not the old profile name');
   ok(convs[1].label === 'Hike crew' && convs[1].kind === 'group', 'group label is the group name');
   const noSdb = selfConversations(cdb, null);
   ok(noSdb.find((x) => x.convId === 'c-dm').label === 'DM: Katia Jacoby', 'without Signal, the archive label is the fallback');
